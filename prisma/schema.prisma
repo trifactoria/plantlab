@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id                    String   @id @default(cuid())
+  name                  String
+  description           String?
+  gridWidth             Int
+  gridHeight            Int
+  photoIntervalMinutes  Int
+  localPhotoDirectory   String
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  plants Plant[]
+  photos Photo[]
+  events PlantEvent[]
+}
+
+model Plant {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  tags      String?
+  notes     String?
+  gridX     Int
+  gridY     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  PlantEvent[]
+
+  @@unique([projectId, gridX, gridY])
+  @@index([projectId])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  projectId String
+  filename  String
+  path      String
+  timestamp DateTime
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  PlantEvent[]
+
+  @@unique([projectId, path])
+  @@index([projectId, timestamp])
+}
+
+model PlantEvent {
+  id        String   @id @default(cuid())
+  projectId String
+  plantId   String
+  photoId   String?
+  type      String
+  notes     String?
+  timestamp DateTime
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  plant   Plant   @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  photo   Photo?  @relation(fields: [photoId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, timestamp])
+  @@index([plantId, timestamp])
+  @@index([photoId])
+}

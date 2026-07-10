@@ -1,0 +1,31 @@
+{
+  "name": "plantlab",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "camera:capture": "tsx scripts/camera-capture.ts",
+    "camera:list": "tsx scripts/camera-list.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "@tailwindcss/postcss": "4.3.2",
+    "next": "15.5.20",
+    "prisma": "6.19.3",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "tailwindcss": "4.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
