@@ -12,7 +12,9 @@
     "camera:capture": "tsx scripts/camera-capture.ts",
     "camera:list": "tsx scripts/camera-list.ts",
     "camera:watch": "tsx scripts/camera-watch.ts",
+    "camera:service": "tsx scripts/camera-service.ts",
     "test:e2e": "playwright test tests/e2e.spec.ts",
+    "test:unit": "vitest run",
     "screenshots": "playwright test tests/screenshots.spec.ts"
   },
   "dependencies": {
@@ -32,6 +34,7 @@
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   }
 }

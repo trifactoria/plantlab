@@ -11,9 +11,11 @@ type Camera = {
 export function CameraSelect({
   defaultDevice,
   defaultName,
+  onDeviceChange,
 }: {
   defaultDevice?: string | null;
   defaultName?: string | null;
+  onDeviceChange?: (device: string) => void;
 }) {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selectedDevice, setSelectedDevice] = useState(defaultDevice ?? "");
@@ -22,6 +24,11 @@ export function CameraSelect({
 
   const selectedCamera = cameras.find((camera) => camera.device === selectedDevice);
   const selectedName = selectedCamera?.name ?? (selectedDevice ? defaultName ?? "" : "");
+
+  useEffect(() => {
+    onDeviceChange?.(selectedDevice);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDevice]);
 
   async function loadCameras() {
     setLoading(true);

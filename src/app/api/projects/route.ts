@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
+import { validateCaptureConfig } from "@/lib/captureEligibility";
 import {
   badRequest,
   nullableDate,
@@ -31,6 +32,26 @@ export async function POST(request: Request) {
     const localPhotoDirectory = useDefaultPhotoDirectory
       ? defaultProjectPhotoDirectory(projectId)
       : requiredString(body?.localPhotoDirectory, "localPhotoDirectory");
+    const captureStartAt = optionalDate(body?.captureStartAt);
+    const photoIntervalMinutes = requiredPositiveInt(
+      body?.photoIntervalMinutes,
+      "photoIntervalMinutes",
+    );
+    const cameraDevice = optionalString(body?.cameraDevice);
+    const captureEnabled = body?.captureEnabled === true;
+
+    if (captureEnabled) {
+      const errors = validateCaptureConfig({
+        captureStartAt,
+        photoIntervalMinutes,
+        cameraDevice,
+        localPhotoDirectory,
+      });
+
+      if (errors.length > 0) {
+        return badRequest(errors.join(" "));
+      }
+    }
 
     const project = await prisma.project.create({
       data: {
@@ -39,15 +60,13 @@ export async function POST(request: Request) {
         description: optionalString(body?.description),
         gridWidth: requiredPositiveInt(body?.gridWidth, "gridWidth"),
         gridHeight: requiredPositiveInt(body?.gridHeight, "gridHeight"),
-        photoIntervalMinutes: requiredPositiveInt(
-          body?.photoIntervalMinutes,
-          "photoIntervalMinutes",
-        ),
-        captureStartAt: optionalDate(body?.captureStartAt),
+        photoIntervalMinutes,
+        captureStartAt,
+        captureEnabled,
         plantedAt:
           body?.plantedAt === undefined ? null : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory,
-        cameraDevice: optionalString(body?.cameraDevice),
+        cameraDevice,
         cameraName: optionalString(body?.cameraName),
         cameraProfileId: optionalString(body?.cameraProfileId),
       },

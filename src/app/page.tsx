@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ProjectForm } from "@/components/ProjectForm";
+import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 
@@ -12,6 +13,8 @@ export default async function HomePage() {
       },
     },
   });
+  const canManageLocally =
+    process.env.NODE_ENV !== "production" || process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1";
 
   return (
     <main className="min-h-screen">
@@ -25,6 +28,14 @@ export default async function HomePage() {
           </h1>
         </div>
       </header>
+
+      {canManageLocally ? (
+        <section className="section pb-0">
+          <div className="container">
+            <ServiceStatusPanel />
+          </div>
+        </section>
+      ) : null}
 
       <section className="section">
         <div className="container grid gap-6 lg:grid-cols-[1fr_420px]">

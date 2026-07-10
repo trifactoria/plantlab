@@ -4,6 +4,7 @@ import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
+import { validateCaptureConfig } from "@/lib/captureValidation";
 import { toDateTimeLocal } from "@/lib/format";
 
 type ProjectSettings = {
@@ -14,6 +15,7 @@ type ProjectSettings = {
   gridHeight: number;
   photoIntervalMinutes: number;
   captureStartAt: string;
+  captureEnabled: boolean;
   plantedAt: string | null;
   localPhotoDirectory: string;
   cameraDevice: string | null;
@@ -29,17 +31,34 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
   const [plantingUnknown, setPlantingUnknown] = useState(project.plantedAt === null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cameraDevice, setCameraDevice] = useState(project.cameraDevice ?? "");
+  const [photoIntervalMinutes, setPhotoIntervalMinutes] = useState(
+    String(project.photoIntervalMinutes),
+  );
+  const [captureStartAt, setCaptureStartAt] = useState(toDateTimeLocal(project.captureStartAt));
+  const [captureEnabled, setCaptureEnabled] = useState(project.captureEnabled);
+
+  const captureErrors = validateCaptureConfig({
+    captureStartAt: captureStartAt || null,
+    photoIntervalMinutes: Number.parseInt(photoIntervalMinutes, 10),
+    cameraDevice: cameraDevice || null,
+    localPhotoDirectory: useCustomFolder ? photoDirectory : project.localPhotoDirectory,
+  });
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSaving(true);
     setMessage(null);
     setError(null);
 
+    if (captureEnabled && captureErrors.length > 0) {
+      setError(captureErrors.join(" "));
+      return;
+    }
+
+    setSaving(true);
+
     const formData = new FormData(event.currentTarget);
-    const customDirectory = useCustomFolder
-      ? String(formData.get("localPhotoDirectory"))
-      : undefined;
+    const customDirectory = useCustomFolder ? photoDirectory : undefined;
     const response = await fetch(`/api/projects/${project.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -48,13 +67,14 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
         description: formData.get("description"),
         gridWidth: formData.get("gridWidth"),
         gridHeight: formData.get("gridHeight"),
-        photoIntervalMinutes: formData.get("photoIntervalMinutes"),
-        captureStartAt: new Date(String(formData.get("captureStartAt"))).toISOString(),
+        photoIntervalMinutes,
+        captureStartAt: new Date(captureStartAt).toISOString(),
+        captureEnabled,
         plantedAt: plantingUnknown
           ? null
           : new Date(String(formData.get("plantedAt"))).toISOString(),
         localPhotoDirectory: customDirectory,
-        cameraDevice: formData.get("cameraDevice"),
+        cameraDevice,
         cameraName: formData.get("cameraName"),
       }),
     });
@@ -113,7 +133,15 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           </label>
           <label className="field">
             Photo interval
-            <input className="input" name="photoIntervalMinutes" type="number" min="1" defaultValue={project.photoIntervalMinutes} required />
+            <input
+              className="input"
+              name="photoIntervalMinutes"
+              type="number"
+              min="1"
+              value={photoIntervalMinutes}
+              onChange={(event) => setPhotoIntervalMinutes(event.target.value)}
+              required
+            />
           </label>
         </div>
 
@@ -145,7 +173,8 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
             className="input"
             name="captureStartAt"
             type="datetime-local"
-            defaultValue={toDateTimeLocal(project.captureStartAt)}
+            value={captureStartAt}
+            onChange={(event) => setCaptureStartAt(event.target.value)}
             required
           />
         </label>
@@ -153,6 +182,7 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
         <CameraSelect
           defaultDevice={project.cameraDevice}
           defaultName={project.cameraName}
+          onDeviceChange={setCameraDevice}
         />
 
         <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">
@@ -188,6 +218,24 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
                 </p>
               ) : null}
             </>
+          ) : null}
+        </div>
+
+        <div className="grid gap-2 rounded-md border border-stone-200 bg-stone-50 p-3">
+          <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+            <input
+              type="checkbox"
+              checked={captureEnabled}
+              onChange={(event) => setCaptureEnabled(event.target.checked)}
+            />
+            Enable scheduled capture
+          </label>
+          {captureEnabled && captureErrors.length > 0 ? (
+            <ul className="list-disc pl-5 text-sm text-amber-800">
+              {captureErrors.map((captureError) => (
+                <li key={captureError}>{captureError}</li>
+              ))}
+            </ul>
           ) : null}
         </div>
 

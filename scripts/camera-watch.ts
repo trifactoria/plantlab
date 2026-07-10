@@ -1,3 +1,6 @@
+// Development/debugging command for watching a single project's schedule.
+// The long-term, multi-project operating mode is `pnpm camera:service`
+// (see scripts/camera-service.ts), which does not require a project id.
 import { captureProjectPhoto } from "../src/lib/camera";
 import { formatDateTime } from "../src/lib/format";
 import { prisma } from "../src/lib/prisma";

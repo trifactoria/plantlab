@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
+import { checkCaptureEligibility } from "@/lib/captureEligibility";
 import {
   badRequest,
   nullableDate,
@@ -90,6 +91,35 @@ export async function PATCH(request: Request, context: Context) {
       }
     }
 
+    const nextPhotoIntervalMinutes =
+      body?.photoIntervalMinutes === undefined
+        ? undefined
+        : requiredPositiveInt(body.photoIntervalMinutes, "photoIntervalMinutes");
+    const nextCaptureStartAt =
+      body?.captureStartAt === undefined
+        ? undefined
+        : optionalDate(body.captureStartAt, existingProject.captureStartAt);
+    const nextCameraDevice =
+      body?.cameraDevice === undefined ? undefined : optionalString(body.cameraDevice);
+    const nextCaptureEnabled =
+      body?.captureEnabled === undefined ? undefined : body.captureEnabled === true;
+
+    const mergedCaptureEnabled = nextCaptureEnabled ?? existingProject.captureEnabled;
+
+    if (mergedCaptureEnabled) {
+      const eligibility = await checkCaptureEligibility({
+        captureEnabled: true,
+        captureStartAt: nextCaptureStartAt ?? existingProject.captureStartAt,
+        photoIntervalMinutes: nextPhotoIntervalMinutes ?? existingProject.photoIntervalMinutes,
+        cameraDevice: nextCameraDevice ?? existingProject.cameraDevice,
+        localPhotoDirectory: nextPhotoDirectory ?? existingProject.localPhotoDirectory,
+      });
+
+      if (!eligibility.eligible) {
+        return badRequest(eligibility.errors.join(" "));
+      }
+    }
+
     const project = await prisma.project.update({
       where: { id: projectId },
       data: {
@@ -98,24 +128,15 @@ export async function PATCH(request: Request, context: Context) {
           body?.description === undefined ? undefined : optionalString(body.description),
         gridWidth: nextGridWidth,
         gridHeight: nextGridHeight,
-        photoIntervalMinutes:
-          body?.photoIntervalMinutes === undefined
-            ? undefined
-            : requiredPositiveInt(
-                body.photoIntervalMinutes,
-                "photoIntervalMinutes",
-              ),
-        captureStartAt:
-          body?.captureStartAt === undefined
-            ? undefined
-            : optionalDate(body.captureStartAt, existingProject.captureStartAt),
+        photoIntervalMinutes: nextPhotoIntervalMinutes,
+        captureStartAt: nextCaptureStartAt,
+        captureEnabled: nextCaptureEnabled,
         plantedAt:
           body?.plantedAt === undefined
             ? undefined
             : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory: nextPhotoDirectory,
-        cameraDevice:
-          body?.cameraDevice === undefined ? undefined : optionalString(body.cameraDevice),
+        cameraDevice: nextCameraDevice,
         cameraName:
           body?.cameraName === undefined ? undefined : optionalString(body.cameraName),
         cameraProfileId:

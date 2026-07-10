@@ -129,18 +129,16 @@ export default async function ProjectPage({ params }: PageProps) {
                   </dd>
                 </div>
                 <div>
+                  <dt className="font-medium text-stone-950">Scheduled capture</dt>
+                  <dd className="text-stone-600">{project.captureEnabled ? "Enabled" : "Disabled"}</dd>
+                </div>
+                <div>
                   <dt className="font-medium text-stone-950">Schedule start</dt>
                   <dd className="text-stone-600">{formatDateTime(project.captureStartAt)}</dd>
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Next capture</dt>
                   <dd className="text-stone-600">{formatDateTime(nextCaptureAt)}</dd>
-                </div>
-                <div>
-                  <dt className="font-medium text-stone-950">Watcher command</dt>
-                  <dd className="break-all font-mono text-xs text-stone-600">
-                    pnpm camera:watch -- {project.id}
-                  </dd>
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Photo directory</dt>

@@ -69,6 +69,7 @@ export async function seedVisualData() {
       gridHeight: 3,
       photoIntervalMinutes: 30,
       captureStartAt: new Date("2026-07-10T13:00:00.000Z"),
+      captureEnabled: true,
       plantedAt: new Date("2026-07-09T12:00:00.000Z"),
       localPhotoDirectory: photoDirectory,
       cameraDevice: "/dev/video-test",
@@ -224,6 +225,39 @@ export async function mockCameraApis(page: Page) {
             pixelFormat: "yuyv",
             description: "YUYV 4:2:2",
             resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/service-status**", async (route) => {
+    const now = new Date().toISOString();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        service: {
+          health: "running",
+          startedAt: now,
+          lastHeartbeat: now,
+          pid: 12345,
+          hostname: "playwright-mock",
+          version: null,
+          lastError: null,
+        },
+        activeProjectCount: 1,
+        nextScheduledCaptureAt: now,
+        projects: [
+          {
+            projectId: DEV_IDS.projectId,
+            name: "Playwright Radish Study",
+            captureEnabled: true,
+            eligible: true,
+            errors: [],
+            nextCaptureAt: now,
+            lastSuccessfulCaptureAt: now,
+            lastError: null,
           },
         ],
       }),

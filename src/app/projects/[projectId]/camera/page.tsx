@@ -62,11 +62,19 @@ export default async function ProjectCameraPage({ params }: PageProps) {
                   <dd className="text-stone-600">{formatDateTime(project.captureStartAt)}</dd>
                 </div>
                 <div>
+                  <dt className="font-medium text-stone-950">Scheduled capture</dt>
+                  <dd className="text-stone-600">{project.captureEnabled ? "Enabled" : "Disabled"}</dd>
+                </div>
+                <div>
                   <dt className="font-medium text-stone-950">Next aligned capture</dt>
                   <dd className="text-stone-600">{formatDateTime(nextCaptureAt)}</dd>
                 </div>
                 <div>
-                  <dt className="font-medium text-stone-950">Watcher command</dt>
+                  <dt className="font-medium text-stone-950">Capture service (long-term)</dt>
+                  <dd className="break-all font-mono text-xs text-stone-600">pnpm camera:service</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Single-project watcher (debug only)</dt>
                   <dd className="break-all font-mono text-xs text-stone-600">
                     pnpm camera:watch -- {project.id}
                   </dd>
@@ -85,6 +93,10 @@ export default async function ProjectCameraPage({ params }: PageProps) {
               cameraDevice={project.cameraDevice}
               cameraName={project.cameraName}
               cameraProfileId={project.cameraProfileId}
+              photoIntervalMinutes={project.photoIntervalMinutes}
+              captureStartAt={project.captureStartAt.toISOString()}
+              localPhotoDirectory={project.localPhotoDirectory}
+              initialCaptureEnabled={project.captureEnabled}
             />
           )}
         </div>

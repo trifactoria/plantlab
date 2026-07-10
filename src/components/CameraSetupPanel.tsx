@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
+import { validateCaptureConfig } from "@/lib/captureValidation";
 
 type CameraControl = {
   id: string;
@@ -39,14 +40,25 @@ export function CameraSetupPanel({
   cameraDevice,
   cameraName,
   cameraProfileId,
+  photoIntervalMinutes,
+  captureStartAt,
+  localPhotoDirectory,
+  initialCaptureEnabled,
 }: {
   projectId: string;
   cameraDevice: string | null;
   cameraName: string | null;
   cameraProfileId: string | null;
+  photoIntervalMinutes: number;
+  captureStartAt: string;
+  localPhotoDirectory: string;
+  initialCaptureEnabled: boolean;
 }) {
   const router = useRouter();
   const [savingCamera, setSavingCamera] = useState(false);
+  const [selectedCameraDevice, setSelectedCameraDevice] = useState(cameraDevice ?? "");
+  const [captureEnabled, setCaptureEnabled] = useState(initialCaptureEnabled);
+  const [captureToggleError, setCaptureToggleError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -84,22 +96,44 @@ export function CameraSetupPanel({
     );
   }
 
+  const captureErrors = validateCaptureConfig({
+    captureStartAt,
+    photoIntervalMinutes,
+    cameraDevice: selectedCameraDevice || null,
+    localPhotoDirectory,
+  });
+
   async function saveCamera(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setCaptureToggleError(null);
+
+    if (captureEnabled && captureErrors.length > 0) {
+      setCaptureToggleError(captureErrors.join(" "));
+      return;
+    }
+
     setSavingCamera(true);
 
     const formData = new FormData(event.currentTarget);
-    await fetch(`/api/projects/${projectId}`, {
+    const response = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         cameraDevice: formData.get("cameraDevice"),
         cameraName: formData.get("cameraName"),
         cameraProfileId: selectedProfileId || null,
+        captureEnabled,
       }),
     });
+    const payload = (await response.json()) as { error?: string };
 
     setSavingCamera(false);
+
+    if (!response.ok) {
+      setCaptureToggleError(payload.error ?? "Could not save camera settings.");
+      return;
+    }
+
     router.refresh();
     await loadControls();
     await loadFormats();
@@ -371,8 +405,34 @@ export function CameraSetupPanel({
       <form onSubmit={saveCamera} className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Project Camera</h2>
         <div className="mt-4">
-          <CameraSelect defaultDevice={cameraDevice} defaultName={cameraName} />
+          <CameraSelect
+            defaultDevice={cameraDevice}
+            defaultName={cameraName}
+            onDeviceChange={setSelectedCameraDevice}
+          />
         </div>
+
+        <div className="mt-4 grid gap-2 rounded-md border border-stone-200 bg-stone-50 p-3">
+          <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+            <input
+              type="checkbox"
+              checked={captureEnabled}
+              onChange={(event) => setCaptureEnabled(event.target.checked)}
+            />
+            Enable scheduled capture
+          </label>
+          {captureEnabled && captureErrors.length > 0 ? (
+            <ul className="list-disc pl-5 text-sm text-amber-800">
+              {captureErrors.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          ) : null}
+          {captureToggleError ? (
+            <p className="text-sm font-medium text-red-700">{captureToggleError}</p>
+          ) : null}
+        </div>
+
         <button className="button mt-4" disabled={savingCamera}>
           {savingCamera ? "Saving..." : "Save Camera"}
         </button>

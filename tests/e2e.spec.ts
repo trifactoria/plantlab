@@ -12,7 +12,7 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
 
   await goto(page, "/");
   await expect(page.getByRole("heading", { name: "Local plant experiment tracker" })).toBeVisible();
-  await expect(page.getByText("Playwright Radish Study")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Playwright Radish Study" })).toBeVisible();
 
   await page.getByLabel("Name").fill("Playwright Auto Folder Project");
   await expect(page.getByLabel("Camera")).toContainText("Mock USB Camera");

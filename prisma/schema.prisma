@@ -15,6 +15,7 @@ model Project {
   gridHeight            Int
   photoIntervalMinutes  Int
   captureStartAt        DateTime @default(now())
+  captureEnabled        Boolean  @default(false)
   plantedAt             DateTime?
   localPhotoDirectory   String
   cameraDevice          String?
@@ -26,6 +27,7 @@ model Project {
   plants        Plant[]
   photos        Photo[]
   events        PlantEvent[]
+  captureRuns   CaptureRun[]
   cameraProfile CameraProfile? @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
 }
 
@@ -59,8 +61,9 @@ model Photo {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  events  PlantEvent[]
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events      PlantEvent[]
+  captureRuns CaptureRun[]
 
   @@unique([projectId, path])
   @@index([projectId, timestamp])
@@ -104,4 +107,37 @@ model CameraProfile {
   projects Project[]
 
   @@index([cameraDevice])
+}
+
+// status: "running" | "success" | "failed" | "skipped"
+model CaptureRun {
+  id           String    @id @default(cuid())
+  projectId    String
+  scheduledFor DateTime
+  startedAt    DateTime?
+  completedAt  DateTime?
+  status       String
+  photoId      String?
+  errorMessage String?
+  cameraDevice String?
+  createdAt    DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  photo   Photo?  @relation(fields: [photoId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, scheduledFor])
+  @@index([status])
+}
+
+// Single row (id "capture-service") tracking the long-running capture service process.
+model ServiceStatus {
+  id            String   @id
+  name          String
+  startedAt     DateTime
+  lastHeartbeat DateTime
+  pid           Int?
+  hostname      String?
+  version       String?
+  lastError     String?
+  updatedAt     DateTime @updatedAt
 }
