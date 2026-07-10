@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { badRequest, notFound, optionalString, readJson, requiredString } from "@/lib/http";
+import {
+  badRequest,
+  notFound,
+  optionalDate,
+  optionalString,
+  readJson,
+  requiredString,
+} from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 
 type Context = {
@@ -37,6 +44,12 @@ export async function PATCH(request: Request, context: Context) {
         name: body?.name === undefined ? undefined : requiredString(body.name, "name"),
         tags: body?.tags === undefined ? undefined : optionalString(body.tags),
         notes: body?.notes === undefined ? undefined : optionalString(body.notes),
+        startLabel:
+          body?.startLabel === undefined
+            ? undefined
+            : requiredString(body.startLabel, "startLabel"),
+        startedAt:
+          body?.startedAt === undefined ? undefined : optionalDate(body.startedAt),
       },
     });
 

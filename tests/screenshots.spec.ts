@@ -35,6 +35,7 @@ for (const viewport of viewports) {
 
     await goto(page, `/projects/${ids.projectId}`);
     await capture(page, `${prefix}-project-dashboard`);
+    await capture(page, `${prefix}-manual-photo-upload`);
 
     await page.getByTestId("grid-cell-2-2").click();
     await capture(page, `${prefix}-create-plant-dialog`);
@@ -50,12 +51,17 @@ for (const viewport of viewports) {
     await goto(page, `/projects/${ids.projectId}/camera`);
     await capture(page, `${prefix}-camera-setup-idle`);
 
+    await goto(page, `/projects/${ids.projectId}/timeline`);
+    await capture(page, `${prefix}-project-timeline`);
+
     await goto(page, `/photos/${ids.photoId}`);
     await capture(page, `${prefix}-photo-detail`);
     await capture(page, `${prefix}-edit-photo-state`);
 
     await page.getByTestId("grid-cell-0-0").click();
     await capture(page, `${prefix}-add-event-dialog`);
+    await page.getByRole("button", { name: "Select crop from photo" }).click();
+    await capture(page, `${prefix}-event-crop-selector`);
     await page.getByRole("button", { name: "Cancel" }).click();
 
     await goto(page, `/plants/${ids.plantId}`);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   badRequest,
+  optionalDate,
   optionalString,
   readJson,
   requiredGridIndex,
@@ -46,6 +47,8 @@ export async function POST(request: Request) {
         notes: optionalString(body?.notes),
         gridX,
         gridY,
+        startLabel: optionalString(body?.startLabel) ?? "First visible",
+        startedAt: optionalDate(body?.startedAt),
       },
     });
 

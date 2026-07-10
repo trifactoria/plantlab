@@ -11,7 +11,10 @@ type PageProps = {
 
 export default async function ProjectCameraPage({ params }: PageProps) {
   const { projectId } = await params;
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { cameraProfile: true },
+  });
 
   if (!project) {
     notFound();
@@ -81,6 +84,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
               projectId={project.id}
               cameraDevice={project.cameraDevice}
               cameraName={project.cameraName}
+              cameraProfileId={project.cameraProfileId}
             />
           )}
         </div>

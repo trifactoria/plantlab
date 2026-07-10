@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cropData, cropFromBody } from "@/lib/crops";
 import {
   badRequest,
   optionalDate,
@@ -48,6 +49,11 @@ export async function POST(request: Request) {
       return badRequest("photoId belongs to a different project");
     }
 
+    const crop = cropFromBody(body);
+    if (crop && !photoId) {
+      return badRequest("A crop can only be saved when the event is linked to a photo.");
+    }
+
     const event = await prisma.plantEvent.create({
       data: {
         projectId: plant.projectId,
@@ -56,6 +62,7 @@ export async function POST(request: Request) {
         type: requiredString(body?.type, "type"),
         notes: optionalString(body?.notes),
         timestamp: optionalDate(body?.timestamp, photo?.timestamp ?? new Date()),
+        ...cropData(crop),
       },
     });
 

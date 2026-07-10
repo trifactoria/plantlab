@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cropData, cropFromBody } from "@/lib/crops";
 import {
   badRequest,
   notFound,
@@ -42,8 +43,10 @@ export async function PATCH(request: Request, context: Context) {
     }
 
     let nextPhotoId: string | null | undefined;
+    let effectivePhotoId = existingEvent.photoId;
     if (body?.photoId !== undefined) {
       nextPhotoId = optionalString(body.photoId);
+      effectivePhotoId = nextPhotoId;
 
       if (nextPhotoId) {
         const photo = await prisma.photo.findUnique({ where: { id: nextPhotoId } });
@@ -58,6 +61,13 @@ export async function PATCH(request: Request, context: Context) {
       }
     }
 
+    const crop = cropFromBody(body);
+    if (crop && !effectivePhotoId) {
+      return badRequest("A crop can only be saved when the event is linked to a photo.");
+    }
+
+    const nextCropData = nextPhotoId === null ? cropData(null) : cropData(crop);
+
     const event = await prisma.plantEvent.update({
       where: { id: eventId },
       data: {
@@ -68,6 +78,7 @@ export async function PATCH(request: Request, context: Context) {
             ? undefined
             : optionalDate(body.timestamp, existingEvent.timestamp),
         photoId: nextPhotoId,
+        ...nextCropData,
       },
     });
 

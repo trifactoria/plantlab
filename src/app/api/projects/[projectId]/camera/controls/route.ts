@@ -26,6 +26,49 @@ async function selectedDevice(projectId: string) {
   return { device };
 }
 
+function mockControls() {
+  return [
+    {
+      id: "focus_auto",
+      name: "Focus Auto",
+      type: "bool",
+      value: true,
+      readOnly: false,
+    },
+    {
+      id: "focus_absolute",
+      name: "Focus Absolute",
+      type: "int",
+      value: 20,
+      minimum: 0,
+      maximum: 255,
+      step: 5,
+      readOnly: false,
+    },
+    {
+      id: "exposure_auto",
+      name: "Exposure Auto",
+      type: "menu",
+      value: 3,
+      readOnly: false,
+      options: [
+        { value: 1, label: "Manual Mode" },
+        { value: 3, label: "Aperture Priority Mode" },
+      ],
+    },
+    {
+      id: "brightness",
+      name: "Brightness",
+      type: "int",
+      value: 128,
+      minimum: 0,
+      maximum: 255,
+      step: 1,
+      readOnly: false,
+    },
+  ];
+}
+
 export async function GET(_request: Request, context: Context) {
   const blocked = productionLocalOnlyResponse();
   if (blocked) {
@@ -37,6 +80,10 @@ export async function GET(_request: Request, context: Context) {
 
   if (result.error) {
     return result.error;
+  }
+
+  if (process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1" && result.device === "/dev/video-test") {
+    return NextResponse.json({ controls: mockControls() });
   }
 
   try {
@@ -69,6 +116,10 @@ export async function PATCH(request: Request, context: Context) {
 
     if (value === undefined || value === null) {
       return badRequest("value is required");
+    }
+
+    if (process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1" && result.device === "/dev/video-test") {
+      return NextResponse.json({ updated: true, controls: mockControls() });
     }
 
     await setCameraControl(result.device, control, value);

@@ -3,14 +3,17 @@ import { mkdir, readFile, rename, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import type { Photo, Project } from "@prisma/client";
+import type { CameraProfile, Photo, Project } from "@prisma/client";
 import { formatLocalTimestamp } from "./photos";
 import { prisma } from "./prisma";
+import { applyCameraControls } from "./v4l2";
 
 type CameraSettings = {
   device: string;
   width: number;
   height: number;
+  inputFormat: string;
+  controls?: Record<string, unknown>;
 };
 
 type CaptureResult = {
@@ -35,17 +38,22 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
   return parsed;
 }
 
-export function getCameraSettings(project?: Pick<Project, "cameraDevice">): CameraSettings {
+export function getCameraSettings(
+  project?: Pick<Project, "cameraDevice"> & { cameraProfile?: CameraProfile | null },
+): CameraSettings {
   const device = process.env.CAMERA_DEVICE || project?.cameraDevice;
 
   if (!device) {
     throw new Error("No camera selected for this project.");
   }
 
+  const profile = project?.cameraProfile;
   return {
     device,
-    width: parsePositiveInt(process.env.CAMERA_WIDTH, 1920, "CAMERA_WIDTH"),
-    height: parsePositiveInt(process.env.CAMERA_HEIGHT, 1080, "CAMERA_HEIGHT"),
+    width: parsePositiveInt(process.env.CAMERA_WIDTH, profile?.width ?? 1920, "CAMERA_WIDTH"),
+    height: parsePositiveInt(process.env.CAMERA_HEIGHT, profile?.height ?? 1080, "CAMERA_HEIGHT"),
+    inputFormat: process.env.CAMERA_INPUT_FORMAT || profile?.inputFormat || "mjpeg",
+    controls: profile?.controlsJson ? JSON.parse(profile.controlsJson) : undefined,
   };
 }
 
@@ -59,7 +67,22 @@ function ffmpegFailureMessage(settings: CameraSettings, stderr: string) {
   ].join("\n");
 }
 
-function runFfmpeg(settings: CameraSettings, outputPath: string) {
+function warmupSeconds() {
+  return parsePositiveInt(process.env.CAMERA_WARMUP_SECONDS, 2, "CAMERA_WARMUP_SECONDS");
+}
+
+function ffmpegInputFormat(format: string) {
+  return format.toLowerCase() === "mjpg" ? "mjpeg" : format;
+}
+
+async function applyProfileSettings(settings: CameraSettings) {
+  if (settings.controls) {
+    await applyCameraControls(settings.device, settings.controls);
+  }
+}
+
+function runFfmpeg(settings: CameraSettings, outputPath: string, options: { warmup?: boolean } = {}) {
+  const durationSeconds = options.warmup ? warmupSeconds() + 1 : 1;
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -67,12 +90,16 @@ function runFfmpeg(settings: CameraSettings, outputPath: string) {
     "-f",
     "v4l2",
     "-input_format",
-    "mjpeg",
+    ffmpegInputFormat(settings.inputFormat),
     "-video_size",
     `${settings.width}x${settings.height}`,
     "-i",
     settings.device,
-    "-frames:v",
+    "-t",
+    String(durationSeconds),
+    "-vf",
+    "fps=1",
+    "-update",
     "1",
     "-q:v",
     "2",
@@ -117,7 +144,10 @@ async function nextCapturePath(directory: string, capturedAt: Date) {
 }
 
 export async function captureProjectPhoto(projectId: string, options: CaptureOptions = {}): Promise<CaptureResult> {
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { cameraProfile: true },
+  });
 
   if (!project) {
     throw new Error(`Project not found: ${projectId}`);
@@ -125,13 +155,19 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
 
   const settings = getCameraSettings(project);
   await mkdir(project.localPhotoDirectory, { recursive: true });
+  await applyProfileSettings(settings);
 
-  const capturedAt = new Date();
-  const savedPath = await nextCapturePath(project.localPhotoDirectory, capturedAt);
-  const temporaryPath = savedPath.replace(/\.jpg$/, ".tmp.jpg");
+  const temporaryPath = path.join(
+    project.localPhotoDirectory,
+    `.plantlab-capture-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp.jpg`,
+  );
+  let savedPath = "";
+  let capturedAt = new Date();
 
   try {
-    await runFfmpeg(settings, temporaryPath);
+    await runFfmpeg(settings, temporaryPath, { warmup: true });
+    capturedAt = new Date();
+    savedPath = await nextCapturePath(project.localPhotoDirectory, capturedAt);
     await rename(temporaryPath, savedPath);
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
@@ -154,7 +190,10 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
 const activePreviewDevices = new Set<string>();
 
 export async function capturePreviewImage(projectId: string) {
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { cameraProfile: true },
+  });
 
   if (!project) {
     throw new Error(`Project not found: ${projectId}`);

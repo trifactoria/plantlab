@@ -37,6 +37,7 @@ export default async function ProjectSettingsPage({ params }: PageProps) {
               gridHeight: project.gridHeight,
               photoIntervalMinutes: project.photoIntervalMinutes,
               captureStartAt: project.captureStartAt.toISOString(),
+              plantedAt: project.plantedAt?.toISOString() ?? null,
               localPhotoDirectory: project.localPhotoDirectory,
               cameraDevice: project.cameraDevice,
               cameraName: project.cameraName,

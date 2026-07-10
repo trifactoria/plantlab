@@ -120,6 +120,10 @@ export default async function PhotoPage({ params }: PageProps) {
                             notes: event.notes,
                             timestamp: event.timestamp.toISOString(),
                             photoId: event.photoId,
+                            cropX: event.cropX,
+                            cropY: event.cropY,
+                            cropWidth: event.cropWidth,
+                            cropHeight: event.cropHeight,
                           }}
                         />
                       </div>
@@ -127,6 +131,16 @@ export default async function PhotoPage({ params }: PageProps) {
                         <p className="mt-3 whitespace-pre-wrap text-sm text-stone-700">
                           {event.notes}
                         </p>
+                      ) : null}
+                      {event.cropX !== null ? (
+                        <div className="mt-3">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={`/api/events/${event.id}/crop`}
+                            alt={`${event.type} crop`}
+                            className="h-28 rounded-md border border-stone-200 object-cover"
+                          />
+                        </div>
                       ) : null}
                     </article>
                   ))

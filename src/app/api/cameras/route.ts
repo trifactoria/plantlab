@@ -10,6 +10,18 @@ export async function GET() {
     return blocked;
   }
 
+  if (process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1") {
+    return NextResponse.json({
+      cameras: [
+        {
+          name: "Mock USB Camera",
+          device: "/dev/video-test",
+          supportsCapture: true,
+        },
+      ],
+    });
+  }
+
   try {
     const cameras = await discoverLocalCameras();
     return NextResponse.json({ cameras });

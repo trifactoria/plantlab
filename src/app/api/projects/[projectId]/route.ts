@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import {
   badRequest,
+  nullableDate,
   notFound,
   optionalDate,
   optionalString,
@@ -108,11 +109,19 @@ export async function PATCH(request: Request, context: Context) {
           body?.captureStartAt === undefined
             ? undefined
             : optionalDate(body.captureStartAt, existingProject.captureStartAt),
+        plantedAt:
+          body?.plantedAt === undefined
+            ? undefined
+            : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory: nextPhotoDirectory,
         cameraDevice:
           body?.cameraDevice === undefined ? undefined : optionalString(body.cameraDevice),
         cameraName:
           body?.cameraName === undefined ? undefined : optionalString(body.cameraName),
+        cameraProfileId:
+          body?.cameraProfileId === undefined
+            ? undefined
+            : optionalString(body.cameraProfileId),
       },
     });
 

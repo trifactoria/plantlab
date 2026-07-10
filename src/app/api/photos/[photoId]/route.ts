@@ -62,7 +62,18 @@ export async function DELETE(_request: Request, context: Context) {
     }
   }
 
-  await prisma.photo.delete({ where: { id: photoId } });
+  await prisma.$transaction([
+    prisma.plantEvent.updateMany({
+      where: { photoId },
+      data: {
+        cropX: null,
+        cropY: null,
+        cropWidth: null,
+        cropHeight: null,
+      },
+    }),
+    prisma.photo.delete({ where: { id: photoId } }),
+  ]);
 
   return NextResponse.json({
     deleted: true,

@@ -16,14 +16,34 @@ type CameraControl = {
   options?: Array<{ value: number; label: string }>;
 };
 
+type CameraFormat = {
+  pixelFormat: string;
+  description: string;
+  resolutions: Array<{ width: number; height: number; frameRates: string[] }>;
+};
+
+type CameraProfile = {
+  id: string;
+  name: string;
+  cameraDevice: string;
+  cameraName: string | null;
+  width: number;
+  height: number;
+  inputFormat: string;
+  controlsJson: string | null;
+  _count?: { projects: number };
+};
+
 export function CameraSetupPanel({
   projectId,
   cameraDevice,
   cameraName,
+  cameraProfileId,
 }: {
   projectId: string;
   cameraDevice: string | null;
   cameraName: string | null;
+  cameraProfileId: string | null;
 }) {
   const router = useRouter();
   const [savingCamera, setSavingCamera] = useState(false);
@@ -35,7 +55,34 @@ export function CameraSetupPanel({
   const [loadingControls, setLoadingControls] = useState(false);
   const [captureMessage, setCaptureMessage] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
+  const [formats, setFormats] = useState<CameraFormat[]>([]);
+  const [formatsError, setFormatsError] = useState<string | null>(null);
+  const [selectedFormat, setSelectedFormat] = useState("mjpeg");
+  const [selectedResolution, setSelectedResolution] = useState("1920x1080");
+  const [profiles, setProfiles] = useState<CameraProfile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState(cameraProfileId ?? "");
+  const [profileName, setProfileName] = useState("New camera profile");
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const captureInFlight = useRef(false);
+
+  const selectedFormatData = formats.find((format) => format.pixelFormat === selectedFormat);
+
+  function selectedDimensions() {
+    const [width, height] = selectedResolution.split("x").map(Number);
+    return {
+      width: Number.isFinite(width) ? width : 1920,
+      height: Number.isFinite(height) ? height : 1080,
+    };
+  }
+
+  function currentControlValues() {
+    return Object.fromEntries(
+      controls
+        .filter((control) => !control.readOnly)
+        .map((control) => [control.id, control.value]),
+    );
+  }
 
   async function saveCamera(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -48,12 +95,15 @@ export function CameraSetupPanel({
       body: JSON.stringify({
         cameraDevice: formData.get("cameraDevice"),
         cameraName: formData.get("cameraName"),
+        cameraProfileId: selectedProfileId || null,
       }),
     });
 
     setSavingCamera(false);
     router.refresh();
     await loadControls();
+    await loadFormats();
+    await loadProfiles();
   }
 
   async function fetchPreviewFrame() {
@@ -110,6 +160,140 @@ export function CameraSetupPanel({
     setControls(payload.controls ?? []);
   }
 
+  async function loadFormats() {
+    setFormatsError(null);
+    const response = await fetch(`/api/projects/${projectId}/camera/formats`);
+    const payload = (await response.json()) as { formats?: CameraFormat[]; error?: string };
+
+    if (!response.ok) {
+      setFormats([]);
+      setFormatsError(payload.error ?? "Could not load camera formats.");
+      return;
+    }
+
+    const nextFormats = payload.formats ?? [];
+    setFormats(nextFormats);
+    const mjpeg = nextFormats.find((format) => format.pixelFormat === "mjpg" || format.pixelFormat === "mjpeg");
+    const preferred = mjpeg ?? nextFormats[0];
+    if (preferred) {
+      setSelectedFormat(preferred.pixelFormat);
+      const preferredResolution =
+        preferred.resolutions.find((resolution) => resolution.width === 1920 && resolution.height === 1080) ??
+        preferred.resolutions[0];
+      if (preferredResolution) {
+        setSelectedResolution(`${preferredResolution.width}x${preferredResolution.height}`);
+      }
+    }
+  }
+
+  async function loadProfiles() {
+    if (!cameraDevice) {
+      setProfiles([]);
+      return;
+    }
+
+    const response = await fetch(`/api/camera-profiles?cameraDevice=${encodeURIComponent(cameraDevice)}`);
+    const payload = (await response.json()) as { profiles?: CameraProfile[]; error?: string };
+
+    if (!response.ok) {
+      setProfileError(payload.error ?? "Could not load camera profiles.");
+      return;
+    }
+
+    setProfiles(payload.profiles ?? []);
+  }
+
+  async function saveProfile(action: "create" | "update" | "duplicate") {
+    setProfileMessage(null);
+    setProfileError(null);
+    const { width, height } = selectedDimensions();
+    const existingProfile = profiles.find((profile) => profile.id === selectedProfileId);
+    const body = {
+      name:
+        action === "duplicate" && existingProfile
+          ? `${existingProfile.name} Copy`
+          : profileName,
+      cameraDevice,
+      cameraName,
+      width,
+      height,
+      inputFormat: selectedFormat,
+      controls: currentControlValues(),
+    };
+    const url =
+      action === "update" && selectedProfileId
+        ? `/api/camera-profiles/${selectedProfileId}`
+        : "/api/camera-profiles";
+    const method = action === "update" && selectedProfileId ? "PATCH" : "POST";
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = (await response.json()) as CameraProfile & { error?: string };
+
+    if (!response.ok) {
+      setProfileError(payload.error ?? "Could not save profile.");
+      return;
+    }
+
+    setSelectedProfileId(payload.id);
+    setProfileName(payload.name);
+    setProfileMessage(action === "update" ? "Profile updated." : "Profile saved.");
+    await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cameraProfileId: payload.id }),
+    });
+    await loadProfiles();
+    router.refresh();
+  }
+
+  async function applyProfile() {
+    const profile = profiles.find((item) => item.id === selectedProfileId);
+    if (!profile) {
+      return;
+    }
+
+    setSelectedFormat(profile.inputFormat);
+    setSelectedResolution(`${profile.width}x${profile.height}`);
+    setProfileName(profile.name);
+    if (profile.controlsJson) {
+      const savedControls = JSON.parse(profile.controlsJson) as Record<string, string | number | boolean>;
+      for (const [control, value] of Object.entries(savedControls)) {
+        await fetch(`/api/projects/${projectId}/camera/controls`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ control, value }),
+        });
+      }
+      await loadControls();
+    }
+    setProfileMessage("Profile applied. Save Camera to assign it to the project.");
+  }
+
+  async function deleteProfile() {
+    if (!selectedProfileId) {
+      return;
+    }
+
+    setProfileMessage(null);
+    setProfileError(null);
+    const response = await fetch(`/api/camera-profiles/${selectedProfileId}`, {
+      method: "DELETE",
+    });
+    const payload = (await response.json()) as { error?: string };
+
+    if (!response.ok) {
+      setProfileError(payload.error ?? "Could not delete profile.");
+      return;
+    }
+
+    setSelectedProfileId("");
+    setProfileMessage("Profile deleted.");
+    await loadProfiles();
+  }
+
   async function updateControl(control: CameraControl, value: string | number | boolean) {
     setControlsError(null);
     const response = await fetch(`/api/projects/${projectId}/camera/controls`, {
@@ -157,6 +341,8 @@ export function CameraSetupPanel({
 
   useEffect(() => {
     void loadControls();
+    void loadFormats();
+    void loadProfiles();
   }, [projectId]);
 
   useEffect(() => {
@@ -220,6 +406,110 @@ export function CameraSetupPanel({
             {capturing ? "Capturing..." : "Capture Test Photo"}
           </button>
           {captureMessage ? <span className="text-sm text-stone-600">{captureMessage}</span> : null}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-stone-950">Format and Profile</h2>
+          <button type="button" className="button-secondary" onClick={loadFormats}>
+            Reload Formats
+          </button>
+        </div>
+        {formatsError ? <p className="mt-3 text-sm font-medium text-red-700">{formatsError}</p> : null}
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="field">
+            Input format
+            <select
+              className="input"
+              value={selectedFormat}
+              onChange={(event) => {
+                const nextFormat = event.target.value;
+                setSelectedFormat(nextFormat);
+                const format = formats.find((item) => item.pixelFormat === nextFormat);
+                const resolution = format?.resolutions[0];
+                if (resolution) {
+                  setSelectedResolution(`${resolution.width}x${resolution.height}`);
+                }
+              }}
+            >
+              {formats.length === 0 ? (
+                <option value={selectedFormat}>{selectedFormat}</option>
+              ) : (
+                formats.map((format) => (
+                  <option key={format.pixelFormat} value={format.pixelFormat}>
+                    {format.pixelFormat.toUpperCase()} - {format.description}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+          <label className="field">
+            Resolution
+            <select
+              className="input"
+              value={selectedResolution}
+              onChange={(event) => setSelectedResolution(event.target.value)}
+            >
+              {(selectedFormatData?.resolutions ?? [{ width: 1920, height: 1080, frameRates: [] }]).map((resolution) => (
+                <option key={`${resolution.width}x${resolution.height}`} value={`${resolution.width}x${resolution.height}`}>
+                  {resolution.width} x {resolution.height}
+                  {resolution.frameRates.length > 0 ? ` (${resolution.frameRates.join(", ")})` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="mt-5 grid gap-4">
+          <label className="field">
+            Camera profile
+            <select
+              className="input"
+              value={selectedProfileId}
+              onChange={(event) => {
+                setSelectedProfileId(event.target.value);
+                const profile = profiles.find((item) => item.id === event.target.value);
+                if (profile) {
+                  setProfileName(profile.name);
+                }
+              }}
+            >
+              <option value="">Use current unsaved camera settings</option>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name} ({profile.width}x{profile.height} {profile.inputFormat})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Profile name
+            <input
+              className="input"
+              value={profileName}
+              onChange={(event) => setProfileName(event.target.value)}
+            />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="button-secondary" onClick={applyProfile} disabled={!selectedProfileId}>
+              Apply Existing Profile
+            </button>
+            <button type="button" className="button-secondary" onClick={() => saveProfile("create")} disabled={!cameraDevice}>
+              Save Current Setup as Profile
+            </button>
+            <button type="button" className="button-secondary" onClick={() => saveProfile("update")} disabled={!selectedProfileId}>
+              Update Profile
+            </button>
+            <button type="button" className="button-secondary" onClick={() => saveProfile("duplicate")} disabled={!selectedProfileId}>
+              Duplicate Profile
+            </button>
+            <button type="button" className="button-secondary" onClick={deleteProfile} disabled={!selectedProfileId}>
+              Delete Profile
+            </button>
+          </div>
+          {profileMessage ? <p className="text-sm font-medium text-emerald-700">{profileMessage}</p> : null}
+          {profileError ? <p className="text-sm font-medium text-red-700">{profileError}</p> : null}
         </div>
       </div>
 

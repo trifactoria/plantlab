@@ -18,7 +18,7 @@ export default async function PlantPage({ params }: PageProps) {
       project: true,
       events: {
         include: { photo: true },
-        orderBy: { timestamp: "desc" },
+        orderBy: { timestamp: "asc" },
       },
     },
   });
@@ -60,6 +60,8 @@ export default async function PlantPage({ params }: PageProps) {
                   name={plant.name}
                   tags={plant.tags}
                   notes={plant.notes}
+                  startLabel={plant.startLabel}
+                  startedAt={plant.startedAt.toISOString()}
                   eventCount={plant.events.length}
                 />
               </div>
@@ -95,9 +97,17 @@ export default async function PlantPage({ params }: PageProps) {
           <div>
             <h2 className="text-xl font-semibold text-stone-950">Timeline</h2>
             <div className="mt-4 grid gap-3">
+              <article className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase text-emerald-800">Starting entry</p>
+                <h3 className="mt-1 text-lg font-semibold text-stone-950">
+                  {plant.startLabel}
+                </h3>
+                <p className="text-sm text-stone-600">{formatDateTime(plant.startedAt)}</p>
+              </article>
+
               {plant.events.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-stone-300 bg-white p-5 text-stone-600">
-                  No events recorded yet.
+                  No later events recorded yet.
                 </p>
               ) : (
                 plant.events.map((event) => (
@@ -127,6 +137,10 @@ export default async function PlantPage({ params }: PageProps) {
                             notes: event.notes,
                             timestamp: event.timestamp.toISOString(),
                             photoId: event.photoId,
+                            cropX: event.cropX,
+                            cropY: event.cropY,
+                            cropWidth: event.cropWidth,
+                            cropHeight: event.cropHeight,
                           }}
                         />
                       </div>
@@ -135,6 +149,16 @@ export default async function PlantPage({ params }: PageProps) {
                       <p className="mt-3 whitespace-pre-wrap text-sm text-stone-700">
                         {event.notes}
                       </p>
+                    ) : null}
+                    {event.photoId && event.cropX !== null ? (
+                      <div className="mt-3">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={`/api/events/${event.id}/crop`}
+                          alt={`${event.type} crop`}
+                          className="h-28 rounded-md border border-stone-200 object-cover"
+                        />
+                      </div>
                     ) : null}
                   </article>
                 ))

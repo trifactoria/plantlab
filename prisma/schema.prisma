@@ -15,27 +15,32 @@ model Project {
   gridHeight            Int
   photoIntervalMinutes  Int
   captureStartAt        DateTime @default(now())
+  plantedAt             DateTime?
   localPhotoDirectory   String
   cameraDevice          String?
   cameraName            String?
+  cameraProfileId       String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
-  plants Plant[]
-  photos Photo[]
-  events PlantEvent[]
+  plants        Plant[]
+  photos        Photo[]
+  events        PlantEvent[]
+  cameraProfile CameraProfile? @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
 }
 
 model Plant {
-  id        String   @id @default(cuid())
-  projectId String
-  name      String
-  tags      String?
-  notes     String?
-  gridX     Int
-  gridY     Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(cuid())
+  projectId  String
+  name       String
+  tags       String?
+  notes      String?
+  gridX      Int
+  gridY      Int
+  startedAt  DateTime @default(now())
+  startLabel String   @default("Added to project")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events  PlantEvent[]
@@ -62,14 +67,18 @@ model Photo {
 }
 
 model PlantEvent {
-  id        String   @id @default(cuid())
-  projectId String
-  plantId   String
-  photoId   String?
-  type      String
-  notes     String?
-  timestamp DateTime
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  projectId  String
+  plantId    String
+  photoId    String?
+  type       String
+  notes      String?
+  timestamp  DateTime
+  cropX      Float?
+  cropY      Float?
+  cropWidth  Float?
+  cropHeight Float?
+  createdAt  DateTime @default(now())
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   plant   Plant   @relation(fields: [plantId], references: [id], onDelete: Cascade)
@@ -78,4 +87,21 @@ model PlantEvent {
   @@index([projectId, timestamp])
   @@index([plantId, timestamp])
   @@index([photoId])
+}
+
+model CameraProfile {
+  id            String   @id @default(cuid())
+  name          String
+  cameraDevice  String
+  cameraName    String?
+  width         Int
+  height        Int
+  inputFormat   String
+  controlsJson  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  projects Project[]
+
+  @@index([cameraDevice])
 }

@@ -19,6 +19,18 @@ export type CameraControl = {
   options?: Array<{ value: number; label: string }>;
 };
 
+export type CameraFormatResolution = {
+  width: number;
+  height: number;
+  frameRates: string[];
+};
+
+export type CameraFormat = {
+  pixelFormat: string;
+  description: string;
+  resolutions: CameraFormatResolution[];
+};
+
 function execFileText(command: string, args: string[]) {
   return new Promise<string>((resolve, reject) => {
     execFile(command, args, { timeout: 10_000 }, (error, stdout, stderr) => {
@@ -115,6 +127,46 @@ export async function listCameraControls(device: string): Promise<CameraControl[
   return controls;
 }
 
+export async function listCameraFormats(device: string): Promise<CameraFormat[]> {
+  const output = await execFileText("v4l2-ctl", ["-d", device, "--list-formats-ext"]);
+  const formats: CameraFormat[] = [];
+  let currentFormat: CameraFormat | null = null;
+  let currentResolution: CameraFormatResolution | null = null;
+
+  for (const line of output.split("\n")) {
+    const formatMatch = /\[\d+\]:\s+'([^']+)'\s+\(([^)]+)\)/.exec(line);
+    const sizeMatch = /Size:\s+Discrete\s+(\d+)x(\d+)/.exec(line);
+    const intervalMatch = /Interval:\s+Discrete\s+[^()]*\(([^)]+)\)/.exec(line);
+
+    if (formatMatch) {
+      currentFormat = {
+        pixelFormat: formatMatch[1].toLowerCase(),
+        description: formatMatch[2].trim(),
+        resolutions: [],
+      };
+      formats.push(currentFormat);
+      currentResolution = null;
+      continue;
+    }
+
+    if (sizeMatch && currentFormat) {
+      currentResolution = {
+        width: Number(sizeMatch[1]),
+        height: Number(sizeMatch[2]),
+        frameRates: [],
+      };
+      currentFormat.resolutions.push(currentResolution);
+      continue;
+    }
+
+    if (intervalMatch && currentResolution) {
+      currentResolution.frameRates.push(intervalMatch[1].trim());
+    }
+  }
+
+  return formats;
+}
+
 function parseControlMeta(rawMeta: string) {
   const numberFor = (key: string) => {
     const match = new RegExp(`${key}=(-?\\d+)`).exec(rawMeta);
@@ -140,4 +192,12 @@ function humanizeControlName(id: string) {
 export async function setCameraControl(device: string, control: string, value: string | number | boolean) {
   const normalizedValue = typeof value === "boolean" ? (value ? "1" : "0") : String(value);
   await execFileText("v4l2-ctl", ["-d", device, "--set-ctrl", `${control}=${normalizedValue}`]);
+}
+
+export async function applyCameraControls(device: string, controls: Record<string, unknown>) {
+  for (const [control, value] of Object.entries(controls)) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      await setCameraControl(device, control, value);
+    }
+  }
 }

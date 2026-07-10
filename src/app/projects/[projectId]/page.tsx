@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CapturePhotoButton } from "@/components/CapturePhotoButton";
 import { PlantGrid } from "@/components/PlantGrid";
+import { PhotoUploadForm } from "@/components/PhotoUploadForm";
 import { ScanPhotosButton } from "@/components/ScanPhotosButton";
 import { formatDateTime } from "@/lib/format";
 import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
@@ -77,6 +78,13 @@ export default async function ProjectPage({ params }: PageProps) {
               >
                 Camera Setup
               </Link>
+              <span className="mx-2 text-stone-300">/</span>
+              <Link
+                href={`/projects/${project.id}/timeline`}
+                className="inline-flex text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+              >
+                Timeline
+              </Link>
             </div>
             <div className="grid gap-2 sm:justify-items-end">
               {canCaptureLocally ? (
@@ -104,6 +112,12 @@ export default async function ProjectPage({ params }: PageProps) {
                   <dt className="font-medium text-stone-950">Photo interval</dt>
                   <dd className="text-stone-600">
                     {project.photoIntervalMinutes} minutes
+                  </dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Planted</dt>
+                  <dd className="text-stone-600">
+                    {project.plantedAt ? formatDateTime(project.plantedAt) : "Unknown"}
                   </dd>
                 </div>
                 <div>
@@ -164,6 +178,8 @@ export default async function ProjectPage({ params }: PageProps) {
                 </p>
               )}
             </div>
+
+            <PhotoUploadForm projectId={project.id} />
           </aside>
 
           <div className="grid gap-6">

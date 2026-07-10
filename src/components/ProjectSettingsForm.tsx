@@ -14,6 +14,7 @@ type ProjectSettings = {
   gridHeight: number;
   photoIntervalMinutes: number;
   captureStartAt: string;
+  plantedAt: string | null;
   localPhotoDirectory: string;
   cameraDevice: string | null;
   cameraName: string | null;
@@ -25,6 +26,7 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
   const [useCustomFolder, setUseCustomFolder] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [plantingUnknown, setPlantingUnknown] = useState(project.plantedAt === null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,6 +50,9 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
         gridHeight: formData.get("gridHeight"),
         photoIntervalMinutes: formData.get("photoIntervalMinutes"),
         captureStartAt: new Date(String(formData.get("captureStartAt"))).toISOString(),
+        plantedAt: plantingUnknown
+          ? null
+          : new Date(String(formData.get("plantedAt"))).toISOString(),
         localPhotoDirectory: customDirectory,
         cameraDevice: formData.get("cameraDevice"),
         cameraName: formData.get("cameraName"),
@@ -111,6 +116,28 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
             <input className="input" name="photoIntervalMinutes" type="number" min="1" defaultValue={project.photoIntervalMinutes} required />
           </label>
         </div>
+
+        <label className="field">
+          Planting date and time
+          <input
+            className="input"
+            name="plantedAt"
+            type="datetime-local"
+            defaultValue={
+              project.plantedAt ? toDateTimeLocal(project.plantedAt) : toDateTimeLocal(new Date().toISOString())
+            }
+            disabled={plantingUnknown}
+            required={!plantingUnknown}
+          />
+        </label>
+        <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+          <input
+            type="checkbox"
+            checked={plantingUnknown}
+            onChange={(event) => setPlantingUnknown(event.target.checked)}
+          />
+          Planting date/time unknown
+        </label>
 
         <label className="field">
           Schedule starting date and time

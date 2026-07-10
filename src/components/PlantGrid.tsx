@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CropSelector, type CropValue } from "@/components/CropSelector";
 import { toDateTimeLocal } from "@/lib/format";
 
 type GridPlant = {
@@ -35,6 +36,12 @@ const EVENT_TYPES = [
   "Harvest Ready",
   "Harvested",
 ];
+const START_LABELS = [
+  "First visible",
+  "Cutting placed in water",
+  "Cutting planted in soil",
+  "Added to project",
+];
 
 export function PlantGrid({
   project,
@@ -57,6 +64,8 @@ export function PlantGrid({
   const [selectedPlant, setSelectedPlant] = useState<SelectedPlant | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [eventCrop, setEventCrop] = useState<CropValue | null>(null);
+  const [showCropSelector, setShowCropSelector] = useState(false);
 
   async function createPlant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -78,6 +87,8 @@ export function PlantGrid({
         name: formData.get("name"),
         tags: formData.get("tags"),
         notes: formData.get("notes"),
+        startLabel: formData.get("startLabel"),
+        startedAt: new Date(String(formData.get("startedAt"))).toISOString(),
       }),
     });
 
@@ -113,6 +124,12 @@ export function PlantGrid({
         type: formData.get("type"),
         notes: formData.get("notes"),
         timestamp: new Date(timestamp).toISOString(),
+        ...(eventCrop ?? {
+          cropX: null,
+          cropY: null,
+          cropWidth: null,
+          cropHeight: null,
+        }),
       }),
     });
 
@@ -125,6 +142,8 @@ export function PlantGrid({
     }
 
     setSelectedPlant(null);
+    setEventCrop(null);
+    setShowCropSelector(false);
     router.refresh();
   }
 
@@ -184,7 +203,7 @@ export function PlantGrid({
 
       {selectedCell ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <form onSubmit={createPlant} className="grid w-full max-w-md gap-4 rounded-lg bg-white p-5 shadow-xl">
+          <form onSubmit={createPlant} className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
             <div>
               <h2 className="text-lg font-semibold text-stone-950">Create Plant</h2>
             </div>
@@ -200,6 +219,25 @@ export function PlantGrid({
             <label className="field">
               Notes
               <textarea className="input min-h-24" name="notes" />
+            </label>
+            <label className="field">
+              Initial event label
+              <input className="input" name="startLabel" list="plant-start-labels" defaultValue="First visible" required />
+              <datalist id="plant-start-labels">
+                {START_LABELS.map((label) => (
+                  <option key={label} value={label} />
+                ))}
+              </datalist>
+            </label>
+            <label className="field">
+              Initial timestamp
+              <input
+                className="input"
+                name="startedAt"
+                type="datetime-local"
+                defaultValue={toDateTimeLocal(new Date().toISOString())}
+                required
+              />
             </label>
 
             {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
@@ -218,7 +256,7 @@ export function PlantGrid({
 
       {selectedPlant ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <form onSubmit={addEvent} className="grid w-full max-w-md gap-4 rounded-lg bg-white p-5 shadow-xl">
+          <form onSubmit={addEvent} className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
             <div>
               <h2 className="text-lg font-semibold text-stone-950">Add Event</h2>
               <p className="text-sm text-stone-500">{selectedPlant.name}</p>
@@ -248,10 +286,37 @@ export function PlantGrid({
               />
             </label>
 
+            {photoId ? (
+              <div className="grid gap-3">
+                <button
+                  type="button"
+                  className="button-secondary w-fit"
+                  onClick={() => setShowCropSelector((value) => !value)}
+                >
+                  Select crop from photo
+                </button>
+                {showCropSelector ? (
+                  <CropSelector
+                    imageUrl={`/api/photos/${photoId}/file`}
+                    value={eventCrop}
+                    onChange={setEventCrop}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+
             {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
 
             <div className="flex justify-end gap-2">
-              <button type="button" className="button-secondary" onClick={() => setSelectedPlant(null)}>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  setSelectedPlant(null);
+                  setEventCrop(null);
+                  setShowCropSelector(false);
+                }}
+              >
                 Cancel
               </button>
               <button className="button" disabled={saving}>

@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import {
   badRequest,
+  nullableDate,
   optionalDate,
   optionalString,
   readJson,
@@ -43,9 +44,12 @@ export async function POST(request: Request) {
           "photoIntervalMinutes",
         ),
         captureStartAt: optionalDate(body?.captureStartAt),
+        plantedAt:
+          body?.plantedAt === undefined ? null : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory,
         cameraDevice: optionalString(body?.cameraDevice),
         cameraName: optionalString(body?.cameraName),
+        cameraProfileId: optionalString(body?.cameraProfileId),
       },
     });
 

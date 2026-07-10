@@ -68,3 +68,20 @@ export function optionalDate(value: unknown, fallback = new Date()) {
 
   return parsed;
 }
+
+export function nullableDate(value: unknown, field = "timestamp") {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${field} must be a valid date or null`);
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`${field} must be a valid date`);
+  }
+
+  return parsed;
+}

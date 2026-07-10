@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
+import sharp from "sharp";
 import { prisma } from "../../src/lib/prisma";
 
 export const DEV_IDS = {
@@ -12,13 +13,24 @@ export const DEV_IDS = {
   olderPhotoId: "dev-visual-photo-3",
   eventId: "dev-visual-event",
   secondEventId: "dev-visual-event-2",
+  profileId: "dev-visual-profile",
 };
 
 const TINY_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/Aaf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/Aaf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 
 async function writeFixturePhoto(photoPath: string) {
-  await writeFile(photoPath, Buffer.from(TINY_JPEG_BASE64, "base64"));
+  const buffer = await sharp({
+    create: {
+      width: 32,
+      height: 24,
+      channels: 3,
+      background: { r: 170, g: 220, b: 180 },
+    },
+  })
+    .jpeg()
+    .toBuffer();
+  await writeFile(photoPath, buffer);
 }
 
 export async function seedVisualData() {
@@ -34,6 +46,19 @@ export async function seedVisualData() {
   await writeFixturePhoto(olderPhotoPath);
 
   await prisma.project.deleteMany({ where: { id: DEV_IDS.projectId } });
+  await prisma.cameraProfile.deleteMany({ where: { id: DEV_IDS.profileId } });
+  await prisma.cameraProfile.create({
+    data: {
+      id: DEV_IDS.profileId,
+      name: "Mock Germination Profile",
+      cameraDevice: "/dev/video-test",
+      cameraName: "Mock USB Camera",
+      width: 1920,
+      height: 1080,
+      inputFormat: "mjpg",
+      controlsJson: JSON.stringify({ focus_auto: true, brightness: 128 }),
+    },
+  });
 
   await prisma.project.create({
     data: {
@@ -44,9 +69,11 @@ export async function seedVisualData() {
       gridHeight: 3,
       photoIntervalMinutes: 30,
       captureStartAt: new Date("2026-07-10T13:00:00.000Z"),
+      plantedAt: new Date("2026-07-09T12:00:00.000Z"),
       localPhotoDirectory: photoDirectory,
       cameraDevice: "/dev/video-test",
       cameraName: "Mock USB Camera",
+      cameraProfileId: DEV_IDS.profileId,
       plants: {
         create: [
           {
@@ -56,6 +83,8 @@ export async function seedVisualData() {
             notes: "Strong early growth.",
             gridX: 0,
             gridY: 0,
+            startedAt: new Date("2026-07-10T12:00:00.000Z"),
+            startLabel: "First visible",
           },
           {
             id: DEV_IDS.secondPlantId,
@@ -64,6 +93,8 @@ export async function seedVisualData() {
             notes: "Marked for comparison.",
             gridX: 1,
             gridY: 0,
+            startedAt: new Date("2026-07-10T12:30:00.000Z"),
+            startLabel: "Added to project",
           },
         ],
       },
@@ -105,6 +136,10 @@ export async function seedVisualData() {
         type: "Germinated",
         notes: "First visible sprout.",
         timestamp: new Date("2026-07-10T13:30:00.000Z"),
+        cropX: 0,
+        cropY: 0,
+        cropWidth: 1,
+        cropHeight: 1,
       },
       {
         id: DEV_IDS.secondEventId,
@@ -130,7 +165,7 @@ export async function disconnectPrisma() {
 }
 
 export async function mockCameraApis(page: Page) {
-  await page.route("**/api/cameras", async (route) => {
+  await page.route("**/api/cameras**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -146,7 +181,7 @@ export async function mockCameraApis(page: Page) {
     });
   });
 
-  await page.route("**/api/projects/*/camera/controls", async (route) => {
+  await page.route("**/api/projects/*/camera/controls**", async (route) => {
     if (route.request().method() === "PATCH") {
       await route.fulfill({
         status: 200,
@@ -163,11 +198,75 @@ export async function mockCameraApis(page: Page) {
     });
   });
 
-  await page.route("**/api/projects/*/camera/preview", async (route) => {
+  await page.route("**/api/projects/*/camera/preview**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "image/jpeg",
       body: Buffer.from(TINY_JPEG_BASE64, "base64"),
+    });
+  });
+
+  await page.route("**/api/projects/*/camera/formats**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        formats: [
+          {
+            pixelFormat: "mjpg",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
+              { width: 1280, height: 720, frameRates: ["30.000 fps"] },
+            ],
+          },
+          {
+            pixelFormat: "yuyv",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/camera-profiles**", async (route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "mock-created-profile",
+          name: "Mock Saved Profile",
+          cameraDevice: "/dev/video-test",
+          cameraName: "Mock USB Camera",
+          width: 1920,
+          height: 1080,
+          inputFormat: "mjpg",
+          controlsJson: JSON.stringify({ brightness: 128 }),
+        }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        profiles: [
+          {
+            id: DEV_IDS.profileId,
+            name: "Mock Germination Profile",
+            cameraDevice: "/dev/video-test",
+            cameraName: "Mock USB Camera",
+            width: 1920,
+            height: 1080,
+            inputFormat: "mjpg",
+            controlsJson: JSON.stringify({ focus_auto: true, brightness: 128 }),
+            _count: { projects: 1 },
+          },
+        ],
+      }),
     });
   });
 }

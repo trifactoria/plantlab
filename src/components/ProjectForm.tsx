@@ -14,6 +14,7 @@ export function ProjectForm() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [useDefaultFolder, setUseDefaultFolder] = useState(true);
+  const [plantingUnknown, setPlantingUnknown] = useState(false);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -31,6 +32,9 @@ export function ProjectForm() {
         gridHeight: formData.get("gridHeight"),
         photoIntervalMinutes: formData.get("photoIntervalMinutes"),
         captureStartAt: new Date(String(formData.get("captureStartAt"))).toISOString(),
+        plantedAt: plantingUnknown
+          ? null
+          : new Date(String(formData.get("plantedAt"))).toISOString(),
         useDefaultPhotoDirectory: formData.get("useDefaultPhotoDirectory") === "on",
         localPhotoDirectory: formData.get("localPhotoDirectory"),
         cameraDevice: formData.get("cameraDevice"),
@@ -76,6 +80,26 @@ export function ProjectForm() {
           <input className="input" name="photoIntervalMinutes" type="number" min="1" defaultValue="30" required />
         </label>
       </div>
+
+      <label className="field">
+        Planting date and time
+        <input
+          className="input"
+          name="plantedAt"
+          type="datetime-local"
+          defaultValue={toDateTimeLocal(new Date().toISOString())}
+          disabled={plantingUnknown}
+          required={!plantingUnknown}
+        />
+      </label>
+      <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+        <input
+          type="checkbox"
+          checked={plantingUnknown}
+          onChange={(event) => setPlantingUnknown(event.target.checked)}
+        />
+        Planting date/time unknown
+      </label>
 
       <label className="field">
         Schedule starting date and time

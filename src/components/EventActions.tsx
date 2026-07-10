@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
+import { CropSelector, type CropValue } from "@/components/CropSelector";
 import { toDateTimeLocal } from "@/lib/format";
 
 type EditableEvent = {
@@ -11,6 +12,10 @@ type EditableEvent = {
   notes: string | null;
   timestamp: string;
   photoId: string | null;
+  cropX: number | null;
+  cropY: number | null;
+  cropWidth: number | null;
+  cropHeight: number | null;
 };
 
 export function EventActions({ event }: { event: EditableEvent }) {
@@ -19,6 +24,20 @@ export function EventActions({ event }: { event: EditableEvent }) {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const initialCrop =
+    event.cropX !== null &&
+    event.cropY !== null &&
+    event.cropWidth !== null &&
+    event.cropHeight !== null
+      ? {
+          cropX: event.cropX,
+          cropY: event.cropY,
+          cropWidth: event.cropWidth,
+          cropHeight: event.cropHeight,
+        }
+      : null;
+  const [crop, setCrop] = useState<CropValue | null>(initialCrop);
+  const [showCropSelector, setShowCropSelector] = useState(Boolean(initialCrop));
 
   async function save(updatedEvent: FormEvent<HTMLFormElement>) {
     updatedEvent.preventDefault();
@@ -28,6 +47,7 @@ export function EventActions({ event }: { event: EditableEvent }) {
     const formData = new FormData(updatedEvent.currentTarget);
     const timestamp = String(formData.get("timestamp"));
     const keepPhotoLink = formData.get("keepPhotoLink") === "on";
+    const nextPhotoId = event.photoId ? (keepPhotoLink ? event.photoId : null) : undefined;
     const response = await fetch(`/api/events/${event.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -35,7 +55,10 @@ export function EventActions({ event }: { event: EditableEvent }) {
         type: formData.get("type"),
         notes: formData.get("notes"),
         timestamp: new Date(timestamp).toISOString(),
-        photoId: event.photoId ? (keepPhotoLink ? event.photoId : null) : undefined,
+        photoId: nextPhotoId,
+        ...(nextPhotoId === null
+          ? { cropX: null, cropY: null, cropWidth: null, cropHeight: null }
+          : crop ?? { cropX: null, cropY: null, cropWidth: null, cropHeight: null }),
       }),
     });
     const payload = (await response.json()) as { error?: string };
@@ -98,7 +121,7 @@ export function EventActions({ event }: { event: EditableEvent }) {
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
           <form
             onSubmit={save}
-            className="grid w-full max-w-md gap-4 rounded-lg bg-white p-5 shadow-xl"
+            className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
           >
             <div>
               <h2 className="text-lg font-semibold text-stone-950">Edit Event</h2>
@@ -127,6 +150,24 @@ export function EventActions({ event }: { event: EditableEvent }) {
                 <input name="keepPhotoLink" type="checkbox" defaultChecked />
                 Keep linked photo
               </label>
+            ) : null}
+            {event.photoId ? (
+              <div className="grid gap-3">
+                <button
+                  type="button"
+                  className="button-secondary w-fit"
+                  onClick={() => setShowCropSelector((value) => !value)}
+                >
+                  Select crop from photo
+                </button>
+                {showCropSelector ? (
+                  <CropSelector
+                    imageUrl={`/api/photos/${event.photoId}/file`}
+                    value={crop}
+                    onChange={setCrop}
+                  />
+                ) : null}
+              </div>
             ) : null}
 
             {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
