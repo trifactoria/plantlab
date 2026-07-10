@@ -14,7 +14,10 @@ model Project {
   gridWidth             Int
   gridHeight            Int
   photoIntervalMinutes  Int
+  captureStartAt        DateTime @default(now())
   localPhotoDirectory   String
+  cameraDevice          String?
+  cameraName            String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 

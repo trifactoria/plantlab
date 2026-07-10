@@ -1,6 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { EventActions } from "@/components/EventActions";
+import { PlantEditor } from "@/components/PlantEditor";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 
@@ -42,9 +44,6 @@ export default async function PlantPage({ params }: PageProps) {
           </Link>
           <div className="mt-3">
             <h1 className="text-3xl font-semibold text-stone-950">{plant.name}</h1>
-            <p className="mt-1 text-stone-600">
-              Grid {plant.gridX + 1}, {plant.gridY + 1}
-            </p>
           </div>
         </div>
       </header>
@@ -53,19 +52,17 @@ export default async function PlantPage({ params }: PageProps) {
         <div className="container grid gap-6 lg:grid-cols-[360px_1fr]">
           <aside className="grid content-start gap-4">
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-stone-950">Plant</h2>
-              <dl className="mt-4 grid gap-3 text-sm">
-                <div>
-                  <dt className="font-medium text-stone-950">Tags</dt>
-                  <dd className="text-stone-600">{plant.tags || "None"}</dd>
-                </div>
-                <div>
-                  <dt className="font-medium text-stone-950">Notes</dt>
-                  <dd className="whitespace-pre-wrap text-stone-600">
-                    {plant.notes || "No notes yet."}
-                  </dd>
-                </div>
-              </dl>
+              <h2 className="text-lg font-semibold text-stone-950">Edit Plant</h2>
+              <div className="mt-4">
+                <PlantEditor
+                  plantId={plant.id}
+                  projectId={plant.projectId}
+                  name={plant.name}
+                  tags={plant.tags}
+                  notes={plant.notes}
+                  eventCount={plant.events.length}
+                />
+              </div>
             </div>
 
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
@@ -117,11 +114,22 @@ export default async function PlantPage({ params }: PageProps) {
                           {formatDateTime(event.timestamp)}
                         </p>
                       </div>
-                      {event.photo ? (
-                        <Link className="button-secondary" href={`/photos/${event.photo.id}`}>
-                          Open Photo
-                        </Link>
-                      ) : null}
+                      <div className="grid gap-2 justify-items-start sm:justify-items-end">
+                        {event.photo ? (
+                          <Link className="button-secondary" href={`/photos/${event.photo.id}`}>
+                            Open Photo
+                          </Link>
+                        ) : null}
+                        <EventActions
+                          event={{
+                            id: event.id,
+                            type: event.type,
+                            notes: event.notes,
+                            timestamp: event.timestamp.toISOString(),
+                            photoId: event.photoId,
+                          }}
+                        />
+                      </div>
                     </div>
                     {event.notes ? (
                       <p className="mt-3 whitespace-pre-wrap text-sm text-stone-700">

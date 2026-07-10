@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, rename, unlink } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import type { Photo } from "@prisma/client";
+import type { Photo, Project } from "@prisma/client";
 import { formatLocalTimestamp } from "./photos";
 import { prisma } from "./prisma";
 
@@ -15,6 +16,10 @@ type CameraSettings = {
 type CaptureResult = {
   photo: Photo;
   savedPath: string;
+};
+
+type CaptureOptions = {
+  notes?: string | null;
 };
 
 function parsePositiveInt(value: string | undefined, fallback: number, name: string) {
@@ -30,9 +35,15 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
   return parsed;
 }
 
-export function getCameraSettings(): CameraSettings {
+export function getCameraSettings(project?: Pick<Project, "cameraDevice">): CameraSettings {
+  const device = process.env.CAMERA_DEVICE || project?.cameraDevice;
+
+  if (!device) {
+    throw new Error("No camera selected for this project.");
+  }
+
   return {
-    device: process.env.CAMERA_DEVICE || "/dev/video4",
+    device,
     width: parsePositiveInt(process.env.CAMERA_WIDTH, 1920, "CAMERA_WIDTH"),
     height: parsePositiveInt(process.env.CAMERA_HEIGHT, 1080, "CAMERA_HEIGHT"),
   };
@@ -105,14 +116,14 @@ async function nextCapturePath(directory: string, capturedAt: Date) {
   return candidate;
 }
 
-export async function captureProjectPhoto(projectId: string): Promise<CaptureResult> {
+export async function captureProjectPhoto(projectId: string, options: CaptureOptions = {}): Promise<CaptureResult> {
   const project = await prisma.project.findUnique({ where: { id: projectId } });
 
   if (!project) {
     throw new Error(`Project not found: ${projectId}`);
   }
 
-  const settings = getCameraSettings();
+  const settings = getCameraSettings(project);
   await mkdir(project.localPhotoDirectory, { recursive: true });
 
   const capturedAt = new Date();
@@ -133,8 +144,39 @@ export async function captureProjectPhoto(projectId: string): Promise<CaptureRes
       filename: path.basename(savedPath),
       path: savedPath,
       timestamp: capturedAt,
+      notes: options.notes ?? null,
     },
   });
 
   return { photo, savedPath };
+}
+
+const activePreviewDevices = new Set<string>();
+
+export async function capturePreviewImage(projectId: string) {
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+
+  if (!project) {
+    throw new Error(`Project not found: ${projectId}`);
+  }
+
+  const settings = getCameraSettings(project);
+
+  if (activePreviewDevices.has(settings.device)) {
+    throw new Error("A preview capture is already in progress for this camera.");
+  }
+
+  activePreviewDevices.add(settings.device);
+  const temporaryPath = path.join(
+    os.tmpdir(),
+    `plantlab-preview-${projectId}-${Date.now()}.jpg`,
+  );
+
+  try {
+    await runFfmpeg(settings, temporaryPath);
+    return await readFile(temporaryPath);
+  } finally {
+    activePreviewDevices.delete(settings.device);
+    await unlink(temporaryPath).catch(() => undefined);
+  }
 }

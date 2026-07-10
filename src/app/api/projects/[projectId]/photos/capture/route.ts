@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { captureProjectPhoto } from "@/lib/camera";
+import { readJson } from "@/lib/http";
 
 export const runtime = "nodejs";
 
@@ -7,7 +8,7 @@ type Context = {
   params: Promise<{ projectId: string }>;
 };
 
-export async function POST(_request: Request, context: Context) {
+export async function POST(request: Request, context: Context) {
   if (process.env.NODE_ENV === "production") {
     return NextResponse.json(
       { error: "Local camera capture is disabled in production." },
@@ -16,9 +17,12 @@ export async function POST(_request: Request, context: Context) {
   }
 
   const { projectId } = await context.params;
+  const body = await readJson(request);
 
   try {
-    const result = await captureProjectPhoto(projectId);
+    const result = await captureProjectPhoto(projectId, {
+      notes: typeof body?.notes === "string" ? body.notes : null,
+    });
 
     return NextResponse.json({
       photo: result.photo,

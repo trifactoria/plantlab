@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { badRequest, notFound, optionalDate, optionalString, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
@@ -39,4 +40,34 @@ export async function PATCH(request: Request, context: Context) {
 
     throw error;
   }
+}
+
+export async function DELETE(_request: Request, context: Context) {
+  const { photoId } = await context.params;
+  const photo = await prisma.photo.findUnique({ where: { id: photoId } });
+
+  if (!photo) {
+    return notFound("Photo not found");
+  }
+
+  let fileDeleted = true;
+
+  try {
+    await unlink(photo.path);
+  } catch (error) {
+    fileDeleted = false;
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+    if (code !== "ENOENT") {
+      console.error(error);
+    }
+  }
+
+  await prisma.photo.delete({ where: { id: photoId } });
+
+  return NextResponse.json({
+    deleted: true,
+    photoId,
+    path: photo.path,
+    fileDeleted,
+  });
 }

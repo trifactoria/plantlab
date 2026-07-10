@@ -5,7 +5,9 @@ import { CapturePhotoButton } from "@/components/CapturePhotoButton";
 import { PlantGrid } from "@/components/PlantGrid";
 import { ScanPhotosButton } from "@/components/ScanPhotosButton";
 import { formatDateTime } from "@/lib/format";
+import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
 import { prisma } from "@/lib/prisma";
+import { nextAlignedCaptureTime } from "@/lib/schedule";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -17,7 +19,6 @@ export default async function ProjectPage({ params }: PageProps) {
     where: { id: projectId },
     include: {
       plants: { orderBy: [{ gridY: "asc" }, { gridX: "asc" }] },
-      photos: { orderBy: { timestamp: "desc" } },
     },
   });
 
@@ -25,8 +26,24 @@ export default async function ProjectPage({ params }: PageProps) {
     notFound();
   }
 
-  const latestPhoto = project.photos[0] ?? null;
+  const [latestPhoto, galleryPhotos] = await Promise.all([
+    prisma.photo.findFirst({
+      where: { projectId: project.id },
+      orderBy: { timestamp: "desc" },
+    }),
+    prisma.photo.findMany({
+      where: { projectId: project.id },
+      orderBy: { timestamp: "desc" },
+      select: { id: true, timestamp: true },
+    }),
+  ]);
+  const monthCards = groupPhotosByMonth(galleryPhotos);
+  const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos) : [];
   const canCaptureLocally = process.env.NODE_ENV !== "production";
+  const nextCaptureAt = nextAlignedCaptureTime({
+    startAt: project.captureStartAt,
+    intervalMinutes: project.photoIntervalMinutes,
+  });
   const gridPlants = project.plants.map((plant) => ({
     id: plant.id,
     name: plant.name,
@@ -47,6 +64,19 @@ export default async function ProjectPage({ params }: PageProps) {
               {project.description ? (
                 <p className="mt-2 max-w-2xl text-stone-600">{project.description}</p>
               ) : null}
+              <Link
+                href={`/projects/${project.id}/settings`}
+                className="mt-3 inline-flex text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+              >
+                Project Settings
+              </Link>
+              <span className="mx-2 text-stone-300">/</span>
+              <Link
+                href={`/projects/${project.id}/camera`}
+                className="inline-flex text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+              >
+                Camera Setup
+              </Link>
             </div>
             <div className="grid gap-2 sm:justify-items-end">
               {canCaptureLocally ? (
@@ -74,6 +104,28 @@ export default async function ProjectPage({ params }: PageProps) {
                   <dt className="font-medium text-stone-950">Photo interval</dt>
                   <dd className="text-stone-600">
                     {project.photoIntervalMinutes} minutes
+                  </dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Camera</dt>
+                  <dd className="text-stone-600">
+                    {project.cameraDevice
+                      ? `${project.cameraName ?? "Camera"} (${project.cameraDevice})`
+                      : "No camera selected"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Schedule start</dt>
+                  <dd className="text-stone-600">{formatDateTime(project.captureStartAt)}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Next capture</dt>
+                  <dd className="text-stone-600">{formatDateTime(nextCaptureAt)}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Watcher command</dt>
+                  <dd className="break-all font-mono text-xs text-stone-600">
+                    pnpm camera:watch -- {project.id}
                   </dd>
                 </div>
                 <div>
@@ -132,31 +184,55 @@ export default async function ProjectPage({ params }: PageProps) {
             <div>
               <h2 className="text-xl font-semibold text-stone-950">Photo Gallery</h2>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {project.photos.length === 0 ? (
+                {galleryPhotos.length === 0 ? (
                   <p className="rounded-lg border border-dashed border-stone-300 bg-white p-5 text-stone-600 sm:col-span-2 lg:col-span-3">
                     Add image files to the photo directory, then scan it.
                   </p>
-                ) : (
-                  project.photos.map((photo) => (
+                ) : monthCards.length > 1 ? (
+                  monthCards.map((month) => (
                     <Link
-                      key={photo.id}
-                      href={`/photos/${photo.id}`}
+                      key={month.key}
+                      href={`/projects/${project.id}/gallery/${month.key}`}
                       className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm transition hover:border-cyan-300"
                     >
                       <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-stone-100">
                         <Image
-                          src={`/api/photos/${photo.id}/file`}
-                          alt={photo.filename}
+                          src={`/api/photos/${month.representativePhoto.id}/file`}
+                          alt={month.label}
                           fill
                           sizes="(max-width: 1024px) 50vw, 260px"
                           className="object-cover"
                         />
                       </div>
-                      <p className="mt-2 truncate text-sm font-medium text-stone-950">
-                        {photo.filename}
+                      <p className="mt-2 text-sm font-semibold text-stone-950">
+                        {month.label}
                       </p>
                       <p className="text-xs text-stone-500">
-                        {formatDateTime(photo.timestamp)}
+                        {month.dayCount} day{month.dayCount === 1 ? "" : "s"} / {month.photoCount} photo{month.photoCount === 1 ? "" : "s"}
+                      </p>
+                    </Link>
+                  ))
+                ) : (
+                  dayCards.map((day) => (
+                    <Link
+                      key={day.key}
+                      href={`/projects/${project.id}/gallery/${day.key.slice(0, 7)}/${day.key.slice(8, 10)}`}
+                      className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm transition hover:border-cyan-300"
+                    >
+                      <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-stone-100">
+                        <Image
+                          src={`/api/photos/${day.representativePhoto.id}/file`}
+                          alt={day.label}
+                          fill
+                          sizes="(max-width: 1024px) 50vw, 260px"
+                          className="object-cover"
+                        />
+                      </div>
+                      <p className="mt-2 text-sm font-semibold text-stone-950">
+                        {day.label}
+                      </p>
+                      <p className="text-xs text-stone-500">
+                        {day.photoCount} photo{day.photoCount === 1 ? "" : "s"} / {formatDateTime(day.firstCaptureAt)} - {formatDateTime(day.lastCaptureAt)}
                       </p>
                     </Link>
                   ))

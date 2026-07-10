@@ -6,6 +6,8 @@ coverage
 *.log
 *.tsbuildinfo
 /data/
+artifacts/screenshots/
+test-results/
 prisma/dev.db
 prisma/dev.db-journal
 zips

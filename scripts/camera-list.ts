@@ -7,6 +7,8 @@ async function main() {
       id: true,
       name: true,
       localPhotoDirectory: true,
+      cameraName: true,
+      cameraDevice: true,
     },
   });
 
@@ -16,7 +18,10 @@ async function main() {
   }
 
   for (const project of projects) {
-    console.log(`${project.id}\t${project.name}\t${project.localPhotoDirectory}`);
+    const camera = project.cameraDevice
+      ? `${project.cameraName ?? "Camera"} (${project.cameraDevice})`
+      : "No camera selected";
+    console.log(`${project.id}\t${project.name}\t${camera}\t${project.localPhotoDirectory}`);
   }
 }
 

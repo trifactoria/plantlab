@@ -10,7 +10,10 @@
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "camera:capture": "tsx scripts/camera-capture.ts",
-    "camera:list": "tsx scripts/camera-list.ts"
+    "camera:list": "tsx scripts/camera-list.ts",
+    "camera:watch": "tsx scripts/camera-watch.ts",
+    "test:e2e": "playwright test tests/e2e.spec.ts",
+    "screenshots": "playwright test tests/screenshots.spec.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",
@@ -22,6 +25,7 @@
     "tailwindcss": "4.3.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",

@@ -49,3 +49,23 @@ export async function PATCH(request: Request, context: Context) {
     throw error;
   }
 }
+
+export async function DELETE(_request: Request, context: Context) {
+  const { plantId } = await context.params;
+  const plant = await prisma.plant.findUnique({
+    where: { id: plantId },
+    include: { _count: { select: { events: true } } },
+  });
+
+  if (!plant) {
+    return notFound("Plant not found");
+  }
+
+  await prisma.plant.delete({ where: { id: plantId } });
+
+  return NextResponse.json({
+    deleted: true,
+    plantId,
+    deletedEventCount: plant._count.events,
+  });
+}

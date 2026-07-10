@@ -144,6 +144,7 @@ export function PlantGrid({
           ) : (
             <button
               type="button"
+              data-testid={`grid-cell-${x}-${y}`}
               className={`h-full w-full rounded-md border p-2 text-center text-sm font-semibold transition ${
                 plant
                   ? "border-cyan-300 bg-cyan-50 text-cyan-950 hover:bg-cyan-100"

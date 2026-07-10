@@ -2,6 +2,8 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CameraSelect } from "@/components/CameraSelect";
+import { toDateTimeLocal } from "@/lib/format";
 
 type ProjectResponse = {
   id: string;
@@ -11,6 +13,7 @@ export function ProjectForm() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [useDefaultFolder, setUseDefaultFolder] = useState(true);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -27,7 +30,11 @@ export function ProjectForm() {
         gridWidth: formData.get("gridWidth"),
         gridHeight: formData.get("gridHeight"),
         photoIntervalMinutes: formData.get("photoIntervalMinutes"),
+        captureStartAt: new Date(String(formData.get("captureStartAt"))).toISOString(),
+        useDefaultPhotoDirectory: formData.get("useDefaultPhotoDirectory") === "on",
         localPhotoDirectory: formData.get("localPhotoDirectory"),
+        cameraDevice: formData.get("cameraDevice"),
+        cameraName: formData.get("cameraName"),
       }),
     });
 
@@ -71,9 +78,40 @@ export function ProjectForm() {
       </div>
 
       <label className="field">
-        Local photo directory
-        <input className="input" name="localPhotoDirectory" placeholder="/home/andy/plant-photos/radish" required />
+        Schedule starting date and time
+        <input
+          className="input"
+          name="captureStartAt"
+          type="datetime-local"
+          defaultValue={toDateTimeLocal(new Date().toISOString())}
+          required
+        />
       </label>
+
+      <CameraSelect />
+
+      <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">
+        <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+          <input
+            name="useDefaultPhotoDirectory"
+            type="checkbox"
+            checked={useDefaultFolder}
+            onChange={(event) => setUseDefaultFolder(event.target.checked)}
+          />
+          Create and use a PlantLab photo folder for this project
+        </label>
+        {!useDefaultFolder ? (
+          <label className="field">
+            Custom photo folder
+            <input
+              className="input"
+              name="localPhotoDirectory"
+              placeholder="/home/andy/plant-photos/radish"
+              required
+            />
+          </label>
+        ) : null}
+      </div>
 
       {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
 

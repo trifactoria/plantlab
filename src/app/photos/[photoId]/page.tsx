@@ -1,7 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { PhotoNotesForm } from "@/components/PhotoNotesForm";
+import { EventActions } from "@/components/EventActions";
+import { PhotoEditor } from "@/components/PhotoEditor";
 import { PlantGrid } from "@/components/PlantGrid";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
@@ -21,7 +22,7 @@ export default async function PhotoPage({ params }: PageProps) {
     notFound();
   }
 
-  const [plants, photos] = await Promise.all([
+  const [plants, photos, events] = await Promise.all([
     prisma.plant.findMany({
       where: { projectId: photo.projectId },
       orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
@@ -30,6 +31,11 @@ export default async function PhotoPage({ params }: PageProps) {
       where: { projectId: photo.projectId },
       orderBy: { timestamp: "desc" },
       select: { id: true },
+    }),
+    prisma.plantEvent.findMany({
+      where: { photoId: photo.id },
+      include: { plant: true },
+      orderBy: { timestamp: "desc" },
     }),
   ]);
 
@@ -80,6 +86,55 @@ export default async function PhotoPage({ params }: PageProps) {
             </div>
 
             <div>
+              <h2 className="text-xl font-semibold text-stone-950">Linked Events</h2>
+              <div className="mt-4 grid gap-3">
+                {events.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-stone-300 bg-white p-5 text-stone-600">
+                    No events are linked to this photo yet.
+                  </p>
+                ) : (
+                  events.map((event) => (
+                    <article
+                      key={event.id}
+                      className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <Link
+                            href={`/plants/${event.plant.id}`}
+                            className="text-sm font-semibold text-emerald-700"
+                          >
+                            {event.plant.name}
+                          </Link>
+                          <h3 className="mt-1 text-lg font-semibold text-stone-950">
+                            {event.type}
+                          </h3>
+                          <p className="text-sm text-stone-500">
+                            {formatDateTime(event.timestamp)}
+                          </p>
+                        </div>
+                        <EventActions
+                          event={{
+                            id: event.id,
+                            type: event.type,
+                            notes: event.notes,
+                            timestamp: event.timestamp.toISOString(),
+                            photoId: event.photoId,
+                          }}
+                        />
+                      </div>
+                      {event.notes ? (
+                        <p className="mt-3 whitespace-pre-wrap text-sm text-stone-700">
+                          {event.notes}
+                        </p>
+                      ) : null}
+                    </article>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div>
               <h2 className="text-xl font-semibold text-stone-950">Grid</h2>
               <div className="mt-4">
                 <PlantGrid
@@ -103,9 +158,14 @@ export default async function PhotoPage({ params }: PageProps) {
           </div>
 
           <aside className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <h2 className="text-lg font-semibold text-stone-950">Photo Notes</h2>
+            <h2 className="text-lg font-semibold text-stone-950">Edit Photo</h2>
             <div className="mt-4">
-              <PhotoNotesForm photoId={photo.id} notes={photo.notes} />
+              <PhotoEditor
+                photoId={photo.id}
+                projectId={photo.projectId}
+                timestamp={photo.timestamp.toISOString()}
+                notes={photo.notes}
+              />
             </div>
           </aside>
         </div>
