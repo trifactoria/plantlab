@@ -3,6 +3,8 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
+import { DateTimeField } from "@/components/DateTimeField";
+import { TagInput } from "@/components/TagInput";
 import { toDateTimeLocal } from "@/lib/format";
 
 export function PlantEditor({
@@ -25,6 +27,8 @@ export function PlantEditor({
   eventCount: number;
 }) {
   const router = useRouter();
+  const [tagsValue, setTagsValue] = useState(tags ?? "");
+  const [startedAtValue, setStartedAtValue] = useState(() => toDateTimeLocal(startedAt));
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,34 +88,28 @@ export function PlantEditor({
           Name
           <input className="input" name="name" defaultValue={name} required />
         </label>
-        <label className="field">
-          Tags
-          <input className="input" name="tags" defaultValue={tags ?? ""} />
-        </label>
+        <TagInput name="tags" value={tagsValue} onChange={setTagsValue} />
         <label className="field">
           Notes
           <textarea className="input min-h-28" name="notes" defaultValue={notes ?? ""} />
         </label>
         <label className="field">
-          Initial event label
+          Starting observation
           <input className="input" name="startLabel" list="plant-start-labels-editor" defaultValue={startLabel} required />
           <datalist id="plant-start-labels-editor">
+            <option value="Added to project" />
             <option value="First visible" />
             <option value="Cutting placed in water" />
             <option value="Cutting planted in soil" />
-            <option value="Added to project" />
           </datalist>
         </label>
-        <label className="field">
-          Initial timestamp
-          <input
-            className="input"
-            name="startedAt"
-            type="datetime-local"
-            defaultValue={toDateTimeLocal(startedAt)}
-            required
-          />
-        </label>
+        <DateTimeField
+          label="Starting timestamp"
+          name="startedAt"
+          value={startedAtValue}
+          onChange={setStartedAtValue}
+          required
+        />
 
         {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
 

@@ -77,6 +77,10 @@ export default async function ProjectPage({ params }: PageProps) {
     gridY: plant.gridY,
   }));
   const milestoneByKey = new Map(milestones.map((milestone) => [milestone.key, milestone]));
+  const gridMilestones = milestones
+    .filter((milestone) => milestone.enabled)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+    .map((milestone) => ({ id: milestone.id, label: milestone.label }));
   function fastestFor(key: string) {
     const milestone = milestoneByKey.get(key);
     if (!milestone) {
@@ -304,6 +308,7 @@ export default async function ProjectPage({ params }: PageProps) {
                     gridHeight: project.gridHeight,
                   }}
                   plants={gridPlants}
+                  milestones={gridMilestones}
                 />
               </div>
             </div>

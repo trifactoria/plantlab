@@ -1,10 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CropSelector, type CropValue } from "@/components/CropSelector";
+import { CreatedPlant, PlantCreateForm } from "@/components/PlantCreateForm";
+import { StartingObservationMilestone } from "@/components/StartingObservationField";
 import { toDateTimeLocal } from "@/lib/format";
+import { findNextEmptyCell, gridCellKey } from "@/lib/plantEntry";
 
 type GridPlant = {
   id: string;
@@ -36,71 +39,58 @@ const EVENT_TYPES = [
   "Harvest Ready",
   "Harvested",
 ];
-const START_LABELS = [
-  "First visible",
-  "Cutting placed in water",
-  "Cutting planted in soil",
-  "Added to project",
-];
 
 export function PlantGrid({
   project,
   plants,
+  milestones = [],
   mode = "dashboard",
   photoId,
   photoTimestamp,
 }: {
   project: ProjectGrid;
   plants: GridPlant[];
+  milestones?: StartingObservationMilestone[];
   mode?: "dashboard" | "photo";
   photoId?: string;
   photoTimestamp?: string;
 }) {
   const router = useRouter();
-  const plantByCell = useMemo(() => {
-    return new Map(plants.map((plant) => [`${plant.gridX}:${plant.gridY}`, plant]));
+  const [localPlants, setLocalPlants] = useState(plants);
+  useEffect(() => {
+    setLocalPlants(plants);
   }, [plants]);
+
+  const plantByCell = useMemo(() => {
+    return new Map(localPlants.map((plant) => [gridCellKey(plant.gridX, plant.gridY), plant]));
+  }, [localPlants]);
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
+  const [lastCreatedName, setLastCreatedName] = useState<string | null>(null);
   const [selectedPlant, setSelectedPlant] = useState<SelectedPlant | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [eventCrop, setEventCrop] = useState<CropValue | null>(null);
   const [showCropSelector, setShowCropSelector] = useState(false);
 
-  async function createPlant(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!selectedCell) {
-      return;
-    }
-
-    setSaving(true);
+  function handlePlantCreated(plant: CreatedPlant, options: { addNext: boolean }) {
+    const nextLocalPlants = [...localPlants, plant];
+    setLocalPlants(nextLocalPlants);
+    setLastCreatedName(plant.name);
     setError(null);
-    const formData = new FormData(event.currentTarget);
-    const response = await fetch("/api/plants", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectId: project.id,
-        gridX: selectedCell.gridX,
-        gridY: selectedCell.gridY,
-        name: formData.get("name"),
-        tags: formData.get("tags"),
-        notes: formData.get("notes"),
-        startLabel: formData.get("startLabel"),
-        startedAt: new Date(String(formData.get("startedAt"))).toISOString(),
-      }),
-    });
 
-    const payload = (await response.json()) as { error?: string };
-    setSaving(false);
-
-    if (!response.ok) {
-      setError(payload.error ?? "Could not create plant");
-      return;
+    if (options.addNext) {
+      const occupied = new Set(nextLocalPlants.map((item) => gridCellKey(item.gridX, item.gridY)));
+      const nextCell = findNextEmptyCell(
+        { gridX: plant.gridX, gridY: plant.gridY },
+        occupied,
+        project.gridWidth,
+        project.gridHeight,
+      );
+      setSelectedCell(nextCell);
+    } else {
+      setSelectedCell(null);
     }
 
-    setSelectedCell(null);
     router.refresh();
   }
 
@@ -150,7 +140,7 @@ export function PlantGrid({
   const cells = [];
   for (let y = 0; y < project.gridHeight; y += 1) {
     for (let x = 0; x < project.gridWidth; x += 1) {
-      const plant = plantByCell.get(`${x}:${y}`);
+      const plant = plantByCell.get(gridCellKey(x, y));
       cells.push(
         <div key={`${x}:${y}`} className="aspect-square min-h-16">
           {plant && mode === "dashboard" ? (
@@ -203,54 +193,15 @@ export function PlantGrid({
 
       {selectedCell ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <form onSubmit={createPlant} className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
-            <div>
-              <h2 className="text-lg font-semibold text-stone-950">Create Plant</h2>
-            </div>
-
-            <label className="field">
-              Name
-              <input className="input" name="name" required autoFocus />
-            </label>
-            <label className="field">
-              Tags
-              <input className="input" name="tags" placeholder="fast, control, tray-a" />
-            </label>
-            <label className="field">
-              Notes
-              <textarea className="input min-h-24" name="notes" />
-            </label>
-            <label className="field">
-              Initial event label
-              <input className="input" name="startLabel" list="plant-start-labels" defaultValue="First visible" required />
-              <datalist id="plant-start-labels">
-                {START_LABELS.map((label) => (
-                  <option key={label} value={label} />
-                ))}
-              </datalist>
-            </label>
-            <label className="field">
-              Initial timestamp
-              <input
-                className="input"
-                name="startedAt"
-                type="datetime-local"
-                defaultValue={toDateTimeLocal(new Date().toISOString())}
-                required
-              />
-            </label>
-
-            {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
-
-            <div className="flex justify-end gap-2">
-              <button type="button" className="button-secondary" onClick={() => setSelectedCell(null)}>
-                Cancel
-              </button>
-              <button className="button" disabled={saving}>
-                {saving ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </form>
+          <PlantCreateForm
+            key={gridCellKey(selectedCell.gridX, selectedCell.gridY)}
+            projectId={project.id}
+            cell={selectedCell}
+            milestones={milestones}
+            lastCreatedName={lastCreatedName}
+            onCancel={() => setSelectedCell(null)}
+            onSaved={handlePlantCreated}
+          />
         </div>
       ) : null}
 

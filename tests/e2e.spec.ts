@@ -63,8 +63,9 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
 
   await page.getByTestId("grid-cell-2-2").click();
   await expect(page.getByRole("heading", { name: "Create Plant" })).toBeVisible();
-  await expect(page.getByLabel("Initial event label")).toBeVisible();
-  await expect(page.getByLabel("Initial timestamp")).toBeVisible();
+  await expect(page.getByText("Starting observation")).toBeVisible();
+  await expect(page.getByLabel("Starting timestamp")).toBeVisible();
+  await expect(page.getByPlaceholder("Or type a custom observation")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await goto(page, `/projects/${ids.projectId}/settings`);
@@ -127,12 +128,61 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Visual History" })).toBeVisible();
   await expect(page.getByText("Frame 1 of 3")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Edit Plant" })).toBeVisible();
-  await expect(page.getByLabel("Initial event label")).toBeVisible();
-  await expect(page.getByLabel("Initial timestamp")).toBeVisible();
+  await expect(page.getByLabel("Starting observation")).toBeVisible();
+  await expect(page.getByLabel("Starting timestamp")).toBeVisible();
   await page.getByRole("button", { name: "Edit" }).first().click();
   await expect(page.getByRole("heading", { name: "Edit Event" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select crop from photo" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
+});
+
+test("repeated grid entry remembers timestamp/tags and proposes the next name, scoped per project", async ({ page }) => {
+  await mockCameraApis(page);
+  const ids = await seedVisualData();
+
+  await goto(page, `/projects/${ids.projectId}`);
+
+  await page.getByTestId("grid-cell-2-0").click();
+  await expect(page.getByRole("heading", { name: "Create Plant" })).toBeVisible();
+  await page.getByLabel("Name").fill("TestSeq1");
+  await page.getByLabel("Tags", { exact: true }).fill("batchA");
+  await page.getByLabel("Tags", { exact: true }).press("Enter");
+  await expect(page.getByText("batchA")).toBeVisible();
+  await page.getByLabel("Starting timestamp").fill("2026-07-11T09:00");
+  const savedTimestamp = await page.getByLabel("Starting timestamp").inputValue();
+
+  await page.getByRole("button", { name: "Save and add next" }).click();
+
+  await expect(page.getByRole("heading", { name: "Create Plant" })).toBeVisible();
+  await expect(page.getByLabel("Name")).toHaveValue("TestSeq2");
+  await expect(page.getByLabel("Starting timestamp")).toHaveValue(savedTimestamp);
+  await expect(page.getByText("batchA")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  const isolationProjectResponse = await page.request.post("/api/projects", {
+    data: {
+      name: "Isolation Test Project",
+      description: "",
+      gridWidth: 1,
+      gridHeight: 1,
+      photoIntervalMinutes: 30,
+      captureStartAt: "2026-07-10T13:00:00.000Z",
+      plantedAt: null,
+      useDefaultPhotoDirectory: true,
+      cameraDevice: "",
+      cameraName: "",
+    },
+  });
+  const isolationProject = await isolationProjectResponse.json();
+
+  await goto(page, `/projects/${isolationProject.id}`);
+  await page.getByTestId("grid-cell-0-0").click();
+  await expect(page.getByRole("heading", { name: "Create Plant" })).toBeVisible();
+  await expect(page.getByLabel("Name")).toHaveValue("");
+  await expect(page.getByText("batchA")).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  await page.request.delete(`/api/projects/${isolationProject.id}`);
 });
 
 test("photo upload and crop safety flows", async ({ page }) => {

@@ -39,6 +39,12 @@ export async function POST(request: Request) {
       return badRequest("grid position is outside this project grid");
     }
 
+    // startLabel intentionally omitted unless explicitly supplied: the Plant
+    // schema default ("Added to project") represents record creation, not a
+    // biological observation. Any starting observation is a separate PlantEvent
+    // created by the client via POST /api/events.
+    const startLabel = optionalString(body?.startLabel);
+
     const plant = await prisma.plant.create({
       data: {
         projectId,
@@ -47,7 +53,7 @@ export async function POST(request: Request) {
         notes: optionalString(body?.notes),
         gridX,
         gridY,
-        startLabel: optionalString(body?.startLabel) ?? "First visible",
+        ...(startLabel ? { startLabel } : {}),
         startedAt: optionalDate(body?.startedAt),
       },
     });

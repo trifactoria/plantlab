@@ -228,6 +228,7 @@ export default async function PhotoPage({ params }: PageProps) {
                     gridX: plant.gridX,
                     gridY: plant.gridY,
                   }))}
+                  milestones={milestones.map((milestone) => ({ id: milestone.id, label: milestone.label }))}
                   photoId={photo.id}
                   photoTimestamp={photo.timestamp.toISOString()}
                 />
