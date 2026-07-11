@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { badRequest, notFound } from "@/lib/http";
+import { computeExtractRegion } from "@/lib/cropThumbnail";
 import { prisma } from "@/lib/prisma";
+import sharp from "sharp";
 
 type Context = {
   params: Promise<{ plantId: string }>;
@@ -34,6 +36,20 @@ export async function GET(request: Request, context: Context) {
     orderBy: { timestamp: "asc" },
   });
 
+  let sourceCropWidth: number | null = null;
+  let sourceCropHeight: number | null = null;
+  try {
+    const metadata = await sharp(crop.photo.path).metadata();
+    if (metadata.width && metadata.height) {
+      const region = computeExtractRegion(crop, metadata.width, metadata.height);
+      sourceCropWidth = region.width;
+      sourceCropHeight = region.height;
+    }
+  } catch {
+    sourceCropWidth = null;
+    sourceCropHeight = null;
+  }
+
   return NextResponse.json({
     photo: {
       id: crop.photo.id,
@@ -43,6 +59,14 @@ export async function GET(request: Request, context: Context) {
     crop: {
       id: crop.id,
       updatedAt: crop.updatedAt,
+      cropX: crop.cropX,
+      cropY: crop.cropY,
+      cropWidth: crop.cropWidth,
+      cropHeight: crop.cropHeight,
+      createdMethod: crop.createdMethod,
+      sourceCropId: crop.sourceCropId,
+      sourceCropWidth,
+      sourceCropHeight,
     },
     events,
   });

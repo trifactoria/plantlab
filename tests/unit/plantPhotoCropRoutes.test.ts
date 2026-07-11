@@ -76,6 +76,9 @@ describe("plant-photo-crop routes", () => {
     const created = await goodResponse.json();
     expect(created.plantId).toBe(plant.id);
     expect(created.photoId).toBe(photos[0].photo.id);
+    expect(created.createdMethod).toBe("manual");
+    const updatedPlant = await prisma.plant.findUnique({ where: { id: plant.id } });
+    expect(updatedPlant?.visualAspectRatio).toBe("16:9");
 
     // Cross-project rejection.
     const crossProjectResponse = await postCrop(
@@ -290,6 +293,64 @@ describe("plant-photo-crop routes", () => {
       where: { plantId_photoId: { plantId: plant.id, photoId: earlier.photo.id } },
     });
     expect(earlierCrop?.cropWidth).toBe(0.3);
+    expect(earlierCrop?.createdMethod).toBe("propagated");
+    expect(earlierCrop?.sourceCropId).toBeTruthy();
+  });
+
+  it("supports propagation dry-run before the source crop exists", async () => {
+    const { plant, photos } = await setUpProjectWithPlantAndPhotos(3);
+    const dryRun = await propagateCrop(
+      jsonRequest("http://localhost/api/plant-photo-crops/propagate", {
+        plantId: plant.id,
+        sourcePhotoId: photos[1].photo.id,
+        target: "all-without-crop",
+        dryRun: true,
+      }),
+    ).then((response) => response.json());
+
+    expect(dryRun.affectedCount).toBe(2);
+    expect(dryRun.skippedExistingCount).toBe(0);
+  });
+
+  it("marks a propagated crop manual after edit", async () => {
+    const { plant, photos } = await setUpProjectWithPlantAndPhotos(2);
+    const [, later] = photos;
+
+    const source = await postCrop(
+      jsonRequest("http://localhost/api/plant-photo-crops", {
+        plantId: plant.id,
+        photoId: photos[0].photo.id,
+        cropX: 0.2,
+        cropY: 0.2,
+        cropWidth: 0.3,
+        cropHeight: 0.3,
+      }),
+    ).then((response) => response.json());
+
+    await propagateCrop(
+      jsonRequest("http://localhost/api/plant-photo-crops/propagate", {
+        plantId: plant.id,
+        sourcePhotoId: photos[0].photo.id,
+        target: "all-without-crop",
+        dryRun: false,
+      }),
+    );
+
+    const propagated = await prisma.plantPhotoCrop.findUnique({
+      where: { plantId_photoId: { plantId: plant.id, photoId: later.photo.id } },
+    });
+    expect(propagated?.createdMethod).toBe("propagated");
+    expect(propagated?.sourceCropId).toBe(source.id);
+
+    const context = { params: Promise.resolve({ cropId: propagated!.id }) };
+    const response = await patchCrop(
+      jsonRequest(`http://localhost/api/plant-photo-crops/${propagated!.id}`, { cropWidth: 0.25 }, "PATCH"),
+      context,
+    );
+    expect(response.status).toBe(200);
+    const edited = await response.json();
+    expect(edited.createdMethod).toBe("manual");
+    expect(edited.sourceCropId).toBeNull();
   });
 
   it("cascades: deleting a photo removes its PlantPhotoCrop rows", async () => {
@@ -424,6 +485,10 @@ describe("plant-photo-crop routes", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("image/webp");
+    expect(response.headers.get("X-Source-Crop-Width")).toBe("60");
+    expect(response.headers.get("X-Source-Crop-Height")).toBe("45");
+    expect(response.headers.get("X-Output-Width")).toBe("60");
+    expect(response.headers.get("X-Output-Height")).toBe("45");
     const buffer = Buffer.from(await response.arrayBuffer());
     expect(buffer.length).toBeGreaterThan(0);
   });

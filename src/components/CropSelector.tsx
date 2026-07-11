@@ -1,6 +1,7 @@
 "use client";
 
-import { PointerEvent, useRef, useState } from "react";
+import { PointerEvent, useEffect, useRef, useState } from "react";
+import { calculatePreviewCanvasSize } from "@/lib/cropGeometry";
 
 export type CropValue = {
   cropX: number;
@@ -28,8 +29,11 @@ export function CropSelector({
   onChange: (crop: CropValue | null) => void;
 }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [draft, setDraft] = useState<CropValue | null>(value);
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+  const [previewSize, setPreviewSize] = useState({ width: 160, height: 120 });
 
   function pointFromEvent(event: PointerEvent<HTMLDivElement>) {
     const image = imageRef.current;
@@ -94,6 +98,40 @@ export function CropSelector({
 
   const visibleCrop = draft ?? value;
 
+  useEffect(() => {
+    const img = imageRef.current;
+    const canvas = previewCanvasRef.current;
+    if (!img || !canvas || !visibleCrop || !img.naturalWidth || !img.naturalHeight) {
+      return;
+    }
+
+    const nextPreviewSize = calculatePreviewCanvasSize(visibleCrop, {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    });
+    setPreviewSize(nextPreviewSize);
+    canvas.width = nextPreviewSize.width;
+    canvas.height = nextPreviewSize.height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    ctx.clearRect(0, 0, nextPreviewSize.width, nextPreviewSize.height);
+    ctx.drawImage(
+      img,
+      visibleCrop.cropX * img.naturalWidth,
+      visibleCrop.cropY * img.naturalHeight,
+      visibleCrop.cropWidth * img.naturalWidth,
+      visibleCrop.cropHeight * img.naturalHeight,
+      0,
+      0,
+      nextPreviewSize.width,
+      nextPreviewSize.height,
+    );
+  }, [visibleCrop, imageUrl, naturalSize]);
+
   return (
     <div className="grid gap-3">
       <div className="grid max-h-[420px] min-h-[220px] place-items-center overflow-hidden rounded-md bg-black">
@@ -110,6 +148,10 @@ export function CropSelector({
             alt="Crop source"
             className="max-h-[420px] w-full object-contain"
             draggable={false}
+            onLoad={(event) => {
+              const img = event.currentTarget;
+              setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+            }}
           />
           {visibleCrop ? (
             <div
@@ -126,20 +168,12 @@ export function CropSelector({
       </div>
       {visibleCrop ? (
         <div className="flex items-center gap-3">
-          <div className="relative h-20 w-28 overflow-hidden rounded border border-stone-200 bg-black">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={imageUrl}
-              alt="Crop preview"
-              className="absolute max-w-none"
-              style={{
-                left: `${-(visibleCrop.cropX / visibleCrop.cropWidth) * 100}%`,
-                top: `${-(visibleCrop.cropY / visibleCrop.cropHeight) * 100}%`,
-                width: `${100 / visibleCrop.cropWidth}%`,
-                height: `${100 / visibleCrop.cropHeight}%`,
-              }}
-            />
-          </div>
+          <canvas
+            ref={previewCanvasRef}
+            width={previewSize.width}
+            height={previewSize.height}
+            className="max-h-48 rounded border border-stone-200 bg-black"
+          />
           <button
             type="button"
             className="button-secondary"

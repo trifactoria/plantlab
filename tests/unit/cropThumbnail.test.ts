@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildSharpResizeOptions,
   buildCropThumbnailUrl,
   computeExtractRegion,
   DEFAULT_THUMBNAIL_SIZE,
   MAX_THUMBNAIL_SIZE,
+  resolveThumbnailResizeRequest,
   resolveThumbnailSize,
 } from "../../src/lib/cropThumbnail";
 
@@ -50,6 +52,35 @@ describe("resolveThumbnailSize", () => {
 
   it("clamps to the maximum allowed size", () => {
     expect(resolveThumbnailSize(String(MAX_THUMBNAIL_SIZE + 5000))).toBe(MAX_THUMBNAIL_SIZE);
+  });
+});
+
+describe("thumbnail resize options", () => {
+  it("derives width-only output without forcing height", () => {
+    expect(buildSharpResizeOptions(resolveThumbnailResizeRequest(new URLSearchParams("width=320")))).toEqual({
+      width: 320,
+      height: undefined,
+      fit: undefined,
+      withoutEnlargement: true,
+    });
+  });
+
+  it("derives height-only output without forcing width", () => {
+    expect(buildSharpResizeOptions(resolveThumbnailResizeRequest(new URLSearchParams("height=180")))).toEqual({
+      width: undefined,
+      height: 180,
+      fit: undefined,
+      withoutEnlargement: true,
+    });
+  });
+
+  it("uses inside fit when both bounds are supplied, never fill", () => {
+    expect(buildSharpResizeOptions(resolveThumbnailResizeRequest(new URLSearchParams("maxWidth=320&maxHeight=180")))).toEqual({
+      width: 320,
+      height: 180,
+      fit: "inside",
+      withoutEnlargement: true,
+    });
   });
 });
 

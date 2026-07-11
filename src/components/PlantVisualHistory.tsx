@@ -26,7 +26,18 @@ type FrameEvent = {
 
 type FrameDetail = {
   photo: { id: string; timestamp: string; notes: string | null };
-  crop: { id: string; updatedAt: string };
+  crop: {
+    id: string;
+    updatedAt: string;
+    cropX: number;
+    cropY: number;
+    cropWidth: number;
+    cropHeight: number;
+    createdMethod: string;
+    sourceCropId: string | null;
+    sourceCropWidth: number | null;
+    sourceCropHeight: number | null;
+  };
   events: FrameEvent[];
 };
 
@@ -300,7 +311,16 @@ export function PlantVisualHistory({
     <div className="grid gap-4">
       <div className="grid gap-4 sm:grid-cols-[2fr_1fr]">
         <div className="grid gap-3">
-          <div className="relative aspect-square overflow-hidden rounded-lg border border-stone-200 bg-black shadow-sm">
+          <div
+            data-testid="visual-history-frame"
+            className="grid max-h-[70vh] min-h-64 place-items-center overflow-hidden rounded-lg border border-stone-200 bg-black shadow-sm"
+            style={{
+              aspectRatio:
+                detail?.crop.sourceCropWidth && detail.crop.sourceCropHeight
+                  ? `${detail.crop.sourceCropWidth} / ${detail.crop.sourceCropHeight}`
+                  : "1 / 1",
+            }}
+          >
             {currentFrame ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
@@ -309,7 +329,7 @@ export function PlantVisualHistory({
                   { size: 640 },
                 )}
                 alt="Plant crop"
-                className="h-full w-full object-contain"
+                className="max-h-full max-w-full object-contain"
               />
             ) : null}
           </div>

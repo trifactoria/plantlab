@@ -182,7 +182,7 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
                         <img
                           src={`/api/events/${entry.id}/crop`}
                           alt={`${entry.type} crop`}
-                          className="h-28 rounded-md border border-stone-200 object-cover"
+                          className="max-h-28 max-w-full rounded-md border border-stone-200 bg-black object-contain"
                         />
                       </div>
                     ) : null}

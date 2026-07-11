@@ -190,6 +190,9 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   await page.getByRole("combobox").selectOption(ids.secondPlantId);
   await page.getByRole("button", { name: "Set Plant Crop" }).click();
   await expect(page.getByText("Set Plant Crop - Radish B")).toBeVisible();
+  await expect(page.getByText("Apply crop to:")).toBeVisible();
+  await expect(page.getByText(/This and later photos without a crop - \d+ photos/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Landscape 16:9" })).toBeVisible();
 
   const stage = page.getByTestId("crop-editor-stage");
   const box = await stage.boundingBox();
@@ -198,21 +201,41 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   }
   await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6, { steps: 5 });
+  await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.35, { steps: 5 });
   await page.mouse.up();
   await expect(page.getByText(/Relative sharpness/)).toBeVisible();
+  const previewRatio = await page.getByTestId("crop-preview-canvas").evaluate((canvas) => {
+    const element = canvas as HTMLCanvasElement;
+    return element.width / element.height;
+  });
+  expect(previewRatio).toBeCloseTo(16 / 9, 1);
 
   await page.getByRole("button", { name: "Save Crop" }).click();
-  await expect(page.getByText("Crop saved for", { exact: false })).toBeVisible();
-  await page.getByRole("button", { name: "This Photo Only" }).click();
+  await expect(page.getByText("Saved crop for Radish B.")).toBeVisible();
 
   // The plant now has one frame in its visual history.
   await goto(page, `/plants/${ids.secondPlantId}`);
   await expect(page.getByText("Frame 1 of 1")).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.getByTestId("visual-history-frame").evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width / rect.height;
+      }),
+    )
+    .toBeCloseTo(16 / 9, 1);
 
   // Radish A has three chronological frames with a real capture gap.
   await goto(page, `/plants/${ids.plantId}`);
   await expect(page.getByText("Frame 1 of 3")).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.getByTestId("visual-history-frame").evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width / rect.height;
+      }),
+    )
+    .toBeGreaterThan(1.4);
 
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("Frame 2 of 3")).toBeVisible();
@@ -230,6 +253,14 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   }
   await page.mouse.click(trackBox.x + trackBox.width * 0.97, trackBox.y + trackBox.height / 2);
   await expect(page.getByText("Frame 3 of 3")).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.getByTestId("visual-history-frame").evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width / rect.height;
+      }),
+    )
+    .toBeLessThan(0.8);
 
   // Playback controls toggle without autoplaying by default.
   await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
@@ -241,4 +272,37 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   await page.getByLabel("Event type").fill("First True Leaf");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("First True Leaf").first()).toBeVisible();
+});
+
+test("crop shape controls preserve preview proportions", async ({ page }) => {
+  await mockCameraApis(page);
+  const ids = await seedVisualData();
+
+  await goto(page, `/photos/${ids.photoId}`);
+  await page.getByRole("button", { name: "Edit Crop" }).first().click();
+  await expect(page.getByText("Set Plant Crop - Radish A")).toBeVisible();
+
+  await page.getByRole("button", { name: "Portrait 9:16" }).click();
+  await expect
+    .poll(async () =>
+      page.getByTestId("crop-preview-canvas").evaluate((canvas) => {
+        const element = canvas as HTMLCanvasElement;
+        return element.width / element.height;
+      }),
+    )
+    .toBeCloseTo(9 / 16, 1);
+
+  await page.getByRole("button", { name: "Square 1:1" }).click();
+  await expect
+    .poll(async () =>
+      page.getByTestId("crop-preview-canvas").evaluate((canvas) => {
+        const element = canvas as HTMLCanvasElement;
+        return element.width / element.height;
+      }),
+    )
+    .toBeCloseTo(1, 1);
+
+  await page.getByRole("button", { name: "Free" }).click();
+  await expect(page.getByText(/Existing saved crops keep/)).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
 });

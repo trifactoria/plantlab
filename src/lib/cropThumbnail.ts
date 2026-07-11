@@ -36,6 +36,11 @@ export function computeExtractRegion(
 export const DEFAULT_THUMBNAIL_SIZE = 480;
 export const MAX_THUMBNAIL_SIZE = 1600;
 
+export type ThumbnailResizeRequest = {
+  width?: number;
+  height?: number;
+};
+
 /** Parses and clamps a requested thumbnail size query parameter. */
 export function resolveThumbnailSize(requested: string | null): number {
   const parsed = Number(requested);
@@ -47,12 +52,59 @@ export function resolveThumbnailSize(requested: string | null): number {
   return Math.min(MAX_THUMBNAIL_SIZE, Math.floor(parsed));
 }
 
+function parseBoundedDimension(value: string | null) {
+  if (value === null) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return Math.min(MAX_THUMBNAIL_SIZE, Math.floor(parsed));
+}
+
+export function resolveThumbnailResizeRequest(searchParams: URLSearchParams): ThumbnailResizeRequest {
+  const width =
+    parseBoundedDimension(searchParams.get("width")) ??
+    parseBoundedDimension(searchParams.get("maxWidth")) ??
+    parseBoundedDimension(searchParams.get("size"));
+  const height =
+    parseBoundedDimension(searchParams.get("height")) ??
+    parseBoundedDimension(searchParams.get("maxHeight"));
+
+  if (!width && !height) {
+    return { width: DEFAULT_THUMBNAIL_SIZE };
+  }
+
+  return { width, height };
+}
+
+export function buildSharpResizeOptions(request: ThumbnailResizeRequest) {
+  return {
+    width: request.width,
+    height: request.height,
+    fit: request.width && request.height ? ("inside" as const) : undefined,
+    withoutEnlargement: true,
+  };
+}
+
 /** Builds a cache-busting thumbnail URL keyed on the crop's updatedAt. */
 export function buildCropThumbnailUrl(
   crop: { id: string; updatedAt: Date | string },
-  options: { size?: number } = {},
+  options: { size?: number; width?: number; height?: number } = {},
 ): string {
   const updatedAtMs = new Date(crop.updatedAt).getTime();
-  const size = options.size ?? DEFAULT_THUMBNAIL_SIZE;
-  return `/api/plant-photo-crops/${crop.id}/thumbnail?size=${size}&v=${updatedAtMs}`;
+  const params = new URLSearchParams();
+  if (options.width) {
+    params.set("width", String(options.width));
+  } else {
+    params.set("size", String(options.size ?? DEFAULT_THUMBNAIL_SIZE));
+  }
+  if (options.height) {
+    params.set("height", String(options.height));
+  }
+  params.set("v", String(updatedAtMs));
+  return `/api/plant-photo-crops/${crop.id}/thumbnail?${params.toString()}`;
 }

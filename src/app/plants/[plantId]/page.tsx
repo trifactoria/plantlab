@@ -107,13 +107,13 @@ export default async function PlantPage({ params }: PageProps) {
                     const crop = linkedPhotoCropByPhotoId.get(photo.id);
                     return (
                       <Link key={photo.id} href={`/photos/${photo.id}`} className="block">
-                        <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-stone-100">
+                        <div className="relative grid aspect-[4/3] place-items-center overflow-hidden rounded-md bg-black">
                           <Image
                             src={crop ? buildCropThumbnailUrl(crop, { size: 320 }) : `/api/photos/${photo.id}/file`}
                             alt={photo.filename}
                             fill
                             sizes="320px"
-                            className="object-cover"
+                            className="object-contain"
                           />
                         </div>
                         <p className="mt-1 truncate text-sm font-medium text-stone-950">
@@ -204,7 +204,7 @@ export default async function PlantPage({ params }: PageProps) {
                         <img
                           src={`/api/events/${event.id}/crop`}
                           alt={`${event.type} crop`}
-                          className="h-28 rounded-md border border-stone-200 object-cover"
+                          className="max-h-28 max-w-full rounded-md border border-stone-200 bg-black object-contain"
                         />
                       </div>
                     ) : null}

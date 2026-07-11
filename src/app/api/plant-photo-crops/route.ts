@@ -3,6 +3,16 @@ import { cropFromBody } from "@/lib/crops";
 import { badRequest, readJson, requiredString, serverError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 
+const VISUAL_ASPECT_RATIOS = new Set(["16:9", "9:16", "1:1", "free"]);
+
+function parseVisualAspectRatio(value: unknown) {
+  return typeof value === "string" && VISUAL_ASPECT_RATIOS.has(value) ? value : null;
+}
+
+function inferVisualAspectRatio(crop: { cropWidth: number; cropHeight: number }) {
+  return crop.cropWidth >= crop.cropHeight ? "16:9" : "9:16";
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const plantId = searchParams.get("plantId") ?? undefined;
@@ -55,10 +65,24 @@ export async function POST(request: Request) {
       return badRequest("Crop bounds (cropX, cropY, cropWidth, cropHeight) are required.");
     }
 
-    const saved = await prisma.plantPhotoCrop.upsert({
-      where: { plantId_photoId: { plantId, photoId } },
-      create: { plantId, photoId, ...crop },
-      update: { ...crop },
+    const requestedAspectRatio = parseVisualAspectRatio(body?.visualAspectRatio);
+    const nextPlantAspectRatio = requestedAspectRatio ?? plant.visualAspectRatio ?? inferVisualAspectRatio(crop);
+
+    const saved = await prisma.$transaction(async (tx) => {
+      const cropRow = await tx.plantPhotoCrop.upsert({
+        where: { plantId_photoId: { plantId, photoId } },
+        create: { plantId, photoId, ...crop, createdMethod: "manual" },
+        update: { ...crop, createdMethod: "manual", sourceCropId: null },
+      });
+
+      if (plant.visualAspectRatio !== nextPlantAspectRatio) {
+        await tx.plant.update({
+          where: { id: plantId },
+          data: { visualAspectRatio: nextPlantAspectRatio },
+        });
+      }
+
+      return cropRow;
     });
 
     return NextResponse.json(saved, { status: 201 });

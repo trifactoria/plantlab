@@ -40,6 +40,7 @@ model Plant {
   notes      String?
   gridX      Int
   gridY      Int
+  visualAspectRatio String?
   startedAt  DateTime @default(now())
   startLabel String   @default("Added to project")
   createdAt  DateTime @default(now())
@@ -143,6 +144,8 @@ model PlantPhotoCrop {
   cropY      Float
   cropWidth  Float
   cropHeight Float
+  sourceCropId String?
+  createdMethod String @default("manual")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -152,6 +155,7 @@ model PlantPhotoCrop {
   @@unique([plantId, photoId])
   @@index([plantId])
   @@index([photoId])
+  @@index([sourceCropId])
 }
 
 // Single row (id "capture-service") tracking the long-running capture service process.

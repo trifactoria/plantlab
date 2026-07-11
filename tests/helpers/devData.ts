@@ -23,14 +23,36 @@ const TINY_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/Aaf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/Aaf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 
 async function writeFixturePhoto(photoPath: string) {
-  const buffer = await sharp({
-    create: {
-      width: 32,
-      height: 24,
-      channels: 3,
-      background: { r: 170, g: 220, b: 180 },
-    },
-  })
+  const width = 1600;
+  const height = 900;
+  const gridLines = Array.from({ length: 17 }, (_, index) => {
+    const x = index * 100;
+    return `<line x1="${x}" y1="0" x2="${x}" y2="${height}" stroke="#1f2937" stroke-width="${index % 4 === 0 ? 3 : 1}" opacity="0.7"/>`;
+  }).join("");
+  const horizontalGridLines = Array.from({ length: 10 }, (_, index) => {
+    const y = index * 100;
+    return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" stroke="#1f2937" stroke-width="${index % 3 === 0 ? 3 : 1}" opacity="0.7"/>`;
+  }).join("");
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <rect width="800" height="450" x="0" y="0" fill="#d9f99d"/>
+      <rect width="800" height="450" x="800" y="0" fill="#bfdbfe"/>
+      <rect width="800" height="450" x="0" y="450" fill="#fecaca"/>
+      <rect width="800" height="450" x="800" y="450" fill="#fde68a"/>
+      ${gridLines}
+      ${horizontalGridLines}
+      <circle cx="800" cy="450" r="150" fill="none" stroke="#111827" stroke-width="18"/>
+      <rect x="130" y="110" width="320" height="320" fill="none" stroke="#059669" stroke-width="16"/>
+      <rect x="160" y="660" width="640" height="360" transform="translate(0 -170)" fill="none" stroke="#7c3aed" stroke-width="16"/>
+      <rect x="1180" y="105" width="270" height="480" fill="none" stroke="#dc2626" stroke-width="16"/>
+      <text x="800" y="70" text-anchor="middle" font-family="Arial" font-size="60" font-weight="700" fill="#111827">TOP</text>
+      <text x="800" y="860" text-anchor="middle" font-family="Arial" font-size="60" font-weight="700" fill="#111827">BOTTOM</text>
+      <text x="55" y="465" text-anchor="middle" font-family="Arial" font-size="48" font-weight="700" fill="#111827" transform="rotate(-90 55 465)">LEFT</text>
+      <text x="1545" y="465" text-anchor="middle" font-family="Arial" font-size="48" font-weight="700" fill="#111827" transform="rotate(90 1545 465)">RIGHT</text>
+      <text x="480" y="520" text-anchor="middle" font-family="Arial" font-size="38" font-weight="700" fill="#4c1d95">16:9</text>
+      <text x="1315" y="625" text-anchor="middle" font-family="Arial" font-size="38" font-weight="700" fill="#7f1d1d">9:16</text>
+    </svg>`;
+  const buffer = await sharp(Buffer.from(svg))
     .jpeg()
     .toBuffer();
   await writeFile(photoPath, buffer);
@@ -89,6 +111,7 @@ export async function seedVisualData() {
             notes: "Strong early growth.",
             gridX: 0,
             gridY: 0,
+            visualAspectRatio: "16:9",
             startedAt: new Date("2026-07-10T12:00:00.000Z"),
             startLabel: "First visible",
           },
@@ -171,8 +194,9 @@ export async function seedVisualData() {
         photoId: DEV_IDS.olderPhotoId,
         cropX: 0.1,
         cropY: 0.1,
-        cropWidth: 0.3,
-        cropHeight: 0.3,
+        cropWidth: 0.4,
+        cropHeight: 0.4,
+        createdMethod: "manual",
       },
       {
         id: DEV_IDS.plantCropId,
@@ -180,17 +204,20 @@ export async function seedVisualData() {
         photoId: DEV_IDS.photoId,
         cropX: 0.15,
         cropY: 0.15,
-        cropWidth: 0.35,
-        cropHeight: 0.35,
+        cropWidth: 0.4,
+        cropHeight: 0.4,
+        createdMethod: "manual",
       },
       {
         id: DEV_IDS.plantCropSecondId,
         plantId: DEV_IDS.plantId,
         photoId: DEV_IDS.secondPhotoId,
-        cropX: 0.2,
-        cropY: 0.2,
-        cropWidth: 0.4,
-        cropHeight: 0.4,
+        cropX: 0.74,
+        cropY: 0.1,
+        cropWidth: 0.16875,
+        cropHeight: 0.5333333333333333,
+        createdMethod: "propagated",
+        sourceCropId: DEV_IDS.plantCropId,
       },
     ],
   });

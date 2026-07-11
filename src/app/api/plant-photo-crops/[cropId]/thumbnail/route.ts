@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import sharp from "sharp";
-import { computeExtractRegion, resolveThumbnailSize } from "@/lib/cropThumbnail";
+import { buildSharpResizeOptions, computeExtractRegion, resolveThumbnailResizeRequest } from "@/lib/cropThumbnail";
 import { badRequest, notFound, serverError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 
@@ -12,7 +12,7 @@ type Context = {
 export async function GET(request: Request, context: Context) {
   const { cropId } = await context.params;
   const { searchParams } = new URL(request.url);
-  const size = resolveThumbnailSize(searchParams.get("size"));
+  const resizeRequest = resolveThumbnailResizeRequest(searchParams);
 
   const crop = await prisma.plantPhotoCrop.findUnique({
     where: { id: cropId },
@@ -37,15 +37,19 @@ export async function GET(request: Request, context: Context) {
       return badRequest("Crop region is invalid for this photo.");
     }
 
-    const buffer = await sharp(fileBuffer)
+    const { data: buffer, info } = await sharp(fileBuffer)
       .extract(region)
-      .resize({ width: size, withoutEnlargement: true })
+      .resize(buildSharpResizeOptions(resizeRequest))
       .webp({ quality: 82 })
-      .toBuffer();
+      .toBuffer({ resolveWithObject: true });
 
     return new NextResponse(new Uint8Array(buffer), {
       headers: {
         "Content-Type": "image/webp",
+        "X-Source-Crop-Width": String(region.width),
+        "X-Source-Crop-Height": String(region.height),
+        "X-Output-Width": String(info.width),
+        "X-Output-Height": String(info.height),
         // The source photo file never changes, and callers key the URL's
         // "v" query param on this crop's updatedAt - so a given URL really
         // is immutable; editing the crop produces a new URL instead.

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "../../src/lib/prisma";
 import {
   computeServiceHealth,
@@ -30,6 +30,10 @@ describe("computeServiceHealth", () => {
 });
 
 describe("service heartbeat persistence", () => {
+  beforeEach(async () => {
+    await prisma.serviceStatus.deleteMany({ where: { id: SERVICE_STATUS_ID } });
+  });
+
   afterEach(async () => {
     await prisma.serviceStatus.deleteMany({ where: { id: SERVICE_STATUS_ID } });
   });

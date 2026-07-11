@@ -41,7 +41,7 @@ export async function PATCH(request: Request, context: Context) {
 
     const updated = await prisma.plantPhotoCrop.update({
       where: { id: cropId },
-      data: { cropX, cropY, cropWidth, cropHeight },
+      data: { cropX, cropY, cropWidth, cropHeight, createdMethod: "manual", sourceCropId: null },
     });
 
     return NextResponse.json(updated);

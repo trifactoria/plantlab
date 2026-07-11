@@ -31,14 +31,6 @@ export async function POST(request: Request) {
       return badRequest("plantId is invalid");
     }
 
-    const sourceCrop = await prisma.plantPhotoCrop.findUnique({
-      where: { plantId_photoId: { plantId, photoId: sourcePhotoId } },
-    });
-
-    if (!sourceCrop) {
-      return badRequest("The source photo does not have a saved crop for this plant yet.");
-    }
-
     const sourcePhoto = await prisma.photo.findUnique({ where: { id: sourcePhotoId } });
     if (!sourcePhoto || sourcePhoto.projectId !== plant.projectId) {
       return badRequest("sourcePhotoId is invalid for this plant's project.");
@@ -67,6 +59,14 @@ export async function POST(request: Request) {
       });
     }
 
+    const sourceCrop = await prisma.plantPhotoCrop.findUnique({
+      where: { plantId_photoId: { plantId, photoId: sourcePhotoId } },
+    });
+
+    if (!sourceCrop) {
+      return badRequest("The source photo does not have a saved crop for this plant yet.");
+    }
+
     const cropValues = {
       cropX: sourceCrop.cropX,
       cropY: sourceCrop.cropY,
@@ -77,8 +77,18 @@ export async function POST(request: Request) {
     for (const photoId of plan.targetPhotoIds) {
       await prisma.plantPhotoCrop.upsert({
         where: { plantId_photoId: { plantId, photoId } },
-        create: { plantId, photoId, ...cropValues },
-        update: cropValues,
+        create: {
+          plantId,
+          photoId,
+          ...cropValues,
+          createdMethod: "propagated",
+          sourceCropId: sourceCrop.id,
+        },
+        update: {
+          ...cropValues,
+          createdMethod: "propagated",
+          sourceCropId: sourceCrop.id,
+        },
       });
     }
 

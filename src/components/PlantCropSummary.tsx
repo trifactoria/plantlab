@@ -5,11 +5,13 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
 import { PlantCropEditor, type CropValue } from "@/components/PlantCropEditor";
+import { type CropShape } from "@/lib/cropGeometry";
 import { buildCropThumbnailUrl } from "@/lib/cropThumbnail";
 
 type ProjectPlant = {
   id: string;
   name: string;
+  visualAspectRatio: CropShape | null;
 };
 
 type ExistingCrop = {
@@ -21,9 +23,12 @@ type ExistingCrop = {
   cropY: number;
   cropWidth: number;
   cropHeight: number;
+  createdMethod: string;
+  sourceCropId: string | null;
 };
 
 type PropagationTarget = "later-without-crop" | "all-without-crop";
+type ApplyTarget = "this-photo-only" | PropagationTarget;
 
 export function PlantCropSummary({
   photoId,
@@ -42,24 +47,30 @@ export function PlantCropSummary({
   const [addingPlantId, setAddingPlantId] = useState("");
   const [modalPlant, setModalPlant] = useState<{ id: string; name: string; cropId?: string } | null>(null);
   const [modalCrop, setModalCrop] = useState<CropValue | null>(null);
+  const [modalAspectRatio, setModalAspectRatio] = useState<CropShape | null>(null);
+  const [applyTarget, setApplyTarget] = useState<ApplyTarget>("this-photo-only");
+  const [propagationCounts, setPropagationCounts] = useState<
+    Partial<Record<PropagationTarget, { affectedCount: number; skippedExistingCount: number }>>
+  >({});
+  const [overwriteExisting, setOverwriteExisting] = useState(false);
+  const [overwriteConfirmed, setOverwriteConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [removingCropId, setRemovingCropId] = useState<string | null>(null);
 
-  const [propagateOffer, setPropagateOffer] = useState<{ plantId: string; plantName: string } | null>(null);
-  const [propagatePreview, setPropagatePreview] = useState<{
-    target: PropagationTarget;
-    affectedCount: number;
-    skippedExistingCount: number;
-  } | null>(null);
-  const [propagating, setPropagating] = useState(false);
   const [propagateResult, setPropagateResult] = useState<string | null>(null);
-  const [propagateError, setPropagateError] = useState<string | null>(null);
 
   function openEditor(plant: { id: string; name: string; cropId?: string }, crop: CropValue | null) {
     setSaveError(null);
+    setApplyTarget("this-photo-only");
+    setOverwriteExisting(false);
+    setOverwriteConfirmed(false);
+    setPropagationCounts({});
+    const sourcePlant = plants.find((item) => item.id === plant.id);
+    setModalAspectRatio(sourcePlant?.visualAspectRatio ?? null);
     setModalPlant(plant);
     setModalCrop(crop);
+    void loadPropagationCounts(plant.id, false);
   }
 
   function openAddCrop() {
@@ -70,8 +81,52 @@ export function PlantCropSummary({
     openEditor(plant, null);
   }
 
+  async function loadPropagationCounts(plantId: string, overwrite: boolean) {
+    const targets: PropagationTarget[] = ["later-without-crop", "all-without-crop"];
+    const counts = await Promise.all(
+      targets.map(async (target) => {
+        const response = await fetch("/api/plant-photo-crops/propagate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            plantId,
+            sourcePhotoId: photoId,
+            target,
+            dryRun: true,
+            overwrite,
+          }),
+        });
+        if (!response.ok) {
+          return [target, null] as const;
+        }
+        const payload = (await response.json()) as {
+          affectedCount?: number;
+          skippedExistingCount?: number;
+        };
+        return [
+          target,
+          {
+            affectedCount: payload.affectedCount ?? 0,
+            skippedExistingCount: payload.skippedExistingCount ?? 0,
+          },
+        ] as const;
+      }),
+    );
+
+    setPropagationCounts(
+      Object.fromEntries(counts.filter(([, value]) => value !== null)) as Partial<
+        Record<PropagationTarget, { affectedCount: number; skippedExistingCount: number }>
+      >,
+    );
+  }
+
   async function saveCrop() {
     if (!modalPlant || !modalCrop) {
+      return;
+    }
+
+    if (overwriteExisting && !overwriteConfirmed) {
+      setSaveError("Confirm overwriting existing crops before saving.");
       return;
     }
 
@@ -81,22 +136,56 @@ export function PlantCropSummary({
     const response = await fetch("/api/plant-photo-crops", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plantId: modalPlant.id, photoId, ...modalCrop }),
+      body: JSON.stringify({ plantId: modalPlant.id, photoId, ...modalCrop, visualAspectRatio: modalAspectRatio }),
     });
-    const payload = (await response.json()) as { error?: string };
-    setSaving(false);
+    const payload = (await response.json()) as { id?: string; error?: string };
 
     if (!response.ok) {
+      setSaving(false);
       setSaveError(payload.error ?? "Could not save crop.");
       return;
     }
 
-    const savedPlant = { plantId: modalPlant.id, plantName: modalPlant.name };
+    let propagatedCount = 0;
+    let skippedExistingCount = 0;
+    if (applyTarget !== "this-photo-only") {
+      const propagateResponse = await fetch("/api/plant-photo-crops/propagate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          plantId: modalPlant.id,
+          sourcePhotoId: photoId,
+          target: applyTarget,
+          dryRun: false,
+          overwrite: overwriteExisting && overwriteConfirmed,
+        }),
+      });
+      const propagatePayload = (await propagateResponse.json()) as {
+        affectedCount?: number;
+        skippedExistingCount?: number;
+        error?: string;
+      };
+
+      if (!propagateResponse.ok) {
+        setSaving(false);
+        setSaveError(propagatePayload.error ?? "Crop saved, but propagation failed.");
+        return;
+      }
+      propagatedCount = propagatePayload.affectedCount ?? 0;
+      skippedExistingCount = propagatePayload.skippedExistingCount ?? 0;
+    }
+
+    setSaving(false);
     setModalPlant(null);
     setModalCrop(null);
+    setModalAspectRatio(null);
     setAddingPlantId("");
-    setPropagateResult(null);
-    setPropagateOffer(savedPlant);
+    setPropagateResult(
+      applyTarget === "this-photo-only"
+        ? `Saved crop for ${modalPlant.name}.`
+        : `Saved crop for ${modalPlant.name} and applied it to ${propagatedCount} photo(s)` +
+            (skippedExistingCount > 0 ? `, skipping ${skippedExistingCount} existing crop(s).` : "."),
+    );
     router.refresh();
   }
 
@@ -104,81 +193,6 @@ export function PlantCropSummary({
     setRemovingCropId(cropId);
     await fetch(`/api/plant-photo-crops/${cropId}`, { method: "DELETE" });
     setRemovingCropId(null);
-    router.refresh();
-    return true;
-  }
-
-  async function previewPropagate(target: PropagationTarget) {
-    if (!propagateOffer) {
-      return;
-    }
-
-    setPropagateError(null);
-    const response = await fetch("/api/plant-photo-crops/propagate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plantId: propagateOffer.plantId,
-        sourcePhotoId: photoId,
-        target,
-        dryRun: true,
-      }),
-    });
-    const payload = (await response.json()) as {
-      affectedCount?: number;
-      skippedExistingCount?: number;
-      error?: string;
-    };
-
-    if (!response.ok) {
-      setPropagateError(payload.error ?? "Could not preview propagation.");
-      return;
-    }
-
-    setPropagatePreview({
-      target,
-      affectedCount: payload.affectedCount ?? 0,
-      skippedExistingCount: payload.skippedExistingCount ?? 0,
-    });
-  }
-
-  async function confirmPropagate() {
-    if (!propagateOffer || !propagatePreview) {
-      return false;
-    }
-
-    setPropagating(true);
-    setPropagateError(null);
-
-    const response = await fetch("/api/plant-photo-crops/propagate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plantId: propagateOffer.plantId,
-        sourcePhotoId: photoId,
-        target: propagatePreview.target,
-        dryRun: false,
-      }),
-    });
-    const payload = (await response.json()) as {
-      affectedCount?: number;
-      skippedExistingCount?: number;
-      error?: string;
-    };
-    setPropagating(false);
-
-    if (!response.ok) {
-      setPropagateError(payload.error ?? "Could not propagate crop.");
-      return false;
-    }
-
-    const skipped = payload.skippedExistingCount ?? 0;
-    setPropagateResult(
-      `Created ${payload.affectedCount ?? 0} crop(s) for ${propagateOffer.plantName}` +
-        (skipped > 0 ? `, skipped ${skipped} photo(s) that already had a crop.` : "."),
-    );
-    setPropagatePreview(null);
-    setPropagateOffer(null);
     router.refresh();
     return true;
   }
@@ -194,16 +208,25 @@ export function PlantCropSummary({
           {crops.map((crop) => (
             <div key={crop.id} className="grid gap-2 rounded-md border border-stone-200 p-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={buildCropThumbnailUrl(crop, { size: 240 })}
-                alt={`${crop.plantName} crop`}
-                className="aspect-square w-full rounded object-cover"
-              />
+              <div
+                data-testid="plant-crop-card-image"
+                className="grid min-h-28 place-items-center rounded bg-black"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={buildCropThumbnailUrl(crop, { width: 320, height: 320 })}
+                  alt={`${crop.plantName} crop`}
+                  className="max-h-80 max-w-full rounded object-contain"
+                />
+              </div>
               <div className="flex items-center justify-between gap-2">
                 <Link href={`/plants/${crop.plantId}`} className="text-sm font-semibold text-emerald-700">
                   {crop.plantName}
                 </Link>
               </div>
+              {crop.createdMethod === "propagated" ? (
+                <p className="text-xs font-medium text-stone-500">Inherited crop</p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -259,65 +282,78 @@ export function PlantCropSummary({
 
       {propagateResult ? <p className="mt-3 text-sm font-medium text-emerald-700">{propagateResult}</p> : null}
 
-      {propagateOffer ? (
-        <div className="mt-4 grid gap-2 rounded-md border border-cyan-200 bg-cyan-50 p-3">
-          <p className="text-sm text-stone-800">
-            Crop saved for <strong>{propagateOffer.plantName}</strong>. Apply this crop to other photos too?
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" className="button-secondary" onClick={() => setPropagateOffer(null)}>
-              This Photo Only
-            </button>
-            <button
-              type="button"
-              className="button-secondary"
-              onClick={() => previewPropagate("later-without-crop")}
-            >
-              This and Later Photos Without a Crop
-            </button>
-            <button type="button" className="button-secondary" onClick={() => previewPropagate("all-without-crop")}>
-              All Project Photos Without a Crop
-            </button>
-          </div>
-          <p className="text-xs text-stone-600">
-            Existing crops for other photos are never overwritten. This assumes the camera and tray stay
-            fixed - you can still edit any individual photo&apos;s crop afterward.
-          </p>
-          {propagateError ? <p className="text-sm font-medium text-red-700">{propagateError}</p> : null}
-        </div>
-      ) : null}
-
-      {propagatePreview ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <div className="grid w-full max-w-md gap-4 rounded-lg bg-white p-5 shadow-xl">
-            <h2 className="text-lg font-semibold text-stone-950">Confirm Crop Propagation</h2>
-            <p className="text-sm text-stone-700">
-              This will create <strong>{propagatePreview.affectedCount}</strong> new plant crop
-              {propagatePreview.affectedCount === 1 ? "" : "s"}
-              {propagatePreview.skippedExistingCount > 0
-                ? `, skipping ${propagatePreview.skippedExistingCount} photo(s) that already have a crop for this plant`
-                : ""}
-              .
-            </p>
-            <div className="flex justify-end gap-2">
-              <button type="button" className="button-secondary" onClick={() => setPropagatePreview(null)}>
-                Cancel
-              </button>
-              <button className="button" onClick={confirmPropagate} disabled={propagating}>
-                {propagating ? "Applying..." : "Apply"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {modalPlant ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
           <div className="grid max-h-[90vh] w-full max-w-2xl gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
             <h2 className="text-lg font-semibold text-stone-950">Set Plant Crop - {modalPlant.name}</h2>
-            <PlantCropEditor imageUrl={imageUrl} value={modalCrop} onChange={setModalCrop} />
+            <PlantCropEditor
+              imageUrl={imageUrl}
+              value={modalCrop}
+              visualAspectRatio={modalAspectRatio}
+              onChange={setModalCrop}
+              onVisualAspectRatioChange={setModalAspectRatio}
+            />
+            <div className="grid gap-2 rounded-md border border-stone-200 p-3">
+              <p className="text-sm font-semibold text-stone-950">Apply crop to:</p>
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="radio"
+                  name="applyTarget"
+                  checked={applyTarget === "this-photo-only"}
+                  onChange={() => setApplyTarget("this-photo-only")}
+                />
+                This photo only
+              </label>
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="radio"
+                  name="applyTarget"
+                  checked={applyTarget === "later-without-crop"}
+                  onChange={() => setApplyTarget("later-without-crop")}
+                />
+                This and later photos without a crop -{" "}
+                {propagationCounts["later-without-crop"]?.affectedCount ?? "..."} photos
+              </label>
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="radio"
+                  name="applyTarget"
+                  checked={applyTarget === "all-without-crop"}
+                  onChange={() => setApplyTarget("all-without-crop")}
+                />
+                All project photos without a crop - {propagationCounts["all-without-crop"]?.affectedCount ?? "..."} photos
+              </label>
+              <label className="mt-1 flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={overwriteExisting}
+                  onChange={(event) => {
+                    setOverwriteExisting(event.target.checked);
+                    setOverwriteConfirmed(false);
+                    if (modalPlant) {
+                      void loadPropagationCounts(modalPlant.id, event.target.checked);
+                    }
+                  }}
+                />
+                Overwrite existing crops for this plant
+              </label>
+              {overwriteExisting ? (
+                <label className="flex items-center gap-2 text-sm font-medium text-red-700">
+                  <input
+                    type="checkbox"
+                    checked={overwriteConfirmed}
+                    onChange={(event) => setOverwriteConfirmed(event.target.checked)}
+                  />
+                  I understand existing crop rectangles will be replaced.
+                </label>
+              ) : null}
+              <p className="text-xs text-stone-500">
+                Bulk choices store actual crop rectangles on each target photo. Existing crops are skipped unless
+                overwrite is explicitly confirmed.
+              </p>
+            </div>
             {saveError ? <p className="text-sm font-medium text-red-700">{saveError}</p> : null}
-            <div className="flex justify-end gap-2">
+            <div className="sticky bottom-0 -mx-5 -mb-5 flex justify-end gap-2 border-t border-stone-200 bg-white p-5">
               <button
                 type="button"
                 className="button-secondary"

@@ -144,7 +144,7 @@ export default async function PhotoPage({ params }: PageProps) {
                           <img
                             src={`/api/events/${event.id}/crop`}
                             alt={`${event.type} crop`}
-                            className="h-28 rounded-md border border-stone-200 object-cover"
+                            className="max-h-28 max-w-full rounded-md border border-stone-200 bg-black object-contain"
                           />
                         </div>
                       ) : null}
@@ -157,7 +157,11 @@ export default async function PhotoPage({ params }: PageProps) {
             <PlantCropSummary
               photoId={photo.id}
               imageUrl={`/api/photos/${photo.id}/file`}
-              plants={plants.map((plant) => ({ id: plant.id, name: plant.name }))}
+              plants={plants.map((plant) => ({
+                id: plant.id,
+                name: plant.name,
+                visualAspectRatio: plant.visualAspectRatio as "16:9" | "9:16" | "1:1" | "free" | null,
+              }))}
               crops={plantCrops.map((crop) => ({
                 id: crop.id,
                 plantId: crop.plantId,
@@ -167,6 +171,8 @@ export default async function PhotoPage({ params }: PageProps) {
                 cropY: crop.cropY,
                 cropWidth: crop.cropWidth,
                 cropHeight: crop.cropHeight,
+                createdMethod: crop.createdMethod,
+                sourceCropId: crop.sourceCropId,
               }))}
             />
 

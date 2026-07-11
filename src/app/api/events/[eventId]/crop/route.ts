@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 import { eventHasCrop } from "@/lib/crops";
+import { buildSharpResizeOptions, computeExtractRegion } from "@/lib/cropThumbnail";
 import { badRequest, notFound, serverError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 
@@ -36,19 +37,20 @@ export async function GET(_request: Request, context: Context) {
       return badRequest("Could not read source image dimensions.");
     }
 
-    const left = Math.max(0, Math.floor(event.cropX! * metadata.width));
-    const top = Math.max(0, Math.floor(event.cropY! * metadata.height));
-    const width = Math.max(1, Math.floor(event.cropWidth! * metadata.width));
-    const height = Math.max(1, Math.floor(event.cropHeight! * metadata.height));
+    const region = computeExtractRegion(
+      {
+        cropX: event.cropX!,
+        cropY: event.cropY!,
+        cropWidth: event.cropWidth!,
+        cropHeight: event.cropHeight!,
+      },
+      metadata.width,
+      metadata.height,
+    );
 
     const buffer = await sharp(await readFile(event.photo.path))
-      .extract({
-        left,
-        top,
-        width: Math.min(width, metadata.width - left),
-        height: Math.min(height, metadata.height - top),
-      })
-      .resize({ width: 320, withoutEnlargement: true })
+      .extract(region)
+      .resize(buildSharpResizeOptions({ width: 320 }))
       .jpeg({ quality: 82 })
       .toBuffer();
 

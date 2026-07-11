@@ -1,16 +1,23 @@
 "use client";
 
 import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import {
+  CROP_SHAPE_LABELS,
+  calculatePreviewCanvasSize,
+  changeCropShapePreserveCenter,
+  createCropFromDrag,
+  cropOrientationLabel,
+  cropOutputRatio,
+  cropPixelDimensions,
+  type CropShape,
+  type CropValue,
+  inferInitialShapeFromDrag,
+  resizeCropFromCorner,
+} from "@/lib/cropGeometry";
 import { clamp, computeRelativeSharpness, containRect, fractionWithinRect } from "@/lib/imageGeometry";
 
-export type CropValue = {
-  cropX: number;
-  cropY: number;
-  cropWidth: number;
-  cropHeight: number;
-};
+export type { CropValue } from "@/lib/cropGeometry";
 
-const MIN_CROP_SIZE = 0.01;
 const ZOOM_STEP = 1.25;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 20;
@@ -28,6 +35,10 @@ const HANDLES: Array<{ id: HandleId; cursor: string; x: number; y: number }> = [
   { id: "w", cursor: "ew-resize", x: 0, y: 0.5 },
 ];
 
+const CORNER_HANDLES = HANDLES.filter((handle) => ["nw", "ne", "se", "sw"].includes(handle.id));
+const SHAPES: CropShape[] = ["16:9", "9:16", "1:1", "free"];
+const LIMITED_DETAIL_THRESHOLD = 160;
+
 type DragState =
   | { kind: "create"; startX: number; startY: number }
   | { kind: "move"; startX: number; startY: number; origin: CropValue }
@@ -37,11 +48,15 @@ type DragState =
 export function PlantCropEditor({
   imageUrl,
   value,
+  visualAspectRatio = null,
   onChange,
+  onVisualAspectRatioChange,
 }: {
   imageUrl: string;
   value: CropValue | null;
+  visualAspectRatio?: CropShape | null;
   onChange: (crop: CropValue | null) => void;
+  onVisualAspectRatioChange?: (shape: CropShape) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -56,11 +71,19 @@ export function PlantCropEditor({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [panMode, setPanMode] = useState(false);
   const [crop, setCrop] = useState<CropValue | null>(value);
+  const [shape, setShape] = useState<CropShape>(visualAspectRatio ?? "free");
+  const [shapeWasExplicitlySelected, setShapeWasExplicitlySelected] = useState(Boolean(visualAspectRatio));
   const [sharpness, setSharpness] = useState<number | null>(null);
+  const [previewSize, setPreviewSize] = useState({ width: 240, height: 240 });
 
   useEffect(() => {
     setCrop(value);
   }, [value]);
+
+  useEffect(() => {
+    setShape(visualAspectRatio ?? "free");
+    setShapeWasExplicitlySelected(Boolean(visualAspectRatio));
+  }, [visualAspectRatio]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -163,11 +186,23 @@ export function PlantCropEditor({
     }
 
     if (drag.kind === "create") {
-      const cropX = Math.min(drag.startX, point.x);
-      const cropY = Math.min(drag.startY, point.y);
-      const cropWidth = Math.abs(point.x - drag.startX);
-      const cropHeight = Math.abs(point.y - drag.startY);
-      setCrop(cropWidth > 0 && cropHeight > 0 ? { cropX, cropY, cropWidth, cropHeight } : null);
+      const activeShape =
+        shapeWasExplicitlySelected || shape !== "free"
+          ? shape
+          : inferInitialShapeFromDrag({ x: drag.startX, y: drag.startY }, point);
+
+      if (activeShape !== shape) {
+        setShape(activeShape);
+      }
+
+      setCrop(
+        createCropFromDrag(
+          { x: drag.startX, y: drag.startY },
+          point,
+          activeShape,
+          naturalSize.width > 0 ? naturalSize : { width: 1, height: 1 },
+        ),
+      );
       return;
     }
 
@@ -180,30 +215,15 @@ export function PlantCropEditor({
       return;
     }
 
-    // resize
-    const origin = drag.origin;
-    let { cropX, cropY, cropWidth, cropHeight } = origin;
-    const right = origin.cropX + origin.cropWidth;
-    const bottom = origin.cropY + origin.cropHeight;
-
-    if (drag.handle.includes("w")) {
-      cropX = clamp(Math.min(point.x, right - MIN_CROP_SIZE), 0, right - MIN_CROP_SIZE);
-      cropWidth = right - cropX;
-    }
-    if (drag.handle.includes("e")) {
-      const newRight = clamp(Math.max(point.x, origin.cropX + MIN_CROP_SIZE), origin.cropX + MIN_CROP_SIZE, 1);
-      cropWidth = newRight - cropX;
-    }
-    if (drag.handle.includes("n")) {
-      cropY = clamp(Math.min(point.y, bottom - MIN_CROP_SIZE), 0, bottom - MIN_CROP_SIZE);
-      cropHeight = bottom - cropY;
-    }
-    if (drag.handle.includes("s")) {
-      const newBottom = clamp(Math.max(point.y, origin.cropY + MIN_CROP_SIZE), origin.cropY + MIN_CROP_SIZE, 1);
-      cropHeight = newBottom - cropY;
-    }
-
-    setCrop({ cropX, cropY, cropWidth, cropHeight });
+    setCrop(
+      resizeCropFromCorner(
+        drag.origin,
+        drag.handle,
+        point,
+        shape,
+        naturalSize.width > 0 ? naturalSize : { width: 1, height: 1 },
+      ),
+    );
   }
 
   function finishDrag() {
@@ -215,7 +235,7 @@ export function PlantCropEditor({
     }
 
     setCrop((current) => {
-      if (current && (current.cropWidth <= MIN_CROP_SIZE || current.cropHeight <= MIN_CROP_SIZE)) {
+      if (current && (current.cropWidth <= 0.01 || current.cropHeight <= 0.01)) {
         onChange(null);
         return null;
       }
@@ -245,6 +265,18 @@ export function PlantCropEditor({
     setPan({ x: 0, y: 0 });
   }
 
+  function selectShape(nextShape: CropShape) {
+    setShape(nextShape);
+    setShapeWasExplicitlySelected(true);
+    onVisualAspectRatioChange?.(nextShape);
+
+    if (crop && naturalSize.width > 0 && nextShape !== "free") {
+      const nextCrop = changeCropShapePreserveCenter(crop, nextShape, naturalSize);
+      setCrop(nextCrop);
+      onChange(nextCrop);
+    }
+  }
+
   // Recompute the magnified preview and sharpness indicator whenever the
   // crop or source image changes - independent of zoom/pan, since it reads
   // directly from the underlying <img> in its natural pixel space.
@@ -260,6 +292,13 @@ export function PlantCropEditor({
     const sy = crop.cropY * img.naturalHeight;
     const sw = Math.max(1, crop.cropWidth * img.naturalWidth);
     const sh = Math.max(1, crop.cropHeight * img.naturalHeight);
+    const nextPreviewSize = calculatePreviewCanvasSize(crop, {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    });
+    setPreviewSize(nextPreviewSize);
+    canvas.width = nextPreviewSize.width;
+    canvas.height = nextPreviewSize.height;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) {
@@ -267,16 +306,23 @@ export function PlantCropEditor({
     }
 
     ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, nextPreviewSize.width, nextPreviewSize.height);
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, nextPreviewSize.width, nextPreviewSize.height);
 
     try {
-      setSharpness(computeRelativeSharpness(ctx.getImageData(0, 0, canvas.width, canvas.height)));
+      setSharpness(computeRelativeSharpness(ctx.getImageData(0, 0, nextPreviewSize.width, nextPreviewSize.height)));
     } catch {
       setSharpness(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [crop?.cropX, crop?.cropY, crop?.cropWidth, crop?.cropHeight, imageUrl]);
+
+  const visibleHandles = shape === "free" ? HANDLES : CORNER_HANDLES;
+  const sourceDimensions = crop && naturalSize.width > 0 ? cropPixelDimensions(crop, naturalSize) : null;
+  const outputRatio = crop && naturalSize.width > 0 ? cropOutputRatio(crop, naturalSize) : null;
+  const limitedDetail =
+    sourceDimensions !== null &&
+    (sourceDimensions.width < LIMITED_DETAIL_THRESHOLD || sourceDimensions.height < LIMITED_DETAIL_THRESHOLD);
 
   return (
     <div className="grid gap-3">
@@ -299,9 +345,29 @@ export function PlantCropEditor({
         </label>
       </div>
 
+      <div className="grid gap-2 rounded-md border border-stone-200 bg-stone-50 p-3">
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Crop shape">
+          {SHAPES.map((item) => (
+            <button
+              key={item}
+              type="button"
+              className={item === shape ? "button" : "button-secondary"}
+              onClick={() => selectShape(item)}
+              aria-pressed={item === shape}
+            >
+              {CROP_SHAPE_LABELS[item]}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-stone-600">
+          Changing the plant visual aspect ratio changes the editing default only. Existing saved crops keep
+          rendering from their stored rectangles until edited.
+        </p>
+      </div>
+
       <div
         ref={containerRef}
-        className="relative h-[420px] w-full overflow-hidden rounded-md bg-black"
+        className="relative h-[min(420px,30vh)] min-h-[180px] w-full overflow-hidden rounded-md bg-black"
       >
         {/* Always mounted (unlike the visible image below, which only
             renders once `fit` is known) purely so its onLoad can report
@@ -367,7 +433,7 @@ export function PlantCropEditor({
                 onPointerCancel={finishDrag}
               >
                 {!panMode
-                  ? HANDLES.map((handle) => (
+                  ? visibleHandles.map((handle) => (
                       <div
                         key={handle.id}
                         className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-600 bg-white"
@@ -399,15 +465,30 @@ export function PlantCropEditor({
         <div className="flex flex-wrap items-center gap-3">
           <canvas
             ref={previewCanvasRef}
-            width={160}
-            height={120}
+            width={previewSize.width}
+            height={previewSize.height}
+            data-testid="crop-preview-canvas"
             className="rounded border border-stone-200 bg-black"
           />
           <div className="text-sm text-stone-600">
+            <p className="font-medium text-stone-800">
+              {sourceDimensions ? cropOrientationLabel(crop, naturalSize, shape) : CROP_SHAPE_LABELS[shape]}
+            </p>
+            {sourceDimensions && outputRatio ? (
+              <p>
+                Source crop: {sourceDimensions.width} x {sourceDimensions.height} px
+              </p>
+            ) : null}
+            {outputRatio ? <p>Crop ratio: {outputRatio.toFixed(2)}:1</p> : null}
             <p>{sharpness !== null ? `Relative sharpness: ${sharpness.toFixed(1)}` : "Relative sharpness: unavailable"}</p>
             <p className="text-xs text-stone-400">
               Higher is relatively sharper for this crop only - not a scientific measurement.
             </p>
+            {limitedDetail ? (
+              <p className="mt-1 text-xs font-medium text-amber-700">
+                This crop contains limited source detail and may appear blurry when enlarged.
+              </p>
+            ) : null}
           </div>
           <button
             type="button"
