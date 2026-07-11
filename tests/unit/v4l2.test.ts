@@ -1,5 +1,29 @@
-import { describe, expect, it } from "vitest";
-import { parseControlsOutput } from "../../src/lib/v4l2";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const execFileCalls: string[][] = [];
+let failingControls = new Set<string>();
+
+vi.mock("node:child_process", () => ({
+  execFile: (
+    _command: string,
+    args: string[],
+    _options: unknown,
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
+  ) => {
+    execFileCalls.push(args);
+    const setCtrlArg = args.find((arg) => arg.includes("="));
+    const controlName = setCtrlArg?.split("=")[0];
+
+    if (controlName && failingControls.has(controlName)) {
+      callback(new Error("v4l2-ctl exited with code 1"), "", `${controlName}: Permission denied`);
+      return;
+    }
+
+    callback(null, "", "");
+  },
+}));
+
+const { applyCameraControls, parseControlsOutput } = await import("../../src/lib/v4l2");
 
 const SAMPLE_OUTPUT = `
                      brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
@@ -69,5 +93,54 @@ describe("parseControlsOutput", () => {
     expect(autofocus.value).toBe(true);
     expect(autofocus.readOnly).toBe(false);
     expect(autofocus.inactive).toBe(false);
+  });
+});
+
+describe("applyCameraControls", () => {
+  beforeEach(() => {
+    execFileCalls.length = 0;
+    failingControls = new Set();
+  });
+
+  function controlNamesInOrder() {
+    return execFileCalls
+      .map((args) => args.find((arg) => arg.includes("="))?.split("=")[0])
+      .filter((name): name is string => Boolean(name));
+  }
+
+  it("applies automatic-mode toggles before their dependent manual controls, regardless of JSON key order", async () => {
+    await applyCameraControls("/dev/video0", {
+      // Manual value listed first in the object - order must not matter.
+      white_balance_temperature: 4370,
+      white_balance_automatic: false,
+      brightness: 128,
+    });
+
+    const order = controlNamesInOrder();
+    expect(order.indexOf("white_balance_automatic")).toBeLessThan(order.indexOf("white_balance_temperature"));
+  });
+
+  it("does not abort the whole batch when one control is rejected (e.g. still inactive)", async () => {
+    failingControls = new Set(["white_balance_temperature"]);
+
+    const failures = await applyCameraControls("/dev/video0", {
+      white_balance_automatic: true, // profile says auto is still on
+      white_balance_temperature: 4370, // driver rejects this while auto is on
+      brightness: 200,
+    });
+
+    // The rejected control is reported...
+    expect(failures).toEqual([
+      { control: "white_balance_temperature", error: expect.stringContaining("Permission denied") },
+    ]);
+    // ...but every other control in the batch was still attempted.
+    expect(controlNamesInOrder()).toEqual(
+      expect.arrayContaining(["white_balance_automatic", "white_balance_temperature", "brightness"]),
+    );
+  });
+
+  it("resolves with no failures when every control applies cleanly", async () => {
+    const failures = await applyCameraControls("/dev/video0", { brightness: 128 });
+    expect(failures).toEqual([]);
   });
 });

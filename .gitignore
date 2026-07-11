@@ -11,3 +11,4 @@ test-results/
 prisma/dev.db
 prisma/dev.db-journal
 zips
+*.zip

@@ -231,10 +231,56 @@ export async function setCameraControl(device: string, control: string, value: s
   await execFileText("v4l2-ctl", ["-d", device, "--set-ctrl", `${control}=${normalizedValue}`]);
 }
 
-export async function applyCameraControls(device: string, controls: Record<string, unknown>) {
-  for (const [control, value] of Object.entries(controls)) {
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+export type ApplyCameraControlsFailure = {
+  control: string;
+  error: string;
+};
+
+/**
+ * Generic (non-vendor-specific) V4L2 naming convention: controls that toggle
+ * an automatic mode are conventionally suffixed "_automatic", "_automatic_*",
+ * or "_auto" (e.g. white_balance_automatic, focus_automatic_continuous,
+ * exposure_auto). Their dependent manual controls (e.g.
+ * white_balance_temperature, focus_absolute, exposure_time_absolute) are
+ * reported as "inactive" - and rejected by the driver with a permission
+ * error - until the automatic control is turned off. Applying likely mode
+ * controls first, before other controls in the same batch, makes a saved
+ * profile's manual values land correctly regardless of the order they
+ * happen to appear in as JSON.
+ */
+function looksLikeAutoModeControl(id: string) {
+  return /(_automatic(_\w+)?|_auto)$/.test(id);
+}
+
+/**
+ * Applies every control in a profile to the camera. Never aborts partway
+ * through: a control that the driver currently refuses (commonly because a
+ * related automatic mode hasn't been turned off yet, or isn't supported at
+ * all) is recorded as a failure and skipped, so the rest of the profile -
+ * and the capture that follows - still proceeds.
+ */
+export async function applyCameraControls(
+  device: string,
+  controls: Record<string, unknown>,
+): Promise<ApplyCameraControlsFailure[]> {
+  const entries = Object.entries(controls).filter(
+    (entry): entry is [string, string | number | boolean] =>
+      typeof entry[1] === "string" || typeof entry[1] === "number" || typeof entry[1] === "boolean",
+  );
+
+  const ordered = [...entries].sort(
+    ([a], [b]) => Number(!looksLikeAutoModeControl(a)) - Number(!looksLikeAutoModeControl(b)),
+  );
+
+  const failures: ApplyCameraControlsFailure[] = [];
+
+  for (const [control, value] of ordered) {
+    try {
       await setCameraControl(device, control, value);
+    } catch (error) {
+      failures.push({ control, error: error instanceof Error ? error.message : String(error) });
     }
   }
+
+  return failures;
 }

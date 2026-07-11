@@ -77,8 +77,22 @@ function ffmpegInputFormat(format: string) {
 }
 
 async function applyProfileSettings(settings: CameraSettings) {
-  if (settings.controls) {
-    await applyCameraControls(settings.device, settings.controls);
+  if (!settings.controls) {
+    return;
+  }
+
+  const failures = await applyCameraControls(settings.device, settings.controls);
+
+  if (failures.length > 0) {
+    // Non-fatal: a control the driver currently refuses (often because a
+    // related automatic mode is still on, or the control isn't supported)
+    // should not block the capture that follows - it just runs with
+    // whatever control state the camera is actually in.
+    console.warn(
+      `Some camera profile controls could not be applied to ${settings.device}: ${failures
+        .map((failure) => `${failure.control} (${failure.error})`)
+        .join("; ")}`,
+    );
   }
 }
 
