@@ -406,3 +406,53 @@ test("experiment milestones, comparison, and harvest result flows", async ({ pag
   await page.getByRole("button", { name: "Save Anyway" }).click();
   await expect(page.getByText("Harvest result saved.")).toBeVisible();
 });
+
+test("guided project crop setup, legacy adoption, and visual-history sync", async ({ page }) => {
+  await mockCameraApis(page);
+  const ids = await seedVisualData();
+
+  await goto(page, `/projects/${ids.projectId}`);
+  await expect(page.getByRole("heading", { name: "Crop Setup" })).toBeVisible();
+  await expect(page.getByText("0 of 2 plants configured")).toBeVisible();
+
+  await page.getByRole("link", { name: "Configure Project Crops" }).first().click();
+  await expect(page.getByRole("heading", { name: "Configure Project Crops" })).toBeVisible();
+  await expect(page.getByTestId("crop-setup-progress")).toContainText("Plant 1 of 2");
+
+  // Radish A (grid order first) has legacy PlantPhotoCrop rows but no crop
+  // version yet - its exact existing crop should be prefilled so the user
+  // can confirm without redrawing.
+  await expect(page.getByText("Legacy crop only").first()).toBeVisible();
+  await page.getByRole("button", { name: "Use This Existing Crop From This Frame Forward" }).click();
+
+  // Advances automatically to Radish B, which has no crop history at all.
+  await expect(page.getByTestId("crop-setup-progress")).toContainText("Plant 2 of 2");
+  await expect(page.getByText("Not configured").first()).toBeVisible();
+
+  const stage = page.getByTestId("crop-editor-stage");
+  await stage.waitFor();
+  await expect
+    .poll(() => stage.locator("img").evaluate((img) => (img as HTMLImageElement).naturalWidth > 0))
+    .toBe(true);
+  const box = await stage.boundingBox();
+  if (!box) {
+    throw new Error("crop editor stage did not render");
+  }
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6, { steps: 5 });
+  await page.mouse.up();
+  await page.getByRole("button", { name: "Set Initial Crop & Next" }).click();
+
+  await expect(page.getByTestId("crop-setup-complete")).toBeVisible();
+  await expect(page.getByText("2 of 2 plants configured")).toBeVisible();
+  await expect(page.getByText(/automatically receives that crop/)).toBeVisible();
+
+  await page.getByRole("link", { name: "Back to Project" }).click();
+  await expect(page.getByText("2 of 2 plants configured")).toBeVisible();
+
+  await page.getByRole("button", { name: "Sync Visual Histories" }).click();
+  await expect(page.getByText("Visual histories synchronized")).toBeVisible();
+  await expect(page.getByText("2 configured")).toBeVisible();
+  await expect(page.getByText("0 failures")).toBeVisible();
+});

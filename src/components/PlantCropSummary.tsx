@@ -74,7 +74,12 @@ export function PlantCropSummary({
 
   return (
     <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-      <h2 className="text-lg font-semibold text-stone-950">Plant Crops</h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold text-stone-950">Plant Crops</h2>
+        <Link href={`/projects/${projectId}/crop-setup?photoId=${photoId}`} className="button-secondary">
+          Configure Project Crops
+        </Link>
+      </div>
 
       {crops.length === 0 ? (
         <p className="mt-3 text-sm text-stone-600">No plants have a saved crop in this photo yet.</p>

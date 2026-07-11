@@ -105,6 +105,37 @@ for (const viewport of viewports) {
     await capture(page, `${prefix}-crop-preset-suggestion`);
     await page.getByRole("button", { name: "Cancel" }).click();
 
+    // Guided project crop setup, at a moment where all three states exist:
+    // Radish A still only has its seeded legacy crop (no version yet - that
+    // happens later below), Radish B was just configured above, and Radish
+    // C has none. Skip through without adopting Radish A's legacy crop here
+    // so the "Adjust Crop" steps further down still see it as unconfigured.
+    await goto(page, `/projects/${ids.projectId}`);
+    await capture(page, `${prefix}-project-crop-status`);
+
+    await page.getByRole("link", { name: "Configure Project Crops" }).click();
+    await page.getByTestId("crop-setup-progress").waitFor();
+    await capture(page, `${prefix}-crop-setup-legacy-adoption`);
+
+    await page.getByRole("button", { name: "Skip Plant" }).click();
+    await capture(page, `${prefix}-crop-setup-progress-plant2`);
+
+    await page.getByRole("button", { name: "Skip Plant" }).click();
+    await capture(page, `${prefix}-crop-setup-preset-and-remaining`);
+
+    await page.getByRole("button", { name: "Set Initial Crop & Next" }).click();
+    await page.getByTestId("crop-setup-complete").waitFor();
+    await capture(page, `${prefix}-crop-setup-complete`);
+
+    await page.getByRole("link", { name: "Back to Project" }).click();
+    await page.getByRole("heading", { name: "Crop Setup" }).waitFor();
+    await capture(page, `${prefix}-project-crop-status-after-setup`);
+
+    await page.getByRole("button", { name: "Sync Visual Histories" }).click();
+    await page.getByText("Visual histories synchronized").waitFor();
+    await capture(page, `${prefix}-project-sync-result`);
+
+    await goto(page, `/photos/${ids.photoId}`);
     await page.getByTestId("grid-cell-0-0").click();
     await capture(page, `${prefix}-add-event-dialog`);
     await page.getByRole("button", { name: "Select crop from photo" }).click();

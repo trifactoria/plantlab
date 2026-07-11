@@ -339,6 +339,197 @@ export async function repairMissingCrops(prisma: PrismaClient, plantId: string):
   return { added, skippedExisting, preservedManual, noApplicableVersion, failed };
 }
 
+export type PlantCropState = "configured" | "legacy" | "unconfigured";
+
+export type ProjectPlantCropSummary = {
+  id: string;
+  name: string;
+  gridX: number;
+  gridY: number;
+  state: PlantCropState;
+  versionCount: number;
+  automaticCropAssignmentEnabled: boolean;
+};
+
+export type ProjectCropStatus = {
+  totalPlants: number;
+  configuredCount: number;
+  legacyOnlyCount: number;
+  unconfiguredCount: number;
+  automaticAssignmentDisabledCount: number;
+  totalProjectPhotos: number;
+  totalApplicableFrames: number;
+  totalMaterializedFrames: number;
+  plants: ProjectPlantCropSummary[];
+};
+
+/**
+ * Project-wide crop-readiness summary backing the "Crop setup: N of M
+ * plants configured" status line and the guided setup / sync screens.
+ * Plants are returned in grid order (gridY then gridX) so callers don't
+ * need to re-sort. A plant is "configured" once it has at least one active
+ * PlantCropVersion, "legacy" if it only has PlantPhotoCrop rows predating
+ * the crop-version system, otherwise "unconfigured".
+ */
+export async function computeProjectCropStatus(prisma: PrismaClient, projectId: string): Promise<ProjectCropStatus> {
+  const plants = await prisma.plant.findMany({
+    where: { projectId },
+    orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
+    select: { id: true, name: true, gridX: true, gridY: true, automaticCropAssignmentEnabled: true },
+  });
+
+  const [versionCounts, legacyCounts, totalProjectPhotos] = await Promise.all([
+    prisma.plantCropVersion.groupBy({
+      by: ["plantId"],
+      where: { projectId, active: true },
+      _count: { _all: true },
+    }),
+    prisma.plantPhotoCrop.groupBy({
+      by: ["plantId"],
+      where: { plantId: { in: plants.map((plant) => plant.id) } },
+      _count: { _all: true },
+    }),
+    prisma.photo.count({ where: { projectId } }),
+  ]);
+
+  const versionCountByPlant = new Map(versionCounts.map((row) => [row.plantId, row._count._all]));
+  const legacyCountByPlant = new Map(legacyCounts.map((row) => [row.plantId, row._count._all]));
+
+  let configuredCount = 0;
+  let legacyOnlyCount = 0;
+  let unconfiguredCount = 0;
+  let automaticAssignmentDisabledCount = 0;
+
+  const plantSummaries: ProjectPlantCropSummary[] = plants.map((plant) => {
+    const versionCount = versionCountByPlant.get(plant.id) ?? 0;
+    const legacyCropCount = legacyCountByPlant.get(plant.id) ?? 0;
+    const state: PlantCropState = versionCount > 0 ? "configured" : legacyCropCount > 0 ? "legacy" : "unconfigured";
+
+    if (state === "configured") {
+      configuredCount += 1;
+    } else if (state === "legacy") {
+      legacyOnlyCount += 1;
+    } else {
+      unconfiguredCount += 1;
+    }
+    if (!plant.automaticCropAssignmentEnabled) {
+      automaticAssignmentDisabledCount += 1;
+    }
+
+    return {
+      id: plant.id,
+      name: plant.name,
+      gridX: plant.gridX,
+      gridY: plant.gridY,
+      state,
+      versionCount,
+      automaticCropAssignmentEnabled: plant.automaticCropAssignmentEnabled,
+    };
+  });
+
+  let totalApplicableFrames = 0;
+  let totalMaterializedFrames = 0;
+  for (const plant of plantSummaries) {
+    if (plant.state !== "configured") {
+      continue;
+    }
+    const status = await computeVisualHistoryStatus(prisma, plant.id);
+    totalApplicableFrames += status.totalApplicablePhotos;
+    totalMaterializedFrames += status.materializedCount;
+  }
+
+  return {
+    totalPlants: plants.length,
+    configuredCount,
+    legacyOnlyCount,
+    unconfiguredCount,
+    automaticAssignmentDisabledCount,
+    totalProjectPhotos,
+    totalApplicableFrames,
+    totalMaterializedFrames,
+    plants: plantSummaries,
+  };
+}
+
+export type ProjectSyncPlantResult = {
+  plantId: string;
+  plantName: string;
+  result: RepairResult;
+};
+
+export type ProjectSyncResult = {
+  totalPlants: number;
+  configuredCount: number;
+  unconfiguredCount: number;
+  automaticAssignmentDisabledCount: number;
+  totalProjectPhotos: number;
+  added: number;
+  skippedExisting: number;
+  preservedManual: number;
+  failed: number;
+  perPlant: ProjectSyncPlantResult[];
+};
+
+/**
+ * Project-wide "Sync visual histories" - repairs every configured,
+ * automatic-assignment-enabled plant in the project using the exact same
+ * repairMissingCrops() used by the per-plant "Fill missing frames" button,
+ * so the two share identical behavior and safety guarantees. Plants with no
+ * crop version, or with automatic assignment explicitly disabled, are
+ * skipped and reported separately rather than silently touched. Idempotent
+ * and safe under retries because repairMissingCrops itself is.
+ */
+export async function repairProjectMissingCrops(prisma: PrismaClient, projectId: string): Promise<ProjectSyncResult> {
+  const plants = await prisma.plant.findMany({
+    where: { projectId },
+    orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
+  });
+  const totalProjectPhotos = await prisma.photo.count({ where: { projectId } });
+
+  let configuredCount = 0;
+  let unconfiguredCount = 0;
+  let automaticAssignmentDisabledCount = 0;
+  let added = 0;
+  let skippedExisting = 0;
+  let preservedManual = 0;
+  let failed = 0;
+  const perPlant: ProjectSyncPlantResult[] = [];
+
+  for (const plant of plants) {
+    const versionCount = await prisma.plantCropVersion.count({ where: { plantId: plant.id, active: true } });
+    if (versionCount === 0) {
+      unconfiguredCount += 1;
+      continue;
+    }
+    configuredCount += 1;
+
+    if (!plant.automaticCropAssignmentEnabled) {
+      automaticAssignmentDisabledCount += 1;
+      continue;
+    }
+
+    const result = await repairMissingCrops(prisma, plant.id);
+    added += result.added;
+    skippedExisting += result.skippedExisting;
+    preservedManual += result.preservedManual;
+    failed += result.failed;
+    perPlant.push({ plantId: plant.id, plantName: plant.name, result });
+  }
+
+  return {
+    totalPlants: plants.length,
+    configuredCount,
+    unconfiguredCount,
+    automaticAssignmentDisabledCount,
+    totalProjectPhotos,
+    added,
+    skippedExisting,
+    preservedManual,
+    failed,
+    perPlant,
+  };
+}
+
 export type VisualHistoryStatus = {
   totalApplicablePhotos: number;
   materializedCount: number;
@@ -382,5 +573,131 @@ export async function computeVisualHistoryStatus(prisma: PrismaClient, plantId: 
     missingCount: Math.max(0, applicableIds.length - materializedCount),
     automaticCropAssignmentEnabled: plant.automaticCropAssignmentEnabled,
     versionCount: versions.length,
+  };
+}
+
+export type ProjectCropSetupCrop = {
+  cropX: number;
+  cropY: number;
+  cropWidth: number;
+  cropHeight: number;
+};
+
+export type ProjectCropSetupCropSource = "legacy_row" | "existing_crop_row" | "active_version" | "none";
+
+export type ProjectCropSetupPlant = {
+  id: string;
+  name: string;
+  gridX: number;
+  gridY: number;
+  automaticCropAssignmentEnabled: boolean;
+  versionCount: number;
+  state: PlantCropState;
+  crop: ProjectCropSetupCrop | null;
+  cropSource: ProjectCropSetupCropSource;
+  aspectRatioMode: string | null;
+};
+
+export type ProjectCropSetupData = {
+  photo: { id: string; timestamp: string };
+  preset: { width: number; height: number; aspectRatioMode: string } | null;
+  plants: ProjectCropSetupPlant[];
+};
+
+/**
+ * Batch data for the guided project crop-setup wizard, keyed by one
+ * representative photo - shared by the initial server-rendered page load
+ * and the client-side refetch when the user switches photos, so there is
+ * exactly one implementation of "what crop does each plant show on this
+ * photo." See ProjectCropSetupPlant.cropSource for how each plant's crop
+ * is resolved (existing exact row, applicable version, or none).
+ */
+export async function loadProjectCropSetupData(
+  prisma: PrismaClient,
+  projectId: string,
+  requestedPhotoId?: string | null,
+): Promise<ProjectCropSetupData | null> {
+  const photo = requestedPhotoId
+    ? await prisma.photo.findUnique({ where: { id: requestedPhotoId } })
+    : await prisma.photo.findFirst({ where: { projectId }, orderBy: { timestamp: "desc" } });
+
+  if (!photo || photo.projectId !== projectId) {
+    return null;
+  }
+
+  const [plants, preset, existingCrops, versions] = await Promise.all([
+    prisma.plant.findMany({
+      where: { projectId },
+      orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
+    }),
+    prisma.projectCropPreset.findUnique({ where: { projectId } }),
+    prisma.plantPhotoCrop.findMany({ where: { photoId: photo.id } }),
+    prisma.plantCropVersion.findMany({
+      where: { projectId, active: true },
+      orderBy: { effectiveFrom: "asc" },
+    }),
+  ]);
+
+  const existingCropByPlantId = new Map(existingCrops.map((crop) => [crop.plantId, crop]));
+  const versionsByPlantId = new Map<string, typeof versions>();
+  for (const version of versions) {
+    const list = versionsByPlantId.get(version.plantId) ?? [];
+    list.push(version);
+    versionsByPlantId.set(version.plantId, list);
+  }
+
+  const photoTimestampMs = photo.timestamp.getTime();
+
+  const plantSummaries: ProjectCropSetupPlant[] = plants.map((plant) => {
+    const plantVersions = versionsByPlantId.get(plant.id) ?? [];
+    const versionCount = plantVersions.length;
+    const existingCrop = existingCropByPlantId.get(plant.id) ?? null;
+    const state: PlantCropState = versionCount > 0 ? "configured" : existingCrop ? "legacy" : "unconfigured";
+    const activeVersion = [...plantVersions]
+      .reverse()
+      .find((version) => version.effectiveFrom.getTime() <= photoTimestampMs);
+
+    let crop: ProjectCropSetupCrop | null = null;
+    let cropSource: ProjectCropSetupCropSource = "none";
+    let aspectRatioMode: string | null = null;
+
+    if (existingCrop) {
+      crop = {
+        cropX: existingCrop.cropX,
+        cropY: existingCrop.cropY,
+        cropWidth: existingCrop.cropWidth,
+        cropHeight: existingCrop.cropHeight,
+      };
+      cropSource = state === "legacy" ? "legacy_row" : "existing_crop_row";
+      aspectRatioMode = activeVersion?.aspectRatioMode ?? null;
+    } else if (activeVersion) {
+      crop = {
+        cropX: activeVersion.cropX,
+        cropY: activeVersion.cropY,
+        cropWidth: activeVersion.cropWidth,
+        cropHeight: activeVersion.cropHeight,
+      };
+      cropSource = "active_version";
+      aspectRatioMode = activeVersion.aspectRatioMode;
+    }
+
+    return {
+      id: plant.id,
+      name: plant.name,
+      gridX: plant.gridX,
+      gridY: plant.gridY,
+      automaticCropAssignmentEnabled: plant.automaticCropAssignmentEnabled,
+      versionCount,
+      state,
+      crop,
+      cropSource,
+      aspectRatioMode,
+    };
+  });
+
+  return {
+    photo: { id: photo.id, timestamp: photo.timestamp.toISOString() },
+    preset,
+    plants: plantSummaries,
   };
 }
