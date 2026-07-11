@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cropData, cropFromBody } from "@/lib/crops";
-import { warningNeedsConfirmation } from "@/lib/experiment";
+import { EVENT_KIND_OBSERVATION, warningNeedsConfirmation } from "@/lib/experiment";
 import {
   badRequest,
   optionalDate,
@@ -30,6 +30,10 @@ export async function POST(request: Request) {
   const body = await readJson(request);
 
   try {
+    if (body?.kind !== undefined && body.kind !== EVENT_KIND_OBSERVATION) {
+      return badRequest("This endpoint can only create ordinary observation events.");
+    }
+
     const plantId = requiredString(body?.plantId, "plantId");
     const plant = await prisma.plant.findUnique({ where: { id: plantId } });
 
@@ -100,6 +104,7 @@ export async function POST(request: Request) {
       data: {
         projectId: plant.projectId,
         plantId,
+        kind: EVENT_KIND_OBSERVATION,
         photoId,
         milestoneId: milestone?.id,
         type: milestone ? milestone.label : requiredString(body?.type, "type"),

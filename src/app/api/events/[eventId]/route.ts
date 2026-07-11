@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cropData, cropFromBody } from "@/lib/crops";
-import { warningNeedsConfirmation } from "@/lib/experiment";
+import { isOriginEvent, warningNeedsConfirmation } from "@/lib/experiment";
 import {
   badRequest,
   notFound,
@@ -43,9 +43,17 @@ export async function PATCH(request: Request, context: Context) {
       return notFound("Event not found");
     }
 
+    const isOrigin = isOriginEvent(existingEvent);
+
+    if (isOrigin && (body?.type !== undefined || body?.milestoneId !== undefined)) {
+      return badRequest(
+        "Origin event type and milestone cannot be changed. Only its timestamp and notes are editable.",
+      );
+    }
+
     let nextPhotoId: string | null | undefined;
     let effectivePhotoId = existingEvent.photoId;
-    if (body?.photoId !== undefined) {
+    if (!isOrigin && body?.photoId !== undefined) {
       nextPhotoId = optionalString(body.photoId);
       effectivePhotoId = nextPhotoId;
 
@@ -62,14 +70,14 @@ export async function PATCH(request: Request, context: Context) {
       }
     }
 
-    const crop = cropFromBody(body);
+    const crop = isOrigin ? undefined : cropFromBody(body);
     if (crop && !effectivePhotoId) {
       return badRequest("A crop can only be saved when the event is linked to a photo.");
     }
 
     const nextCropData = nextPhotoId === null ? cropData(null) : cropData(crop);
     const milestoneId =
-      body?.milestoneId === undefined ? undefined : optionalString(body.milestoneId);
+      isOrigin || body?.milestoneId === undefined ? undefined : optionalString(body.milestoneId);
     const milestone = milestoneId
       ? await prisma.projectMilestone.findUnique({ where: { id: milestoneId } })
       : null;
@@ -109,21 +117,36 @@ export async function PATCH(request: Request, context: Context) {
       return NextResponse.json({ warnings }, { status: 409 });
     }
 
-    const event = await prisma.plantEvent.update({
-      where: { id: eventId },
-      data: {
-        milestoneId,
-        type:
-          milestone !== null
-            ? milestone.label
-            : body?.type === undefined
-              ? undefined
-              : requiredString(body.type, "type"),
-        notes: body?.notes === undefined ? undefined : optionalString(body.notes),
-        timestamp: nextTimestamp,
-        photoId: nextPhotoId,
-        ...nextCropData,
-      },
+    // Editing an origin event's timestamp keeps Plant.startedAt canonical
+    // with it during this compatibility phase - see ORIGIN_EVENT_TYPE in
+    // src/lib/experiment.ts for why Plant.startedAt/startLabel still exist.
+    const event = await prisma.$transaction(async (tx) => {
+      const updated = await tx.plantEvent.update({
+        where: { id: eventId },
+        data: {
+          milestoneId: isOrigin ? undefined : milestoneId,
+          type: isOrigin
+            ? undefined
+            : milestone !== null
+              ? milestone.label
+              : body?.type === undefined
+                ? undefined
+                : requiredString(body.type, "type"),
+          notes: body?.notes === undefined ? undefined : optionalString(body.notes),
+          timestamp: nextTimestamp,
+          photoId: isOrigin ? undefined : nextPhotoId,
+          ...(isOrigin ? {} : nextCropData),
+        },
+      });
+
+      if (isOrigin && nextTimestamp !== undefined) {
+        await tx.plant.update({
+          where: { id: existingEvent.plantId },
+          data: { startedAt: nextTimestamp },
+        });
+      }
+
+      return updated;
     });
 
     return NextResponse.json(event);
@@ -142,6 +165,10 @@ export async function DELETE(_request: Request, context: Context) {
 
   if (!event) {
     return notFound("Event not found");
+  }
+
+  if (isOriginEvent(event)) {
+    return badRequest("Origin events cannot be deleted.");
   }
 
   await prisma.plantEvent.delete({ where: { id: eventId } });

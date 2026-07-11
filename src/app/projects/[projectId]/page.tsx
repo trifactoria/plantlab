@@ -12,6 +12,7 @@ import {
   HARVEST_READY_MILESTONE_KEY,
   HARVESTED_MILESTONE_KEY,
   ensureDefaultProjectMilestones,
+  ensurePlantOriginEvents,
   formatElapsed,
   baselineForPlant,
   elapsedMs,
@@ -40,6 +41,7 @@ export default async function ProjectPage({ params }: PageProps) {
   const projectRecord = project;
 
   await ensureDefaultProjectMilestones(prisma, projectRecord.id);
+  await ensurePlantOriginEvents(prisma, projectRecord.id);
   const [latestPhoto, galleryPhotos, milestones, canonicalEvents, harvestResults] = await Promise.all([
     prisma.photo.findFirst({
       where: { projectId: projectRecord.id },

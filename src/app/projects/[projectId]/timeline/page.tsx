@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { EventActions } from "@/components/EventActions";
+import { ObservationCard } from "@/components/ObservationCard";
 import { dayKey, dayLabel } from "@/lib/gallery";
+import { ensurePlantOriginEvents } from "@/lib/experiment";
 import { prisma } from "@/lib/prisma";
 import { formatDateTimeInZone } from "@/lib/timezone";
 
@@ -10,63 +11,57 @@ type PageProps = {
   searchParams: Promise<{ sort?: string }>;
 };
 
-type TimelineEntry =
-  | {
-      kind: "start";
-      id: string;
-      timestamp: Date;
-      label: string;
-      plant: { id: string; name: string };
-    }
-  | {
-      kind: "event";
-      id: string;
-      timestamp: Date;
-      type: string;
-      notes: string | null;
-      photoId: string | null;
-      cropX: number | null;
-      cropY: number | null;
-      cropWidth: number | null;
-      cropHeight: number | null;
-      plant: { id: string; name: string };
-      photo: { id: string; filename: string } | null;
-    };
+type TimelineEntry = {
+  id: string;
+  kind: string;
+  timestamp: Date;
+  type: string;
+  notes: string | null;
+  photoId: string | null;
+  milestoneId: string | null;
+  cropX: number | null;
+  cropY: number | null;
+  cropWidth: number | null;
+  cropHeight: number | null;
+  plant: { id: string; name: string };
+  photo: { id: string; filename: string } | null;
+};
 
 export default async function ProjectTimelinePage({ params, searchParams }: PageProps) {
   const { projectId } = await params;
   const { sort } = await searchParams;
   const newestFirst = sort === "newest";
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    include: {
-      plants: {
-        include: {
-          events: { include: { photo: true } },
+  await ensurePlantOriginEvents(prisma, projectId);
+  const [project, milestones] = await Promise.all([
+    prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        plants: {
+          include: {
+            events: { include: { photo: true } },
+          },
         },
       },
-    },
-  });
+    }),
+    prisma.projectMilestone.findMany({
+      where: { projectId, enabled: true },
+      orderBy: [{ sortOrder: "asc" }, { label: "asc" }],
+    }),
+  ]);
 
   if (!project) {
     notFound();
   }
 
-  const entries: TimelineEntry[] = project.plants.flatMap((plant) => [
-    {
-      kind: "start" as const,
-      id: `start-${plant.id}`,
-      timestamp: plant.startedAt,
-      label: plant.startLabel,
-      plant: { id: plant.id, name: plant.name },
-    },
-    ...plant.events.map((event) => ({
-      kind: "event" as const,
+  const entries: TimelineEntry[] = project.plants.flatMap((plant) =>
+    plant.events.map((event) => ({
       id: event.id,
+      kind: event.kind,
       timestamp: event.timestamp,
       type: event.type,
       notes: event.notes,
       photoId: event.photoId,
+      milestoneId: event.milestoneId,
       cropX: event.cropX,
       cropY: event.cropY,
       cropWidth: event.cropWidth,
@@ -74,7 +69,7 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
       plant: { id: plant.id, name: plant.name },
       photo: event.photo ? { id: event.photo.id, filename: event.photo.filename } : null,
     })),
-  ]);
+  );
 
   entries.sort((a, b) =>
     newestFirst
@@ -87,6 +82,8 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
     const key = dayKey(entry.timestamp, project.timeZone);
     grouped.set(key, [...(grouped.get(key) ?? []), entry]);
   }
+
+  const milestoneOptions = milestones.map((milestone) => ({ id: milestone.id, label: milestone.label }));
 
   return (
     <main className="min-h-screen">
@@ -120,73 +117,27 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
               <section key={key} className="grid gap-3">
                 <h2 className="text-lg font-semibold text-stone-950">{dayLabel(key, project.timeZone)}</h2>
                 {dayEntries.map((entry) => (
-                  <article
+                  <ObservationCard
                     key={entry.id}
-                    className={`rounded-lg border p-5 shadow-sm ${
-                      entry.kind === "start"
-                        ? "border-emerald-200 bg-emerald-50"
-                        : "border-stone-200 bg-white"
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <Link href={`/plants/${entry.plant.id}`} className="text-sm font-semibold text-emerald-700">
-                          {entry.plant.name}
-                        </Link>
-                        <h3 className="mt-1 text-lg font-semibold text-stone-950">
-                          {entry.kind === "start" ? entry.label : entry.type}
-                        </h3>
-                        <p className="text-sm text-stone-500">
-                          {formatDateTimeInZone(entry.timestamp, project.timeZone)}
-                        </p>
-                        {entry.kind === "start" ? (
-                          <p className="mt-2 text-sm text-emerald-900">Plant starting entry</p>
-                        ) : entry.notes ? (
-                          <p className="mt-2 whitespace-pre-wrap text-sm text-stone-700">
-                            {entry.notes}
-                          </p>
-                        ) : null}
-                      </div>
-
-                      {entry.kind === "event" ? (
-                        <div className="grid gap-2 justify-items-start sm:justify-items-end">
-                          {entry.photo ? (
-                            <Link className="button-secondary" href={`/photos/${entry.photo.id}`}>
-                              Open Photo
-                            </Link>
-                          ) : null}
-                          <EventActions
-                            event={{
-                              id: entry.id,
-                              type: entry.type,
-                              notes: entry.notes,
-                              timestamp: entry.timestamp.toISOString(),
-                              photoId: entry.photoId,
-                              cropX: entry.cropX,
-                              cropY: entry.cropY,
-                              cropWidth: entry.cropWidth,
-                              cropHeight: entry.cropHeight,
-                            }}
-                          />
-                        </div>
-                      ) : (
-                        <Link className="button-secondary" href={`/plants/${entry.plant.id}`}>
-                          Edit Plant
-                        </Link>
-                      )}
-                    </div>
-
-                    {entry.kind === "event" && entry.photoId && entry.cropX !== null ? (
-                      <div className="mt-3">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={`/api/events/${entry.id}/crop`}
-                          alt={`${entry.type} crop`}
-                          className="max-h-28 max-w-full rounded-md border border-stone-200 bg-black object-contain"
-                        />
-                      </div>
-                    ) : null}
-                  </article>
+                    plantId={entry.plant.id}
+                    milestones={milestoneOptions}
+                    timestampLabel={formatDateTimeInZone(entry.timestamp, project.timeZone)}
+                    plantLink={{ href: `/plants/${entry.plant.id}`, label: entry.plant.name }}
+                    photoHref={entry.photo ? `/photos/${entry.photo.id}` : undefined}
+                    event={{
+                      id: entry.id,
+                      kind: entry.kind,
+                      type: entry.type,
+                      notes: entry.notes,
+                      timestamp: entry.timestamp.toISOString(),
+                      photoId: entry.photoId,
+                      milestoneId: entry.milestoneId,
+                      cropX: entry.cropX,
+                      cropY: entry.cropY,
+                      cropWidth: entry.cropWidth,
+                      cropHeight: entry.cropHeight,
+                    }}
+                  />
                 ))}
               </section>
             ))

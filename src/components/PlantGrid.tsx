@@ -1,12 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CropSelector, type CropValue } from "@/components/CropSelector";
 import { CreatedPlant, PlantCreateForm } from "@/components/PlantCreateForm";
+import { ObservationForm } from "@/components/ObservationForm";
 import { StartingObservationMilestone } from "@/components/StartingObservationField";
-import { toDateTimeLocal } from "@/lib/format";
 import { findNextEmptyCell, gridCellKey } from "@/lib/plantEntry";
 
 type GridPlant = {
@@ -31,14 +30,6 @@ type SelectedPlant = {
   id: string;
   name: string;
 };
-
-const EVENT_TYPES = [
-  "Germinated",
-  "Cotyledons",
-  "First True Leaf",
-  "Harvest Ready",
-  "Harvested",
-];
 
 export function PlantGrid({
   project,
@@ -67,16 +58,11 @@ export function PlantGrid({
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
   const [lastCreatedName, setLastCreatedName] = useState<string | null>(null);
   const [selectedPlant, setSelectedPlant] = useState<SelectedPlant | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [eventCrop, setEventCrop] = useState<CropValue | null>(null);
-  const [showCropSelector, setShowCropSelector] = useState(false);
 
   function handlePlantCreated(plant: CreatedPlant, options: { addNext: boolean }) {
     const nextLocalPlants = [...localPlants, plant];
     setLocalPlants(nextLocalPlants);
     setLastCreatedName(plant.name);
-    setError(null);
 
     if (options.addNext) {
       const occupied = new Set(nextLocalPlants.map((item) => gridCellKey(item.gridX, item.gridY)));
@@ -91,49 +77,6 @@ export function PlantGrid({
       setSelectedCell(null);
     }
 
-    router.refresh();
-  }
-
-  async function addEvent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!selectedPlant) {
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-    const formData = new FormData(event.currentTarget);
-    const timestamp = String(formData.get("timestamp"));
-    const response = await fetch("/api/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plantId: selectedPlant.id,
-        photoId,
-        type: formData.get("type"),
-        notes: formData.get("notes"),
-        timestamp: new Date(timestamp).toISOString(),
-        ...(eventCrop ?? {
-          cropX: null,
-          cropY: null,
-          cropWidth: null,
-          cropHeight: null,
-        }),
-      }),
-    });
-
-    const payload = (await response.json()) as { error?: string };
-    setSaving(false);
-
-    if (!response.ok) {
-      setError(payload.error ?? "Could not add event");
-      return;
-    }
-
-    setSelectedPlant(null);
-    setEventCrop(null);
-    setShowCropSelector(false);
     router.refresh();
   }
 
@@ -162,7 +105,6 @@ export function PlantGrid({
                     : "cursor-default border-dashed border-stone-200 bg-stone-50 text-stone-300"
               }`}
               onClick={() => {
-                setError(null);
                 if (plant && mode === "photo") {
                   setSelectedPlant(plant);
                   return;
@@ -207,74 +149,19 @@ export function PlantGrid({
 
       {selectedPlant ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <form onSubmit={addEvent} className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
-            <div>
-              <h2 className="text-lg font-semibold text-stone-950">Add Event</h2>
-              <p className="text-sm text-stone-500">{selectedPlant.name}</p>
-            </div>
-
-            <label className="field">
-              Event type
-              <input className="input" name="type" list="plant-event-types" defaultValue="Germinated" required />
-              <datalist id="plant-event-types">
-                {EVENT_TYPES.map((eventType) => (
-                  <option key={eventType} value={eventType} />
-                ))}
-              </datalist>
-            </label>
-            <label className="field">
-              Notes
-              <textarea className="input min-h-24" name="notes" />
-            </label>
-            <label className="field">
-              Timestamp
-              <input
-                className="input"
-                name="timestamp"
-                type="datetime-local"
-                defaultValue={photoTimestamp ? toDateTimeLocal(photoTimestamp) : undefined}
-                required
-              />
-            </label>
-
-            {photoId ? (
-              <div className="grid gap-3">
-                <button
-                  type="button"
-                  className="button-secondary w-fit"
-                  onClick={() => setShowCropSelector((value) => !value)}
-                >
-                  Select crop from photo
-                </button>
-                {showCropSelector ? (
-                  <CropSelector
-                    imageUrl={`/api/photos/${photoId}/file`}
-                    value={eventCrop}
-                    onChange={setEventCrop}
-                  />
-                ) : null}
-              </div>
-            ) : null}
-
-            {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
-
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="button-secondary"
-                onClick={() => {
-                  setSelectedPlant(null);
-                  setEventCrop(null);
-                  setShowCropSelector(false);
-                }}
-              >
-                Cancel
-              </button>
-              <button className="button" disabled={saving}>
-                {saving ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </form>
+          <ObservationForm
+            plantId={selectedPlant.id}
+            milestones={milestones}
+            photoId={photoId}
+            photoTimestamp={photoTimestamp}
+            copyPlantPhotoCrop
+            title={`Add Event: ${selectedPlant.name}`}
+            onCancel={() => setSelectedPlant(null)}
+            onSaved={() => {
+              setSelectedPlant(null);
+              router.refresh();
+            }}
+          />
         </div>
       ) : null}
     </>

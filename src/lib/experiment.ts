@@ -1,4 +1,8 @@
 import type { PrismaClient } from "@prisma/client";
+import { EVENT_KIND_ORIGIN, ORIGIN_EVENT_TYPE, isOriginEvent } from "@/lib/observationKinds";
+
+export { EVENT_KIND_ORIGIN, EVENT_KIND_OBSERVATION, ORIGIN_EVENT_TYPE, isOriginEvent } from "@/lib/observationKinds";
+export type { EventKind } from "@/lib/observationKinds";
 
 export const DEFAULT_PROJECT_MILESTONES = [
   { key: "first_visible", label: "First visible", sortOrder: 1 },
@@ -61,6 +65,48 @@ export async function associateExactLabelEventsWithMilestones(prisma: PrismaClie
   }
 
   return updatedCount;
+}
+
+export function originEventData(plant: { id: string; projectId: string; startedAt: Date }) {
+  return {
+    projectId: plant.projectId,
+    plantId: plant.id,
+    kind: EVENT_KIND_ORIGIN,
+    type: ORIGIN_EVENT_TYPE,
+    timestamp: plant.startedAt,
+  };
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return Boolean(
+    error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "P2002",
+  );
+}
+
+type OriginBackfillClient = Pick<PrismaClient, "plant" | "plantEvent">;
+
+/**
+ * Idempotent, safe to call on every read. Creates a missing origin event for
+ * any plant that doesn't have one yet (e.g. plants created before this
+ * feature existed). Races are resolved by the partial unique index on
+ * PlantEvent(plantId) WHERE kind='origin' - a losing concurrent insert is
+ * simply ignored rather than throwing.
+ */
+export async function ensurePlantOriginEvents(prisma: OriginBackfillClient, projectId: string) {
+  const plants = await prisma.plant.findMany({
+    where: { projectId, events: { none: { kind: EVENT_KIND_ORIGIN } } },
+    select: { id: true, projectId: true, startedAt: true },
+  });
+
+  for (const plant of plants) {
+    try {
+      await prisma.plantEvent.create({ data: originEventData(plant) });
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+    }
+  }
 }
 
 export function baselineForPlant(project: { plantedAt: Date | null }, plant: { startedAt: Date }) {

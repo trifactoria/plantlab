@@ -103,6 +103,11 @@ model PlantEvent {
   plantId    String
   photoId    String?
   milestoneId String?
+  // "origin" | "observation". Origin is the single system-created "Added to
+  // project" event per plant; see src/lib/experiment.ts for the constants and
+  // guards. A partial unique index (see migration) enforces at most one
+  // origin event per plant at the database level.
+  kind       String   @default("observation")
   type       String
   notes      String?
   timestamp  DateTime

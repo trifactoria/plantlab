@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { EventActions } from "@/components/EventActions";
+import { ObservationForm } from "@/components/ObservationForm";
 import { QuickMilestoneEntry, type ExistingMilestone, type QuickMilestone } from "@/components/QuickMilestoneEntry";
 import { buildCropThumbnailUrl } from "@/lib/cropThumbnail";
-import { formatDateTime, toDateTimeLocal } from "@/lib/format";
+import { formatDateTime } from "@/lib/format";
 
 export type FrameIndexEntry = {
   photoId: string;
@@ -15,10 +15,12 @@ export type FrameIndexEntry = {
 
 type FrameEvent = {
   id: string;
+  kind: string;
   type: string;
   notes: string | null;
   timestamp: string;
   photoId: string | null;
+  milestoneId: string | null;
   cropX: number | null;
   cropY: number | null;
   cropWidth: number | null;
@@ -44,7 +46,6 @@ type FrameDetail = {
 
 const SPEEDS = [0.5, 1, 2, 4] as const;
 const BASE_STEP_MS = 500;
-const EVENT_TYPES = ["Germinated", "Cotyledons", "First True Leaf", "Harvest Ready", "Harvested"];
 
 function findClosestIndexByTime(frames: FrameIndexEntry[], targetMs: number) {
   let low = 0;
@@ -104,9 +105,7 @@ export function PlantVisualHistory({
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
   const [addingEvent, setAddingEvent] = useState(false);
-  const [savingEvent, setSavingEvent] = useState(false);
-  const [addEventError, setAddEventError] = useState<string | null>(null);
-  const [reuseCrop, setReuseCrop] = useState(true);
+  const [editingEvent, setEditingEvent] = useState<FrameEvent | null>(null);
 
   const currentFrame = frames[currentIndex] ?? null;
   const detail = currentFrame ? (detailCache.get(currentFrame.photoId) ?? null) : null;
@@ -245,45 +244,10 @@ export function PlantVisualHistory({
     draggingRef.current = false;
   }
 
-  async function submitAddEvent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
+  async function refreshCurrentFrame() {
     if (!currentFrame) {
       return;
     }
-
-    const formData = new FormData(event.currentTarget);
-    setSavingEvent(true);
-    setAddEventError(null);
-
-    const crop =
-      reuseCrop && detail
-        ? await fetch(`/api/plant-photo-crops?plantId=${plantId}&photoId=${currentFrame.photoId}`)
-            .then((response) => (response.ok ? response.json() : { crop: null }))
-            .then((payload: { crop: { cropX: number; cropY: number; cropWidth: number; cropHeight: number } | null }) => payload.crop)
-        : null;
-
-    const response = await fetch("/api/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plantId,
-        photoId: currentFrame.photoId,
-        type: formData.get("type"),
-        notes: formData.get("notes"),
-        timestamp: new Date(String(formData.get("timestamp"))).toISOString(),
-        ...(crop ?? {}),
-      }),
-    });
-    const payload = (await response.json()) as { error?: string };
-    setSavingEvent(false);
-
-    if (!response.ok) {
-      setAddEventError(payload.error ?? "Could not add event.");
-      return;
-    }
-
-    setAddingEvent(false);
     fetchedFrameIds.current.delete(currentFrame.photoId);
     await loadFrameDetail(currentFrame.photoId);
     router.refresh();
@@ -365,10 +329,7 @@ export function PlantVisualHistory({
               <button
                 type="button"
                 className="button-secondary"
-                onClick={() => {
-                  setAddEventError(null);
-                  setAddingEvent(true);
-                }}
+                onClick={() => setAddingEvent(true)}
               >
                 Add Event
               </button>
@@ -406,7 +367,9 @@ export function PlantVisualHistory({
                         <p className="font-semibold text-stone-950">{event.type}</p>
                         <p className="text-xs text-stone-500">{formatDateTime(event.timestamp)}</p>
                       </div>
-                      <EventActions event={event} />
+                      <button type="button" className="button-secondary" onClick={() => setEditingEvent(event)}>
+                        Edit
+                      </button>
                     </div>
                     {event.notes ? <p className="mt-2 text-sm text-stone-700">{event.notes}</p> : null}
                   </div>
@@ -486,50 +449,39 @@ export function PlantVisualHistory({
         </p>
       </div>
 
-      {addingEvent ? (
+      {addingEvent && currentFrame ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
-          <form
-            onSubmit={submitAddEvent}
-            className="grid max-h-[90vh] w-full max-w-md gap-4 overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
-          >
-            <h2 className="text-lg font-semibold text-stone-950">Add Event</h2>
-            <label className="field">
-              Event type
-              <input className="input" name="type" list="visual-history-event-types" defaultValue="Germinated" required />
-              <datalist id="visual-history-event-types">
-                {EVENT_TYPES.map((type) => (
-                  <option key={type} value={type} />
-                ))}
-              </datalist>
-            </label>
-            <label className="field">
-              Notes
-              <textarea className="input min-h-24" name="notes" />
-            </label>
-            <label className="field">
-              Timestamp
-              <input
-                className="input"
-                name="timestamp"
-                type="datetime-local"
-                defaultValue={currentFrame ? toDateTimeLocal(currentFrame.timestamp) : undefined}
-                required
-              />
-            </label>
-            <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
-              <input type="checkbox" checked={reuseCrop} onChange={(event) => setReuseCrop(event.target.checked)} />
-              Use this frame&apos;s saved plant crop as the event crop
-            </label>
-            {addEventError ? <p className="text-sm font-medium text-red-700">{addEventError}</p> : null}
-            <div className="flex justify-end gap-2">
-              <button type="button" className="button-secondary" onClick={() => setAddingEvent(false)}>
-                Cancel
-              </button>
-              <button className="button" disabled={savingEvent}>
-                {savingEvent ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </form>
+          <ObservationForm
+            plantId={plantId}
+            milestones={milestones.map((milestone) => ({ id: milestone.id, label: milestone.label }))}
+            photoId={currentFrame.photoId}
+            photoTimestamp={detail?.photo.timestamp}
+            copyPlantPhotoCrop
+            onCancel={() => setAddingEvent(false)}
+            onSaved={async () => {
+              setAddingEvent(false);
+              await refreshCurrentFrame();
+            }}
+          />
+        </div>
+      ) : null}
+
+      {editingEvent ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
+          <ObservationForm
+            plantId={plantId}
+            milestones={milestones.map((milestone) => ({ id: milestone.id, label: milestone.label }))}
+            event={editingEvent}
+            onCancel={() => setEditingEvent(null)}
+            onSaved={async () => {
+              setEditingEvent(null);
+              await refreshCurrentFrame();
+            }}
+            onDeleted={async () => {
+              setEditingEvent(null);
+              await refreshCurrentFrame();
+            }}
+          />
         </div>
       ) : null}
     </div>

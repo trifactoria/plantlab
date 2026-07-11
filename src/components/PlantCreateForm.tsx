@@ -10,18 +10,12 @@ import { usePlantEntryMemory } from "@/lib/usePlantEntryMemory";
 
 export type CreatedPlant = { id: string; name: string; gridX: number; gridY: number };
 
-type PendingSave = {
-  plant: CreatedPlant;
-  addNext: boolean;
-  startedAtIso: string;
-};
-
-type ObservationEventResult = { ok: true } | { ok: false; warnings: string[] } | { ok: false; error: string };
-
 /**
- * Creates a Plant record ("Added to project") and, only if the user supplies
- * one, a separate starting-observation PlantEvent. Shared by the project grid
- * and photo grid dialogs so create-plant logic isn't duplicated between them.
+ * Creates a Plant ("Added to project") and, only if the user supplies one, a
+ * starting biological observation - atomically, in a single POST /api/plants
+ * request (see the transaction in src/app/api/plants/route.ts). Shared by
+ * the project grid and photo grid dialogs so create-plant logic isn't
+ * duplicated between them.
  */
 export function PlantCreateForm({
   projectId,
@@ -51,62 +45,27 @@ export function PlantCreateForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[] | null>(null);
-  const [pendingSave, setPendingSave] = useState<PendingSave | null>(null);
+  const [pendingAddNext, setPendingAddNext] = useState<boolean | null>(null);
 
-  async function createObservationEvent(
-    plantId: string,
-    startedAtIso: string,
-    confirmWarnings: boolean,
-  ): Promise<ObservationEventResult> {
-    const matchedMilestone =
-      observation.kind === "custom" ? matchMilestoneByLabel(observation.label, milestones) : undefined;
-
-    const response = await fetch("/api/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plantId,
-        timestamp: startedAtIso,
-        confirmWarnings,
-        ...(observation.kind === "milestone"
-          ? { milestoneId: observation.milestoneId }
-          : { milestoneId: matchedMilestone?.id, type: observation.kind === "custom" ? observation.label : undefined }),
-      }),
-    });
-
-    if (response.status === 409) {
-      const payload = (await response.json()) as { warnings: string[] };
-      return { ok: false as const, warnings: payload.warnings };
+  function startingObservationPayload() {
+    if (observation.kind === "none") {
+      return undefined;
     }
-
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => ({}))) as { error?: string };
-      return { ok: false as const, error: payload.error ?? "Could not save the starting observation." };
+    if (observation.kind === "milestone") {
+      return { milestoneId: observation.milestoneId };
     }
-
-    return { ok: true as const };
+    const matched = matchMilestoneByLabel(observation.label, milestones);
+    return matched ? { milestoneId: matched.id } : { type: observation.label };
   }
 
-  function finishSave(plant: CreatedPlant, addNext: boolean, startedAtIso: string) {
-    remember({
-      startedAt: startedAtIso,
-      observation,
-      tags: keepTags ? tags : "",
-    });
-    setSaving(false);
-    setWarnings(null);
-    setPendingSave(null);
-    onSaved(plant, { addNext });
-  }
-
-  async function submit(addNext: boolean) {
+  async function submit(addNext: boolean, confirmWarnings = false) {
     setSaving(true);
     setError(null);
-    setWarnings(null);
 
     const startedAtIso = new Date(startedAt).toISOString();
+    const startingObservation = startingObservationPayload();
 
-    const plantResponse = await fetch("/api/plants", {
+    const response = await fetch("/api/plants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -117,48 +76,35 @@ export function PlantCreateForm({
         tags,
         notes,
         startedAt: startedAtIso,
+        confirmWarnings,
+        ...(startingObservation ? { startingObservation } : {}),
       }),
     });
-    const plantPayload = (await plantResponse.json()) as CreatedPlant & { error?: string };
 
-    if (!plantResponse.ok) {
+    if (response.status === 409) {
+      const payload = (await response.json()) as { warnings: string[] };
       setSaving(false);
+      setWarnings(payload.warnings);
+      setPendingAddNext(addNext);
+      return;
+    }
+
+    const plantPayload = (await response.json()) as CreatedPlant & { error?: string };
+    setSaving(false);
+
+    if (!response.ok) {
       setError(plantPayload.error ?? "Could not create plant");
       return;
     }
 
-    if (observation.kind === "none") {
-      finishSave(plantPayload, addNext, startedAtIso);
-      return;
-    }
-
-    const result = await createObservationEvent(plantPayload.id, startedAtIso, false);
-    if (!result.ok) {
-      setSaving(false);
-      if ("warnings" in result) {
-        setWarnings(result.warnings);
-        setPendingSave({ plant: plantPayload, addNext, startedAtIso });
-        return;
-      }
-      setError(result.error);
-      return;
-    }
-
-    finishSave(plantPayload, addNext, startedAtIso);
-  }
-
-  async function confirmPendingSave() {
-    if (!pendingSave) {
-      return;
-    }
-    setSaving(true);
-    const result = await createObservationEvent(pendingSave.plant.id, pendingSave.startedAtIso, true);
-    if (!result.ok) {
-      setSaving(false);
-      setError("error" in result ? result.error : "Could not save the starting observation.");
-      return;
-    }
-    finishSave(pendingSave.plant, pendingSave.addNext, pendingSave.startedAtIso);
+    remember({
+      startedAt: startedAtIso,
+      observation,
+      tags: keepTags ? tags : "",
+    });
+    setWarnings(null);
+    setPendingAddNext(null);
+    onSaved(plantPayload, { addNext });
   }
 
   return (
@@ -206,7 +152,12 @@ export function PlantCreateForm({
           {warnings.map((warning) => (
             <p key={warning}>{warning}</p>
           ))}
-          <button type="button" className="button-secondary w-fit" onClick={confirmPendingSave} disabled={saving}>
+          <button
+            type="button"
+            className="button-secondary w-fit"
+            onClick={() => pendingAddNext !== null && submit(pendingAddNext, true)}
+            disabled={saving}
+          >
             Save Anyway
           </button>
         </div>

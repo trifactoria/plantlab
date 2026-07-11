@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import {
+  EVENT_KIND_OBSERVATION,
+  originEventData,
+  warningNeedsConfirmation,
+} from "@/lib/experiment";
+import {
   badRequest,
   optionalDate,
   optionalString,
@@ -39,26 +44,87 @@ export async function POST(request: Request) {
       return badRequest("grid position is outside this project grid");
     }
 
-    // startLabel intentionally omitted unless explicitly supplied: the Plant
-    // schema default ("Added to project") represents record creation, not a
-    // biological observation. Any starting observation is a separate PlantEvent
-    // created by the client via POST /api/events.
-    const startLabel = optionalString(body?.startLabel);
+    const name = requiredString(body?.name, "name");
+    const tags = optionalString(body?.tags);
+    const notes = optionalString(body?.notes);
+    const startedAt = optionalDate(body?.startedAt);
 
-    const plant = await prisma.plant.create({
-      data: {
-        projectId,
-        name: requiredString(body?.name, "name"),
-        tags: optionalString(body?.tags),
-        notes: optionalString(body?.notes),
-        gridX,
-        gridY,
-        ...(startLabel ? { startLabel } : {}),
-        startedAt: optionalDate(body?.startedAt),
-      },
+    // The optional starting biological observation is an ordinary
+    // PlantEvent, distinct from the required "Added to project" origin
+    // event created below. It is not the same concept - see
+    // isOriginEvent()/ORIGIN_EVENT_TYPE in src/lib/experiment.ts.
+    const startingObservationBody =
+      body?.startingObservation && typeof body.startingObservation === "object"
+        ? (body.startingObservation as Record<string, unknown>)
+        : null;
+    const observationMilestoneId = startingObservationBody
+      ? optionalString(startingObservationBody.milestoneId)
+      : null;
+    const observationType = startingObservationBody ? optionalString(startingObservationBody.type) : null;
+    const observationNotes = startingObservationBody ? optionalString(startingObservationBody.notes) : null;
+    const hasStartingObservation = Boolean(observationMilestoneId || observationType);
+
+    let observationMilestone: { id: string; label: string; projectId: string } | null = null;
+    if (observationMilestoneId) {
+      observationMilestone = await prisma.projectMilestone.findUnique({
+        where: { id: observationMilestoneId },
+      });
+      if (!observationMilestone) {
+        return badRequest("startingObservation.milestoneId is invalid");
+      }
+      if (observationMilestone.projectId !== projectId) {
+        return badRequest("startingObservation.milestoneId belongs to a different project");
+      }
+    }
+
+    if (hasStartingObservation && !observationMilestone && !observationType) {
+      return badRequest("startingObservation must include a milestoneId or a type");
+    }
+
+    const warnings: string[] = [];
+    if (project.plantedAt && startedAt.getTime() < project.plantedAt.getTime()) {
+      warnings.push("Starting timestamp is before the project planting time.");
+    }
+    if (warningNeedsConfirmation(warnings, body?.confirmWarnings === true)) {
+      return NextResponse.json({ warnings }, { status: 409 });
+    }
+
+    const { plant, originEvent, observationEvent } = await prisma.$transaction(async (tx) => {
+      const plant = await tx.plant.create({
+        data: {
+          projectId,
+          name,
+          tags,
+          notes,
+          gridX,
+          gridY,
+          startedAt,
+        },
+      });
+
+      const originEvent = await tx.plantEvent.create({ data: originEventData(plant) });
+
+      const observationEvent = hasStartingObservation
+        ? await tx.plantEvent.create({
+            data: {
+              projectId: plant.projectId,
+              plantId: plant.id,
+              kind: EVENT_KIND_OBSERVATION,
+              milestoneId: observationMilestone?.id,
+              type: observationMilestone ? observationMilestone.label : (observationType as string),
+              notes: observationNotes,
+              timestamp: startedAt,
+            },
+          })
+        : null;
+
+      return { plant, originEvent, observationEvent };
     });
 
-    return NextResponse.json(plant, { status: 201 });
+    return NextResponse.json(
+      { ...plant, events: [originEvent, ...(observationEvent ? [observationEvent] : [])] },
+      { status: 201 },
+    );
   } catch (error) {
     if (error instanceof Error) {
       return badRequest(error.message);

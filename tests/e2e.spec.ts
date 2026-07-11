@@ -128,11 +128,11 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Visual History" })).toBeVisible();
   await expect(page.getByText("Frame 1 of 3")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Edit Plant" })).toBeVisible();
-  await expect(page.getByLabel("Starting observation")).toBeVisible();
-  await expect(page.getByLabel("Starting timestamp")).toBeVisible();
-  await page.getByRole("button", { name: "Edit" }).first().click();
-  await expect(page.getByRole("heading", { name: "Edit Event" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Select crop from photo" })).toBeVisible();
+  await expect(page.getByText(/starting timestamp and observation are edited/)).toBeVisible();
+  await expect(page.getByTestId("plant-timeline").getByText("Starting entry", { exact: true })).toBeVisible();
+
+  await page.getByTestId("plant-timeline").getByRole("button", { name: "Edit" }).first().click();
+  await expect(page.getByRole("heading", { name: /Edit Event|Origin Event/ })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 });
 
@@ -330,9 +330,10 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   await page.getByRole("button", { name: "Previous" }).click();
   await expect(page.getByText("Frame 2 of 3")).toBeVisible();
   await page.getByRole("button", { name: "Add Event" }).click();
-  await page.getByLabel("Event type").fill("First True Leaf");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("First True Leaf").first()).toBeVisible();
+  const addEventForm = page.getByTestId("observation-form");
+  await addEventForm.getByPlaceholder("Or type a custom observation").fill("Side shoot pinched");
+  await addEventForm.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Side shoot pinched").first()).toBeVisible();
 });
 
 test("crop shape controls preserve preview proportions", async ({ page }) => {

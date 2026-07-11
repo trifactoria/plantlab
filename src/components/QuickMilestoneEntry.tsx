@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CropSelector, type CropValue } from "@/components/CropSelector";
 import { toDateTimeLocal } from "@/lib/format";
+import { createObservation } from "@/lib/observationClient";
 
 export type QuickMilestone = {
   id: string;
@@ -80,22 +81,16 @@ export function QuickMilestoneEntry({
     setError(null);
     setWarnings(null);
 
-    const response = await fetch("/api/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, confirmWarnings }),
-    });
-    const body = (await response.json()) as { warnings?: string[]; error?: string };
+    const result = await createObservation(payload, confirmWarnings);
     setSavingId(null);
 
-    if (response.status === 409 && body.warnings) {
-      setWarnings(body.warnings);
-      setPendingPayload(payload);
-      return;
-    }
-
-    if (!response.ok) {
-      setError(body.error ?? "Could not save event.");
+    if (!result.ok) {
+      if ("warnings" in result) {
+        setWarnings(result.warnings);
+        setPendingPayload(payload);
+        return;
+      }
+      setError(result.error);
       return;
     }
 

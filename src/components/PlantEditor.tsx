@@ -3,9 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
-import { DateTimeField } from "@/components/DateTimeField";
 import { TagInput } from "@/components/TagInput";
-import { toDateTimeLocal } from "@/lib/format";
 
 export function PlantEditor({
   plantId,
@@ -13,8 +11,6 @@ export function PlantEditor({
   name,
   tags,
   notes,
-  startLabel,
-  startedAt,
   eventCount,
 }: {
   plantId: string;
@@ -22,13 +18,10 @@ export function PlantEditor({
   name: string;
   tags: string | null;
   notes: string | null;
-  startLabel: string;
-  startedAt: string;
   eventCount: number;
 }) {
   const router = useRouter();
   const [tagsValue, setTagsValue] = useState(tags ?? "");
-  const [startedAtValue, setStartedAtValue] = useState(() => toDateTimeLocal(startedAt));
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,8 +39,6 @@ export function PlantEditor({
         name: formData.get("name"),
         tags: formData.get("tags"),
         notes: formData.get("notes"),
-        startLabel: formData.get("startLabel"),
-        startedAt: new Date(String(formData.get("startedAt"))).toISOString(),
       }),
     });
     const payload = (await response.json()) as { error?: string };
@@ -93,23 +84,10 @@ export function PlantEditor({
           Notes
           <textarea className="input min-h-28" name="notes" defaultValue={notes ?? ""} />
         </label>
-        <label className="field">
-          Starting observation
-          <input className="input" name="startLabel" list="plant-start-labels-editor" defaultValue={startLabel} required />
-          <datalist id="plant-start-labels-editor">
-            <option value="Added to project" />
-            <option value="First visible" />
-            <option value="Cutting placed in water" />
-            <option value="Cutting planted in soil" />
-          </datalist>
-        </label>
-        <DateTimeField
-          label="Starting timestamp"
-          name="startedAt"
-          value={startedAtValue}
-          onChange={setStartedAtValue}
-          required
-        />
+        <p className="text-xs text-stone-500">
+          The starting timestamp and observation are edited from the &quot;Starting entry&quot; card in the
+          Timeline below.
+        </p>
 
         {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
 

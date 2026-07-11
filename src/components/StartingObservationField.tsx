@@ -13,19 +13,21 @@ export function StartingObservationField({
   milestones,
   value,
   onChange,
+  label = "Starting observation",
+  helpText = "Optional. Records a normal event at the starting timestamp - leave blank to only add the plant.",
 }: {
   milestones: StartingObservationMilestone[];
   value: ObservationMemory;
   onChange: (value: ObservationMemory) => void;
+  label?: string;
+  helpText?: string | null;
 }) {
   const customValue = value.kind === "custom" ? value.label : "";
 
   return (
     <div className="field">
-      <span>Starting observation</span>
-      <p className="mb-1 text-xs font-normal text-stone-500">
-        Optional. Records a normal event at the starting timestamp - leave blank to only add the plant.
-      </p>
+      <span>{label}</span>
+      {helpText ? <p className="mb-1 text-xs font-normal text-stone-500">{helpText}</p> : null}
       {milestones.length > 0 ? (
         <div className="flex flex-wrap gap-2">
           {milestones.map((milestone) => {
