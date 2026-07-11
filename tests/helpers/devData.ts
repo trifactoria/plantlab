@@ -14,6 +14,9 @@ export const DEV_IDS = {
   eventId: "dev-visual-event",
   secondEventId: "dev-visual-event-2",
   profileId: "dev-visual-profile",
+  plantCropOlderId: "dev-visual-plant-crop-older",
+  plantCropId: "dev-visual-plant-crop",
+  plantCropSecondId: "dev-visual-plant-crop-2",
 };
 
 const TINY_JPEG_BASE64 =
@@ -152,6 +155,42 @@ export async function seedVisualData() {
         type: "Cotyledons",
         notes: "Recorded from manual inspection.",
         timestamp: new Date("2026-07-10T15:00:00.000Z"),
+      },
+    ],
+  });
+
+  // Visual history fixtures for DEV_IDS.plantId across all three seeded
+  // photos (with a real capture gap between the older photo and the rest),
+  // so the scrubber/chronological-order UI has real frames to show.
+  // DEV_IDS.secondPlantId intentionally has no crops, for the empty state.
+  await prisma.plantPhotoCrop.createMany({
+    data: [
+      {
+        id: DEV_IDS.plantCropOlderId,
+        plantId: DEV_IDS.plantId,
+        photoId: DEV_IDS.olderPhotoId,
+        cropX: 0.1,
+        cropY: 0.1,
+        cropWidth: 0.3,
+        cropHeight: 0.3,
+      },
+      {
+        id: DEV_IDS.plantCropId,
+        plantId: DEV_IDS.plantId,
+        photoId: DEV_IDS.photoId,
+        cropX: 0.15,
+        cropY: 0.15,
+        cropWidth: 0.35,
+        cropHeight: 0.35,
+      },
+      {
+        id: DEV_IDS.plantCropSecondId,
+        plantId: DEV_IDS.plantId,
+        photoId: DEV_IDS.secondPhotoId,
+        cropX: 0.2,
+        cropY: 0.2,
+        cropWidth: 0.4,
+        cropHeight: 0.4,
       },
     ],
   });

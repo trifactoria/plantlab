@@ -1,6 +1,7 @@
 "use client";
 
 import { MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
+import { computeRelativeSharpness, containRect } from "@/lib/imageGeometry";
 
 type Inspection = {
   xFraction: number;
@@ -9,48 +10,6 @@ type Inspection = {
   panelY: number;
   sharpness: number | null;
 };
-
-type Rect = { x: number; y: number; width: number; height: number };
-
-/** Where an object-fit: contain image actually renders within its box. */
-function containRect(containerWidth: number, containerHeight: number, naturalWidth: number, naturalHeight: number): Rect {
-  const containerRatio = containerWidth / containerHeight;
-  const imageRatio = naturalWidth / naturalHeight;
-
-  if (imageRatio > containerRatio) {
-    const width = containerWidth;
-    const height = width / imageRatio;
-    return { x: 0, y: (containerHeight - height) / 2, width, height };
-  }
-
-  const height = containerHeight;
-  const width = height * imageRatio;
-  return { x: (containerWidth - width) / 2, y: 0, width, height };
-}
-
-/**
- * A crude, purely relative edge-strength score (average horizontal
- * grayscale gradient magnitude). Not a scientific sharpness measurement -
- * only meant to help compare "more" vs "less" detail between two clicks.
- */
-function computeRelativeSharpness(imageData: ImageData): number {
-  const { data, width, height } = imageData;
-  let total = 0;
-  let count = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width - 1; x += 1) {
-      const i = (y * width + x) * 4;
-      const j = i + 4;
-      const gray1 = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      const gray2 = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-      total += Math.abs(gray1 - gray2);
-      count += 1;
-    }
-  }
-
-  return count > 0 ? total / count : 0;
-}
 
 export function FocusInspector({
   imageUrl,

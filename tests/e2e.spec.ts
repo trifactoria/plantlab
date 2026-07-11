@@ -100,6 +100,10 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await goto(page, `/photos/${ids.photoId}`);
   await expect(page.getByRole("heading", { name: "Edit Photo" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Linked Events" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Plant Crops" })).toBeVisible();
+  await expect(page.getByText("Radish A").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit Crop" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove" })).toBeVisible();
   await page.getByRole("button", { name: "Delete Photo" }).click();
   await expect(page.getByRole("heading", { name: "Delete Photo" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
@@ -109,6 +113,8 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await goto(page, `/plants/${ids.plantId}`);
+  await expect(page.getByRole("heading", { name: "Visual History" })).toBeVisible();
+  await expect(page.getByText("Frame 1 of 3")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Edit Plant" })).toBeVisible();
   await expect(page.getByLabel("Initial event label")).toBeVisible();
   await expect(page.getByLabel("Initial timestamp")).toBeVisible();
@@ -168,4 +174,71 @@ test("photo upload and crop safety flows", async ({ page }) => {
   const unlinkedEvent = await unlinkedEventResponse.json();
   expect(unlinkedEvent.photoId).toBeNull();
   expect(unlinkedEvent.cropX).toBeNull();
+});
+
+test("plant visual history: crop editor, scrubber, playback, and events", async ({ page }) => {
+  await mockCameraApis(page);
+  const ids = await seedVisualData();
+
+  // Empty visual-history state for the plant with no saved crops yet.
+  await goto(page, `/plants/${ids.secondPlantId}`);
+  await expect(page.getByText("No visual history yet.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Choose a Project Photo" })).toBeVisible();
+
+  // Set a new plant crop from the photo page, using the crop editor.
+  await goto(page, `/photos/${ids.photoId}`);
+  await page.getByRole("combobox").selectOption(ids.secondPlantId);
+  await page.getByRole("button", { name: "Set Plant Crop" }).click();
+  await expect(page.getByText("Set Plant Crop - Radish B")).toBeVisible();
+
+  const stage = page.getByTestId("crop-editor-stage");
+  const box = await stage.boundingBox();
+  if (!box) {
+    throw new Error("crop editor stage did not render");
+  }
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByText(/Relative sharpness/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Save Crop" }).click();
+  await expect(page.getByText("Crop saved for", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "This Photo Only" }).click();
+
+  // The plant now has one frame in its visual history.
+  await goto(page, `/plants/${ids.secondPlantId}`);
+  await expect(page.getByText("Frame 1 of 1")).toBeVisible();
+
+  // Radish A has three chronological frames with a real capture gap.
+  await goto(page, `/plants/${ids.plantId}`);
+  await expect(page.getByText("Frame 1 of 3")).toBeVisible();
+
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("Frame 2 of 3")).toBeVisible();
+  await expect(page.getByText("Events on this frame")).toBeVisible();
+  await expect(page.getByText("Germinated").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Previous" }).click();
+  await expect(page.getByText("Frame 1 of 3")).toBeVisible();
+
+  // Dragging the scrubber near the right edge jumps to the last frame.
+  const track = page.getByTestId("visual-history-track");
+  const trackBox = await track.boundingBox();
+  if (!trackBox) {
+    throw new Error("visual history track did not render");
+  }
+  await page.mouse.click(trackBox.x + trackBox.width * 0.97, trackBox.y + trackBox.height / 2);
+  await expect(page.getByText("Frame 3 of 3")).toBeVisible();
+
+  // Playback controls toggle without autoplaying by default.
+  await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
+
+  // Add an event directly from the current frame.
+  await page.getByRole("button", { name: "Previous" }).click();
+  await expect(page.getByText("Frame 2 of 3")).toBeVisible();
+  await page.getByRole("button", { name: "Add Event" }).click();
+  await page.getByLabel("Event type").fill("First True Leaf");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("First True Leaf").first()).toBeVisible();
 });

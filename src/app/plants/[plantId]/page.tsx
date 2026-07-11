@@ -3,8 +3,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EventActions } from "@/components/EventActions";
 import { PlantEditor } from "@/components/PlantEditor";
+import { PlantVisualHistory } from "@/components/PlantVisualHistory";
+import { buildCropThumbnailUrl } from "@/lib/cropThumbnail";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
+
+const VISUAL_HISTORY_PAGE_SIZE = 300;
 
 type PageProps = {
   params: Promise<{ plantId: string }>;
@@ -34,6 +38,32 @@ export default async function PlantPage({ params }: PageProps) {
         .map((event) => [event.photo!.id, event.photo!]),
     ).values(),
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+  const [visualHistoryTotalCount, visualHistoryPage, latestProjectPhoto, linkedPhotoCrops] =
+    await Promise.all([
+      prisma.plantPhotoCrop.count({ where: { plantId } }),
+      prisma.plantPhotoCrop.findMany({
+        where: { plantId },
+        orderBy: [{ photo: { timestamp: "asc" } }, { photoId: "asc" }],
+        take: VISUAL_HISTORY_PAGE_SIZE,
+        select: { photoId: true, photo: { select: { timestamp: true } } },
+      }),
+      prisma.photo.findFirst({
+        where: { projectId: plant.projectId },
+        orderBy: { timestamp: "desc" },
+        select: { id: true },
+      }),
+      prisma.plantPhotoCrop.findMany({
+        where: { plantId, photoId: { in: linkedPhotos.map((photo) => photo.id) } },
+        select: { id: true, photoId: true, updatedAt: true },
+      }),
+    ]);
+
+  const visualHistoryFrames = visualHistoryPage.map((crop) => ({
+    photoId: crop.photoId,
+    timestamp: crop.photo.timestamp.toISOString(),
+  }));
+  const linkedPhotoCropByPhotoId = new Map(linkedPhotoCrops.map((crop) => [crop.photoId, crop]));
 
   return (
     <main className="min-h-screen">
@@ -73,29 +103,47 @@ export default async function PlantPage({ params }: PageProps) {
                 {linkedPhotos.length === 0 ? (
                   <p className="text-sm text-stone-600">No linked photos yet.</p>
                 ) : (
-                  linkedPhotos.map((photo) => (
-                    <Link key={photo.id} href={`/photos/${photo.id}`} className="block">
-                      <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-stone-100">
-                        <Image
-                          src={`/api/photos/${photo.id}/file`}
-                          alt={photo.filename}
-                          fill
-                          sizes="320px"
-                          className="object-cover"
-                        />
-                      </div>
-                      <p className="mt-1 truncate text-sm font-medium text-stone-950">
-                        {photo.filename}
-                      </p>
-                    </Link>
-                  ))
+                  linkedPhotos.map((photo) => {
+                    const crop = linkedPhotoCropByPhotoId.get(photo.id);
+                    return (
+                      <Link key={photo.id} href={`/photos/${photo.id}`} className="block">
+                        <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-stone-100">
+                          <Image
+                            src={crop ? buildCropThumbnailUrl(crop, { size: 320 }) : `/api/photos/${photo.id}/file`}
+                            alt={photo.filename}
+                            fill
+                            sizes="320px"
+                            className="object-cover"
+                          />
+                        </div>
+                        <p className="mt-1 truncate text-sm font-medium text-stone-950">
+                          {photo.filename}
+                        </p>
+                      </Link>
+                    );
+                  })
                 )}
               </div>
             </div>
           </aside>
 
-          <div>
-            <h2 className="text-xl font-semibold text-stone-950">Timeline</h2>
+          <div className="grid gap-8">
+            <div>
+              <h2 className="text-xl font-semibold text-stone-950">Visual History</h2>
+              <div className="mt-4">
+                <PlantVisualHistory
+                  plantId={plant.id}
+                  projectId={plant.projectId}
+                  latestPhotoId={latestProjectPhoto?.id ?? null}
+                  initialFrames={visualHistoryFrames}
+                  initialTotalCount={visualHistoryTotalCount}
+                  initialHasMore={visualHistoryTotalCount > visualHistoryFrames.length}
+                />
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-xl font-semibold text-stone-950">Timeline</h2>
             <div className="mt-4 grid gap-3">
               <article className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase text-emerald-800">Starting entry</p>
@@ -164,6 +212,7 @@ export default async function PlantPage({ params }: PageProps) {
                 ))
               )}
             </div>
+          </div>
           </div>
         </div>
       </section>

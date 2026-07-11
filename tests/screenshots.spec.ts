@@ -56,7 +56,13 @@ for (const viewport of viewports) {
 
     await goto(page, `/photos/${ids.photoId}`);
     await capture(page, `${prefix}-photo-detail`);
+    await capture(page, `${prefix}-photo-detail-plant-crops`);
     await capture(page, `${prefix}-edit-photo-state`);
+
+    await page.getByRole("combobox").selectOption(ids.secondPlantId);
+    await page.getByRole("button", { name: "Set Plant Crop" }).click();
+    await capture(page, `${prefix}-plant-crop-editor`);
+    await page.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByTestId("grid-cell-0-0").click();
     await capture(page, `${prefix}-add-event-dialog`);
@@ -66,11 +72,18 @@ for (const viewport of viewports) {
 
     await goto(page, `/plants/${ids.plantId}`);
     await capture(page, `${prefix}-plant-detail`);
+    await capture(page, `${prefix}-plant-visual-history`);
     await capture(page, `${prefix}-edit-plant-state`);
+
+    await page.getByRole("button", { name: "Next" }).click();
+    await capture(page, `${prefix}-plant-visual-history-event`);
 
     await page.getByRole("button", { name: "Edit" }).first().click();
     await capture(page, `${prefix}-edit-event-state`);
     await page.getByRole("button", { name: "Cancel" }).click();
+
+    await goto(page, `/plants/${ids.secondPlantId}`);
+    await capture(page, `${prefix}-plant-visual-history-empty`);
 
     await goto(page, `/projects/${ids.projectId}/gallery/2026-07`);
     await capture(page, `${prefix}-month-gallery`);

@@ -45,8 +45,9 @@ model Plant {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  events  PlantEvent[]
+  project    Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events     PlantEvent[]
+  photoCrops PlantPhotoCrop[]
 
   @@unique([projectId, gridX, gridY])
   @@index([projectId])
@@ -62,9 +63,10 @@ model Photo {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events      PlantEvent[]
   captureRuns CaptureRun[]
+  plantCrops  PlantPhotoCrop[]
 
   @@unique([projectId, path])
   @@index([projectId, timestamp])
@@ -129,6 +131,27 @@ model CaptureRun {
 
   @@index([projectId, scheduledFor])
   @@index([status])
+}
+
+// One saved crop rectangle for one plant within one project photo, used to
+// build a plant's visual history without needing a new photo capture.
+model PlantPhotoCrop {
+  id         String   @id @default(cuid())
+  plantId    String
+  photoId    String
+  cropX      Float
+  cropY      Float
+  cropWidth  Float
+  cropHeight Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  plant Plant @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  photo Photo @relation(fields: [photoId], references: [id], onDelete: Cascade)
+
+  @@unique([plantId, photoId])
+  @@index([plantId])
+  @@index([photoId])
 }
 
 // Single row (id "capture-service") tracking the long-running capture service process.

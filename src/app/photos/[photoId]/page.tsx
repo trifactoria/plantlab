@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EventActions } from "@/components/EventActions";
 import { PhotoEditor } from "@/components/PhotoEditor";
+import { PlantCropSummary } from "@/components/PlantCropSummary";
 import { PlantGrid } from "@/components/PlantGrid";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
@@ -22,7 +23,7 @@ export default async function PhotoPage({ params }: PageProps) {
     notFound();
   }
 
-  const [plants, photos, events] = await Promise.all([
+  const [plants, photos, events, plantCrops] = await Promise.all([
     prisma.plant.findMany({
       where: { projectId: photo.projectId },
       orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
@@ -36,6 +37,11 @@ export default async function PhotoPage({ params }: PageProps) {
       where: { photoId: photo.id },
       include: { plant: true },
       orderBy: { timestamp: "desc" },
+    }),
+    prisma.plantPhotoCrop.findMany({
+      where: { photoId: photo.id },
+      include: { plant: true },
+      orderBy: { createdAt: "asc" },
     }),
   ]);
 
@@ -147,6 +153,22 @@ export default async function PhotoPage({ params }: PageProps) {
                 )}
               </div>
             </div>
+
+            <PlantCropSummary
+              photoId={photo.id}
+              imageUrl={`/api/photos/${photo.id}/file`}
+              plants={plants.map((plant) => ({ id: plant.id, name: plant.name }))}
+              crops={plantCrops.map((crop) => ({
+                id: crop.id,
+                plantId: crop.plantId,
+                plantName: crop.plant.name,
+                updatedAt: crop.updatedAt.toISOString(),
+                cropX: crop.cropX,
+                cropY: crop.cropY,
+                cropWidth: crop.cropWidth,
+                cropHeight: crop.cropHeight,
+              }))}
+            />
 
             <div>
               <h2 className="text-xl font-semibold text-stone-950">Grid</h2>
