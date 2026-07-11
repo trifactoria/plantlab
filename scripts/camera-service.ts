@@ -1,7 +1,10 @@
 import { captureProjectPhoto } from "../src/lib/camera";
 import { CaptureScheduler, consoleLogger } from "../src/lib/captureService";
+import { CaptureSourceScheduler } from "../src/lib/captureSourceService";
 import { prisma } from "../src/lib/prisma";
 import { writeHeartbeat } from "../src/lib/serviceStatus";
+import { captureSourcePhoto } from "../src/lib/sourceCapture";
+import { runViewportFanOut } from "../src/lib/viewportFanOut";
 
 const REFRESH_INTERVAL_MS = Number(process.env.CAPTURE_SERVICE_REFRESH_INTERVAL_MS ?? 15_000);
 const startedAt = new Date();
@@ -44,6 +47,17 @@ async function main() {
     logger: consoleLogger,
   });
 
+  // Independent from the per-project scheduler above: schedules shared
+  // CaptureSources (grow-tent shelf cameras), capturing each due source
+  // once and fanning it out to every project with an applicable viewport -
+  // see src/lib/captureSourceService.ts.
+  const sourceScheduler = new CaptureSourceScheduler({
+    prisma,
+    captureSourcePhoto,
+    runViewportFanOut,
+    logger: consoleLogger,
+  });
+
   await writeHeartbeat(prisma, { startedAt });
 
   while (!stopping) {
@@ -65,13 +79,29 @@ async function main() {
       consoleLogger.error("Scheduler tick failed", { error: lastError });
     }
 
+    try {
+      const sourceResult = await sourceScheduler.tick();
+
+      if (sourceResult.dueCount > 0) {
+        const failures = sourceResult.captures.filter((capture) => capture.status === "failed");
+        consoleLogger.info("Capture source cycle complete", {
+          dueCount: sourceResult.dueCount,
+          succeeded: sourceResult.captures.length - failures.length,
+          failed: failures.length,
+        });
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown capture source scheduler error";
+      consoleLogger.error("Capture source scheduler tick failed", { error: lastError });
+    }
+
     await writeHeartbeat(prisma, { startedAt, lastError });
 
     if (stopping) {
       break;
     }
 
-    await sleep(scheduler.msUntilNextWake(REFRESH_INTERVAL_MS));
+    await sleep(Math.min(scheduler.msUntilNextWake(REFRESH_INTERVAL_MS), sourceScheduler.msUntilNextWake(REFRESH_INTERVAL_MS)));
   }
 
   consoleLogger.info("PlantLab capture service stopped");

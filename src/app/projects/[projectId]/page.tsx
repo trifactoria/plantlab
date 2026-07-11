@@ -63,6 +63,11 @@ export default async function ProjectPage({ params }: PageProps) {
     prisma.plantHarvestResult.findMany({ where: { plant: { projectId: projectRecord.id } } }),
     computeProjectCropStatus(prisma, projectRecord.id),
   ]);
+  const activeViewport = await prisma.projectViewport.findFirst({
+    where: { projectId: projectRecord.id, active: true, effectiveFrom: { lte: new Date() } },
+    orderBy: { effectiveFrom: "desc" },
+    include: { captureSource: true },
+  });
   const monthCards = groupPhotosByMonth(galleryPhotos, projectRecord.timeZone);
   const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos, projectRecord.timeZone) : [];
   const canCaptureLocally = process.env.NODE_ENV !== "production";
@@ -238,6 +243,48 @@ export default async function ProjectPage({ params }: PageProps) {
                   </dd>
                 </div>
               </dl>
+            </div>
+
+            <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm" data-testid="capture-origin-card">
+              <h2 className="text-lg font-semibold text-stone-950">Capture Origin</h2>
+              {activeViewport ? (
+                <div className="mt-3 grid gap-2 text-sm">
+                  <p className="font-medium text-stone-800">Capture mode: Shared shelf camera</p>
+                  <p className="text-stone-600">Source: {activeViewport.captureSource.name}</p>
+                  <p className="text-stone-600">
+                    Viewport output: {Math.round(activeViewport.cropWidth * activeViewport.captureSource.width)} x{" "}
+                    {Math.round(activeViewport.cropHeight * activeViewport.captureSource.height)}
+                  </p>
+                  <p className="text-stone-600">
+                    Schedule: Every {activeViewport.captureSource.photoIntervalMinutes} minutes (shared with every
+                    other project on this shelf camera)
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-3">
+                    <Link
+                      href={`/capture-sources/${activeViewport.captureSourceId}`}
+                      className="text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+                    >
+                      Shelf Layout
+                    </Link>
+                    <Link
+                      href={`/capture-sources/${activeViewport.captureSourceId}`}
+                      className="text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+                    >
+                      Adjust Project Area
+                    </Link>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 grid gap-2 text-sm">
+                  <p className="font-medium text-stone-800">Capture mode: Direct camera</p>
+                  <p className="text-stone-600">
+                    This project captures its own full-frame photos directly - see Camera Setup above.
+                  </p>
+                  <Link href="/capture-sources" className="text-sm font-semibold text-emerald-700 hover:text-emerald-900">
+                    Browse shelf cameras
+                  </Link>
+                </div>
+              )}
             </div>
 
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">

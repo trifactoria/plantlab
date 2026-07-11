@@ -133,6 +133,16 @@ export function CameraSetupPanel({
   const [comparingResolutions, setComparingResolutions] = useState(false);
   const [resolutionResults, setResolutionResults] = useState<ResolutionTestResult[]>([]);
   const [resolutionCompareError, setResolutionCompareError] = useState<string | null>(null);
+  const [verifyingCapture, setVerifyingCapture] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{
+    requestedWidth: number;
+    requestedHeight: number;
+    actualWidth: number;
+    actualHeight: number;
+    matched: boolean;
+    byteSize: number;
+  } | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const captureInFlight = useRef(false);
 
   const selectedFormatData = formats.find((format) => format.pixelFormat === selectedFormat);
@@ -608,6 +618,32 @@ export function CameraSetupPanel({
     setSelectedResolution(`${width}x${height}`);
   }
 
+  async function verifyFullResolutionCapture() {
+    setVerifyingCapture(true);
+    setVerifyError(null);
+    setVerifyResult(null);
+
+    try {
+      const { width, height } = selectedDimensions();
+      const response = await fetch(`/api/projects/${projectId}/camera/verify-capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width, height, inputFormat: selectedFormat }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Full-resolution verification failed.");
+      }
+
+      setVerifyResult(payload);
+    } catch (error) {
+      setVerifyError(error instanceof Error ? error.message : "Full-resolution verification failed.");
+    } finally {
+      setVerifyingCapture(false);
+    }
+  }
+
   async function checkForMovedCamera() {
     if (!cameraStableId) {
       return;
@@ -809,6 +845,56 @@ export function CameraSetupPanel({
                 </div>
               ))}
             </div>
+          ) : null}
+        </div>
+
+        <div className="mt-4 rounded-md border border-stone-200 bg-stone-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm font-medium text-stone-800">Verify full-resolution capture</p>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={verifyFullResolutionCapture}
+              disabled={verifyingCapture}
+            >
+              {verifyingCapture ? "Capturing..." : "Verify Full-Resolution Capture"}
+            </button>
+          </div>
+          <p className="mt-1 text-xs text-stone-600">
+            Captures one temporary frame at the selected format/resolution and reads back its actual
+            written pixel dimensions - a camera can silently fall back to a lower mode than requested.
+          </p>
+          {verifyError ? <p className="mt-2 text-sm font-medium text-red-700">{verifyError}</p> : null}
+          {verifyResult ? (
+            <dl
+              data-testid="verify-capture-result"
+              className={`mt-3 grid grid-cols-2 gap-2 rounded-md border p-3 text-xs sm:grid-cols-4 ${
+                verifyResult.matched ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"
+              }`}
+            >
+              <div>
+                <dt className="font-medium text-stone-800">Requested</dt>
+                <dd>
+                  {verifyResult.requestedWidth} x {verifyResult.requestedHeight}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-stone-800">Actual</dt>
+                <dd>
+                  {verifyResult.actualWidth} x {verifyResult.actualHeight}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-stone-800">Result</dt>
+                <dd className={verifyResult.matched ? "text-emerald-700" : "text-amber-700"}>
+                  {verifyResult.matched ? "Matched requested resolution" : "Camera fell back to a different resolution"}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-stone-800">File size</dt>
+                <dd>{(verifyResult.byteSize / 1024).toFixed(0)} KB</dd>
+              </div>
+            </dl>
           ) : null}
         </div>
 

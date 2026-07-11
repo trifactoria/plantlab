@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server";
 import { withCameraLock } from "@/lib/cameraLock";
-import { badRequest, cameraErrorInfo, notFound } from "@/lib/http";
+import { cameraErrorInfo, notFound } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
-import { testCameraMockModeEnabled, testProjectCameraError } from "@/lib/testProjectSafety";
+import { testCameraMockModeEnabled } from "@/lib/testProjectSafety";
 import { listCameraFormats } from "@/lib/v4l2";
 
 export const runtime = "nodejs";
 
 type Context = {
-  params: Promise<{ projectId: string }>;
+  params: Promise<{ sourceId: string }>;
 };
 
 export async function GET(_request: Request, context: Context) {
@@ -18,22 +18,14 @@ export async function GET(_request: Request, context: Context) {
     return blocked;
   }
 
-  const { projectId } = await context.params;
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const { sourceId } = await context.params;
+  const source = await prisma.captureSource.findUnique({ where: { id: sourceId } });
 
-  if (!project) {
-    return notFound("Project not found");
+  if (!source) {
+    return notFound("Capture source not found");
   }
 
-  if (project.isTestProject && !testCameraMockModeEnabled()) {
-    const blocked = testProjectCameraError();
-    return NextResponse.json({ error: blocked.error }, { status: blocked.status });
-  }
-
-  const device = process.env.CAMERA_DEVICE || project.cameraDevice;
-  if (!device) {
-    return badRequest("No camera selected for this project.");
-  }
+  const device = process.env.CAMERA_DEVICE || source.cameraDevice;
 
   if (testCameraMockModeEnabled() && device === "/dev/video-test") {
     return NextResponse.json({

@@ -60,6 +60,39 @@ for (const viewport of viewports) {
     await goto(page, `/projects/${ids.projectId}/camera`);
     await capture(page, `${prefix}-camera-setup-idle`);
 
+    await page.getByLabel("Resolution").selectOption({ label: "3840 x 2160 (15.000 fps)" });
+    await capture(page, `${prefix}-camera-4k-mode-selected`);
+
+    await page.getByRole("button", { name: "Verify Full-Resolution Capture" }).click();
+    await page.getByTestId("verify-capture-result").waitFor();
+    await capture(page, `${prefix}-camera-verify-capture-result`);
+
+    // Shelf camera flow: a shared physical source that several projects
+    // can each claim a rectangular viewport of, instead of direct capture.
+    await goto(page, "/capture-sources");
+    await capture(page, `${prefix}-capture-sources-list`);
+
+    await goto(page, `/capture-sources/${ids.captureSourceId}`);
+    await page.getByTestId("raw-resolution-select").selectOption({ label: "3840 x 2160 (15.000 fps)" });
+    await page.getByTestId("rotation-select").selectOption("90");
+    await capture(page, `${prefix}-shelf-camera-4k-rotation-preview`);
+
+    await page.getByRole("button", { name: "Capture Test Frame" }).click();
+    await page.getByTestId("shelf-layout-stage").waitFor();
+    await capture(page, `${prefix}-shelf-layout-with-regions`);
+
+    await page.getByRole("button", { name: "Trigger Test Capture" }).click();
+    await page.getByTestId("test-capture-results").waitFor();
+    await capture(page, `${prefix}-shelf-test-fanout-result`);
+    // triggerTestCapture() calls router.refresh() after resolving; let that
+    // in-flight RSC refetch settle before navigating away so it can't race
+    // with the next page's own navigation/hydration.
+    await page.waitForLoadState("networkidle");
+
+    await goto(page, `/projects/${ids.otherProjectId}`);
+    await page.getByTestId("capture-origin-card").waitFor();
+    await capture(page, `${prefix}-shared-source-project-summary`);
+
     await goto(page, `/projects/${ids.projectId}/timeline`);
     await capture(page, `${prefix}-project-timeline`);
 

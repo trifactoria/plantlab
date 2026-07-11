@@ -38,6 +38,98 @@ model Project {
   cameraProfile CameraProfile?     @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
   cropPreset    ProjectCropPreset?
   cropVersions  PlantCropVersion[]
+  viewports     ProjectViewport[]
+}
+
+// A physical camera/device shared by several projects, each of which claims
+// a rectangular ProjectViewport of the frame it captures. Orientation
+// (rotation/flip) is applied here, before any project viewport geometry is
+// interpreted - width/height below are the TRANSFORMED (post-orientation)
+// working dimensions. Independent of direct-project capture (Project.
+// cameraDevice etc.) - a project uses one model or the other, never both.
+model CaptureSource {
+  id                        String   @id @default(cuid())
+  name                      String
+  cameraDevice              String
+  cameraName                String?
+  cameraStableId            String?
+  cameraProfileId           String?
+  // Transformed (post-rotation) working dimensions - what project viewport
+  // rectangles are normalized against.
+  width                     Int
+  height                    Int
+  rotation                  Int      @default(0)
+  flipHorizontal            Boolean  @default(false)
+  flipVertical              Boolean  @default(false)
+  captureDirectory          String
+  active                    Boolean  @default(true)
+  photoIntervalMinutes      Int
+  captureStartAt            DateTime @default(now())
+  timeZone                  String   @default("America/New_York")
+  captureWindowEnabled      Boolean  @default(false)
+  captureWindowStartMinutes Int?
+  captureWindowEndMinutes   Int?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  cameraProfile  CameraProfile?    @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+  sourceCaptures SourceCapture[]
+  viewports      ProjectViewport[]
+
+  @@index([cameraDevice])
+}
+
+// One full-resolution frame captured from a shared CaptureSource at one
+// scheduled interval. Retained in full - never duplicated per project.
+// The unique index prevents a retried or overlapping scheduler tick from
+// creating a second capture for the same source+slot.
+model SourceCapture {
+  id              String    @id @default(cuid())
+  captureSourceId String
+  timestamp       DateTime
+  scheduledFor    DateTime?
+  originalPath    String
+  originalWidth   Int
+  originalHeight  Int
+  workingWidth    Int
+  workingHeight   Int
+  pixelFormat     String
+  createdAt       DateTime  @default(now())
+
+  captureSource CaptureSource     @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  viewports     ProjectViewport[] @relation("ViewportSourceCapture")
+  photos        Photo[]
+
+  @@unique([captureSourceId, scheduledFor])
+  @@index([captureSourceId, timestamp])
+}
+
+// A rectangle of a shared CaptureSource's (transformed) frame assigned to
+// one project, beginning at effectiveFrom, until a newer version's
+// effectiveFrom takes over. Mirrors PlantCropVersion's versioning rule
+// exactly (newest version where effectiveFrom <= capture timestamp) -
+// immutable once created, an adjustment always creates a new version.
+model ProjectViewport {
+  id              String   @id @default(cuid())
+  projectId       String
+  captureSourceId String
+  cropX           Float
+  cropY           Float
+  cropWidth       Float
+  cropHeight      Float
+  effectiveFrom   DateTime
+  active          Boolean  @default(true)
+  sourceCaptureId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource  @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  sourceCapture SourceCapture? @relation("ViewportSourceCapture", fields: [sourceCaptureId], references: [id], onDelete: SetNull)
+  photos        Photo[]
+
+  @@index([projectId, effectiveFrom])
+  @@index([captureSourceId, effectiveFrom])
 }
 
 // Sizing/shape suggestion only, applied when a plant has no crop history yet.
@@ -131,23 +223,32 @@ model PlantCropVersion {
 }
 
 model Photo {
-  id        String   @id @default(cuid())
-  projectId String
-  filename  String
-  path      String
-  timestamp DateTime
-  notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String   @id @default(cuid())
+  projectId       String
+  filename        String
+  path            String
+  timestamp       DateTime
+  notes           String?
+  // Optional provenance when this photo was derived from a shared
+  // CaptureSource's frame via a ProjectViewport, rather than captured
+  // directly by the project or uploaded/scanned. Null for every other path.
+  sourceCaptureId String?
+  viewportId      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   project            Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events             PlantEvent[]
   captureRuns        CaptureRun[]
   plantCrops         PlantPhotoCrop[]
   cropVersionSources PlantCropVersion[]
+  sourceCapture      SourceCapture?     @relation(fields: [sourceCaptureId], references: [id], onDelete: SetNull)
+  viewport           ProjectViewport?   @relation(fields: [viewportId], references: [id], onDelete: SetNull)
 
   @@unique([projectId, path])
   @@index([projectId, timestamp])
+  @@index([sourceCaptureId])
+  @@index([viewportId])
 }
 
 model PlantEvent {
@@ -214,7 +315,8 @@ model CameraProfile {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  projects Project[]
+  projects       Project[]
+  captureSources CaptureSource[]
 
   @@index([cameraDevice])
 }

@@ -11,7 +11,7 @@ import { prisma } from "./prisma";
 import { testCameraMockModeEnabled, testCaptureMockModeEnabled } from "./testProjectSafety";
 import { applyCameraControls } from "./v4l2";
 
-type CameraSettings = {
+export type CameraSettings = {
   device: string;
   width: number;
   height: number;
@@ -78,7 +78,7 @@ function ffmpegInputFormat(format: string) {
   return format.toLowerCase() === "mjpg" ? "mjpeg" : format;
 }
 
-async function applyProfileSettings(settings: CameraSettings) {
+export async function applyProfileSettings(settings: CameraSettings) {
   if (!settings.controls) {
     return;
   }
@@ -158,7 +158,7 @@ export function buildFfmpegArgs(
   ];
 }
 
-function runFfmpeg(settings: CameraSettings, outputPath: string, options: FfmpegCaptureOptions = {}) {
+export function runFfmpeg(settings: CameraSettings, outputPath: string, options: FfmpegCaptureOptions = {}) {
   const args = buildFfmpegArgs(settings, outputPath, options);
 
   return new Promise<void>((resolve, reject) => {

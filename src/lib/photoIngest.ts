@@ -7,6 +7,9 @@ export type CreatePhotoInput = {
   path: string;
   timestamp: Date;
   notes?: string | null;
+  /** Optional provenance when this photo was derived from a shared CaptureSource's frame via a ProjectViewport. */
+  sourceCaptureId?: string | null;
+  viewportId?: string | null;
 };
 
 export type CreatePhotoResult = {
@@ -41,6 +44,8 @@ export async function createPhotoRecord(
         path: input.path,
         timestamp: input.timestamp,
         notes: input.notes ?? null,
+        sourceCaptureId: input.sourceCaptureId ?? null,
+        viewportId: input.viewportId ?? null,
       },
     });
 

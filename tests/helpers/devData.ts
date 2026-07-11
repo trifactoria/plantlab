@@ -23,6 +23,9 @@ export const DEV_IDS = {
   milestoneRootShoulderId: "dev-milestone-root-shoulder",
   milestoneHarvestReadyId: "dev-milestone-harvest-ready",
   milestoneHarvestedId: "dev-milestone-harvested",
+  captureSourceId: "dev-visual-capture-source",
+  viewportId: "dev-visual-viewport",
+  otherProjectId: "dev-visual-shared-project",
 };
 
 const TINY_JPEG_BASE64 =
@@ -266,6 +269,70 @@ export async function seedVisualData() {
     ],
   });
 
+  // A shelf camera and a second, non-test project subscribed to one of its
+  // viewports - demonstrates the "shared shelf camera" capture-origin card
+  // and shelf layout editor without needing real hardware.
+  const captureSourceDirectory = path.join(root, "data", "playwright", "capture-source-photos");
+  const sharedProjectDirectory = path.join(root, "data", "playwright", "shared-project-photos");
+  await mkdir(captureSourceDirectory, { recursive: true });
+  await mkdir(sharedProjectDirectory, { recursive: true });
+
+  // seedVisualData() is called more than once within a single test in some
+  // specs (to re-seed mid-test) - stay idempotent like the project/profile
+  // seeding above, rather than assuming a fresh database.
+  await prisma.project.deleteMany({ where: { id: DEV_IDS.otherProjectId } });
+  await prisma.captureSource.deleteMany({ where: { id: DEV_IDS.captureSourceId } });
+
+  await prisma.captureSource.create({
+    data: {
+      id: DEV_IDS.captureSourceId,
+      name: "Grow Tent Shelf 1",
+      cameraDevice: "/dev/video-test",
+      cameraName: "Mock USB Camera",
+      cameraStableId: "usb:1234:5678:MOCKSERIAL",
+      width: 3840,
+      height: 2160,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+      captureDirectory: captureSourceDirectory,
+      active: true,
+      photoIntervalMinutes: 30,
+      captureStartAt: new Date("2026-07-10T13:00:00.000Z"),
+      timeZone: "America/New_York",
+      captureWindowEnabled: false,
+    },
+  });
+
+  await prisma.project.create({
+    data: {
+      id: DEV_IDS.otherProjectId,
+      name: "Shelf Camera Radish Study",
+      description: "Subscribes to a viewport of the shared shelf camera.",
+      gridWidth: 2,
+      gridHeight: 2,
+      photoIntervalMinutes: 30,
+      captureStartAt: new Date("2026-07-10T13:00:00.000Z"),
+      captureEnabled: false,
+      timeZone: "America/New_York",
+      localPhotoDirectory: sharedProjectDirectory,
+    },
+  });
+
+  await prisma.projectViewport.create({
+    data: {
+      id: DEV_IDS.viewportId,
+      projectId: DEV_IDS.otherProjectId,
+      captureSourceId: DEV_IDS.captureSourceId,
+      cropX: 0.05,
+      cropY: 0.1,
+      cropWidth: 0.25,
+      cropHeight: 0.4787,
+      effectiveFrom: new Date("2026-07-10T13:00:00.000Z"),
+      active: true,
+    },
+  });
+
   return {
     ...DEV_IDS,
     photoDirectory,
@@ -279,9 +346,15 @@ export async function disconnectPrisma() {
 
 export async function cleanupVisualData() {
   const photoDirectory = path.join(process.cwd(), "data", "playwright", "photos");
+  const captureSourceDirectory = path.join(process.cwd(), "data", "playwright", "capture-source-photos");
+  const sharedProjectDirectory = path.join(process.cwd(), "data", "playwright", "shared-project-photos");
   await prisma.project.deleteMany({ where: { id: DEV_IDS.projectId } });
+  await prisma.project.deleteMany({ where: { id: DEV_IDS.otherProjectId } });
+  await prisma.captureSource.deleteMany({ where: { id: DEV_IDS.captureSourceId } });
   await prisma.cameraProfile.deleteMany({ where: { id: DEV_IDS.profileId } });
   await rm(photoDirectory, { recursive: true, force: true }).catch(() => undefined);
+  await rm(captureSourceDirectory, { recursive: true, force: true }).catch(() => undefined);
+  await rm(sharedProjectDirectory, { recursive: true, force: true }).catch(() => undefined);
 }
 
 export async function mockCameraApis(page: Page) {
@@ -337,6 +410,7 @@ export async function mockCameraApis(page: Page) {
             pixelFormat: "mjpg",
             description: "Motion-JPEG",
             resolutions: [
+              { width: 3840, height: 2160, frameRates: ["15.000 fps"] },
               { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
               { width: 1280, height: 720, frameRates: ["30.000 fps"] },
             ],
@@ -462,6 +536,25 @@ export async function mockCameraApis(page: Page) {
     });
   });
 
+  await page.route("**/api/projects/*/camera/verify-capture**", async (route) => {
+    const body = route.request().postDataJSON() as { width?: number; height?: number } | null;
+    const width = body?.width ?? 1920;
+    const height = body?.height ?? 1080;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        requestedWidth: width,
+        requestedHeight: height,
+        actualWidth: width,
+        actualHeight: height,
+        matched: true,
+        byteSize: width === 3840 ? 1_450_000 : 420_000,
+        imageBase64: TINY_JPEG_BASE64,
+      }),
+    });
+  });
+
   await page.route("**/api/projects/*/camera/resolution-test**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -472,6 +565,128 @@ export async function mockCameraApis(page: Page) {
           { width: 2560, height: 1440, byteSize: 210_000, durationMs: 180, imageBase64: TINY_JPEG_BASE64 },
         ],
       }),
+    });
+  });
+
+  await page.route("**/api/capture-sources/*/formats**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        formats: [
+          {
+            pixelFormat: "mjpg",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 3840, height: 2160, frameRates: ["15.000 fps"] },
+              { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
+            ],
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/capture-sources/*/test-frame**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceCapture: { id: "mock-source-capture" },
+        workingWidth: 3840,
+        workingHeight: 2160,
+        imageBase64: TINY_JPEG_BASE64,
+      }),
+    });
+  });
+
+  await page.route("**/api/capture-sources/*/test-capture**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceCapture: { id: "mock-source-capture" },
+        fanOut: {
+          sourceCaptureId: "mock-source-capture",
+          sourceWidth: 3840,
+          sourceHeight: 2160,
+          projectResults: [
+            {
+              projectId: DEV_IDS.otherProjectId,
+              projectName: "Shelf Camera Radish Study",
+              viewportId: DEV_IDS.viewportId,
+              status: "success",
+              photoId: "mock-derived-photo",
+              derivedWidth: 960,
+              derivedHeight: 1036,
+            },
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.route("**/api/capture-sources/*/viewports**", async (route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "mock-created-viewport",
+          projectId: DEV_IDS.otherProjectId,
+          project: { id: DEV_IDS.otherProjectId, name: "Shelf Camera Radish Study" },
+          cropX: 0.35,
+          cropY: 0.1,
+          cropWidth: 0.25,
+          cropHeight: 0.4787,
+          active: true,
+          effectiveFrom: new Date().toISOString(),
+        }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        viewports: [
+          {
+            id: DEV_IDS.viewportId,
+            projectId: DEV_IDS.otherProjectId,
+            project: { id: DEV_IDS.otherProjectId, name: "Shelf Camera Radish Study" },
+            cropX: 0.05,
+            cropY: 0.1,
+            cropWidth: 0.25,
+            cropHeight: 0.4787,
+            active: true,
+            effectiveFrom: "2026-07-10T13:00:00.000Z",
+          },
+        ],
+        overlappingViewportIds: [],
+      }),
+    });
+  });
+
+  await page.route("**/api/capture-sources/*", async (route) => {
+    const method = route.request().method();
+    if (method === "PATCH") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ id: DEV_IDS.captureSourceId }),
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.route("**/api/viewports/*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ id: DEV_IDS.viewportId, active: false }),
     });
   });
 
