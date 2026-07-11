@@ -17,6 +17,7 @@ export async function GET() {
           name: "Mock USB Camera",
           device: "/dev/video-test",
           supportsCapture: true,
+          stableId: "usb:1234:5678:MOCKSERIAL",
         },
       ],
     });

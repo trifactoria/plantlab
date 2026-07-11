@@ -46,6 +46,8 @@ export async function PATCH(request: Request, context: Context) {
             : requiredString(body.cameraDevice, "cameraDevice"),
         cameraName:
           body?.cameraName === undefined ? undefined : optionalString(body.cameraName),
+        cameraStableId:
+          body?.cameraStableId === undefined ? undefined : optionalString(body.cameraStableId),
         width:
           body?.width === undefined ? undefined : requiredPositiveInt(body.width, "width"),
         height:

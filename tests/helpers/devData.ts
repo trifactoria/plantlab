@@ -53,10 +53,11 @@ export async function seedVisualData() {
       name: "Mock Germination Profile",
       cameraDevice: "/dev/video-test",
       cameraName: "Mock USB Camera",
+      cameraStableId: "usb:1234:5678:MOCKSERIAL",
       width: 1920,
       height: 1080,
       inputFormat: "mjpg",
-      controlsJson: JSON.stringify({ focus_auto: true, brightness: 128 }),
+      controlsJson: JSON.stringify({ focus_automatic_continuous: true, brightness: 128 }),
     },
   });
 
@@ -74,6 +75,7 @@ export async function seedVisualData() {
       localPhotoDirectory: photoDirectory,
       cameraDevice: "/dev/video-test",
       cameraName: "Mock USB Camera",
+      cameraStableId: "usb:1234:5678:MOCKSERIAL",
       cameraProfileId: DEV_IDS.profileId,
       plants: {
         create: [
@@ -176,6 +178,7 @@ export async function mockCameraApis(page: Page) {
             name: "Mock USB Camera",
             device: "/dev/video-test",
             supportsCapture: true,
+            stableId: "usb:1234:5678:MOCKSERIAL",
           },
         ],
       }),
@@ -264,6 +267,92 @@ export async function mockCameraApis(page: Page) {
     });
   });
 
+  await page.route("**/api/projects/*/camera/autofocus**", async (route) => {
+    const body = route.request().postDataJSON() as { phase?: string } | null;
+    const phase = body?.phase ?? "start";
+
+    if (phase === "start") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          previous: { autofocusValue: false, manualFocusValue: 20 },
+          controls: mockControls(),
+        }),
+      });
+      return;
+    }
+
+    if (phase === "lock") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ controls: mockControls(), manualFocusValue: 20 }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ controls: mockControls() }),
+    });
+  });
+
+  await page.route("**/api/projects/*/camera/calibrate**", async (route) => {
+    const body = route.request().postDataJSON() as { phase?: string } | null;
+    const phase = body?.phase ?? "run";
+
+    if (phase === "lock-auto-modes") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ controls: mockControls() }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        result: {
+          format: "mjpg",
+          width: 1920,
+          height: 1080,
+          steps: [
+            { step: "format", applied: true, detail: "mjpg 1920x1080" },
+            { step: "reset-defaults", applied: true },
+            { step: "auto-white-balance", applied: true },
+            { step: "auto-exposure", applied: true, detail: "Aperture Priority Mode" },
+            { step: "autofocus-enable", applied: true },
+            { step: "focus-lock", applied: true, detail: "manual focus = 20" },
+          ],
+          focusLocked: true,
+          manualFocusValue: 20,
+          autoWhiteBalanceAvailable: true,
+          autoExposureAvailable: true,
+          controls: mockControls(),
+        },
+        before: TINY_JPEG_BASE64,
+        after: TINY_JPEG_BASE64,
+      }),
+    });
+  });
+
+  await page.route("**/api/projects/*/camera/resolution-test**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [
+          { width: 1920, height: 1080, byteSize: 128_000, durationMs: 120, imageBase64: TINY_JPEG_BASE64 },
+          { width: 2560, height: 1440, byteSize: 210_000, durationMs: 180, imageBase64: TINY_JPEG_BASE64 },
+        ],
+      }),
+    });
+  });
+
   await page.route("**/api/camera-profiles**", async (route) => {
     if (route.request().method() === "POST") {
       await route.fulfill({
@@ -296,7 +385,7 @@ export async function mockCameraApis(page: Page) {
             width: 1920,
             height: 1080,
             inputFormat: "mjpg",
-            controlsJson: JSON.stringify({ focus_auto: true, brightness: 128 }),
+            controlsJson: JSON.stringify({ focus_automatic_continuous: true, brightness: 128 }),
             _count: { projects: 1 },
           },
         ],
@@ -308,11 +397,13 @@ export async function mockCameraApis(page: Page) {
 function mockControls() {
   return [
     {
-      id: "focus_auto",
-      name: "Focus Auto",
+      id: "focus_automatic_continuous",
+      name: "Focus Automatic Continuous",
       type: "bool",
       value: true,
+      defaultValue: true,
       readOnly: false,
+      inactive: false,
     },
     {
       id: "focus_absolute",
@@ -322,14 +413,40 @@ function mockControls() {
       minimum: 0,
       maximum: 255,
       step: 5,
+      defaultValue: 0,
       readOnly: false,
+      // Inactive while continuous autofocus (above) is enabled.
+      inactive: true,
+    },
+    {
+      id: "white_balance_automatic",
+      name: "White Balance Automatic",
+      type: "bool",
+      value: true,
+      defaultValue: true,
+      readOnly: false,
+      inactive: false,
+    },
+    {
+      id: "white_balance_temperature",
+      name: "White Balance Temperature",
+      type: "int",
+      value: 4600,
+      minimum: 2800,
+      maximum: 6500,
+      step: 10,
+      defaultValue: 4600,
+      readOnly: false,
+      inactive: true,
     },
     {
       id: "exposure_auto",
       name: "Exposure Auto",
       type: "menu",
       value: 3,
+      defaultValue: 3,
       readOnly: false,
+      inactive: false,
       options: [
         { value: 1, label: "Manual Mode" },
         { value: 3, label: "Aperture Priority Mode" },
@@ -343,7 +460,9 @@ function mockControls() {
       minimum: 0,
       maximum: 255,
       step: 1,
+      defaultValue: 128,
       readOnly: false,
+      inactive: false,
     },
   ];
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { capturePreviewImage } from "@/lib/camera";
+import { cameraErrorInfo } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 
 export const runtime = "nodejs";
@@ -30,14 +31,14 @@ export async function GET(_request: Request, context: Context) {
 
   try {
     const image = await capturePreviewImage(projectId);
-    return new Response(image, {
+    return new Response(new Uint8Array(image), {
       headers: {
         "Content-Type": "image/jpeg",
         "Cache-Control": "no-store",
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not capture preview";
-    return NextResponse.json({ error: message }, { status: 400 });
+    const { message, status } = cameraErrorInfo(error, "Could not capture preview");
+    return NextResponse.json({ error: message }, { status });
   }
 }

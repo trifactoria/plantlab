@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { badRequest, notFound, readJson, requiredString } from "@/lib/http";
+import { withCameraLock } from "@/lib/cameraLock";
+import { badRequest, cameraErrorInfo, notFound, readJson, requiredString } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { listCameraControls, setCameraControl } from "@/lib/v4l2";
@@ -29,11 +30,13 @@ async function selectedDevice(projectId: string) {
 function mockControls() {
   return [
     {
-      id: "focus_auto",
-      name: "Focus Auto",
+      id: "focus_automatic_continuous",
+      name: "Focus Automatic Continuous",
       type: "bool",
       value: true,
+      defaultValue: true,
       readOnly: false,
+      inactive: false,
     },
     {
       id: "focus_absolute",
@@ -43,14 +46,40 @@ function mockControls() {
       minimum: 0,
       maximum: 255,
       step: 5,
+      defaultValue: 0,
       readOnly: false,
+      // Inactive while continuous autofocus (above) is enabled.
+      inactive: true,
+    },
+    {
+      id: "white_balance_automatic",
+      name: "White Balance Automatic",
+      type: "bool",
+      value: true,
+      defaultValue: true,
+      readOnly: false,
+      inactive: false,
+    },
+    {
+      id: "white_balance_temperature",
+      name: "White Balance Temperature",
+      type: "int",
+      value: 4600,
+      minimum: 2800,
+      maximum: 6500,
+      step: 10,
+      defaultValue: 4600,
+      readOnly: false,
+      inactive: true,
     },
     {
       id: "exposure_auto",
       name: "Exposure Auto",
       type: "menu",
       value: 3,
+      defaultValue: 3,
       readOnly: false,
+      inactive: false,
       options: [
         { value: 1, label: "Manual Mode" },
         { value: 3, label: "Aperture Priority Mode" },
@@ -64,7 +93,9 @@ function mockControls() {
       minimum: 0,
       maximum: 255,
       step: 1,
+      defaultValue: 128,
       readOnly: false,
+      inactive: false,
     },
   ];
 }
@@ -87,11 +118,11 @@ export async function GET(_request: Request, context: Context) {
   }
 
   try {
-    const controls = await listCameraControls(result.device);
+    const controls = await withCameraLock(result.device, () => listCameraControls(result.device));
     return NextResponse.json({ controls });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not read camera controls";
-    return NextResponse.json({ error: message, controls: [] }, { status: 400 });
+    const { message, status } = cameraErrorInfo(error, "Could not read camera controls");
+    return NextResponse.json({ error: message, controls: [] }, { status });
   }
 }
 
@@ -122,11 +153,13 @@ export async function PATCH(request: Request, context: Context) {
       return NextResponse.json({ updated: true, controls: mockControls() });
     }
 
-    await setCameraControl(result.device, control, value);
-    const controls = await listCameraControls(result.device);
+    const controls = await withCameraLock(result.device, async () => {
+      await setCameraControl(result.device, control, value);
+      return listCameraControls(result.device);
+    });
     return NextResponse.json({ updated: true, controls });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not update camera control";
-    return NextResponse.json({ error: message }, { status: 400 });
+    const { message, status } = cameraErrorInfo(error, "Could not update camera control");
+    return NextResponse.json({ error: message }, { status });
   }
 }

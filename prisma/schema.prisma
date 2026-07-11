@@ -20,6 +20,7 @@ model Project {
   localPhotoDirectory   String
   cameraDevice          String?
   cameraName            String?
+  cameraStableId        String?
   cameraProfileId       String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -93,16 +94,17 @@ model PlantEvent {
 }
 
 model CameraProfile {
-  id            String   @id @default(cuid())
-  name          String
-  cameraDevice  String
-  cameraName    String?
-  width         Int
-  height        Int
-  inputFormat   String
-  controlsJson  String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id             String   @id @default(cuid())
+  name           String
+  cameraDevice   String
+  cameraName     String?
+  cameraStableId String?
+  width          Int
+  height         Int
+  inputFormat    String
+  controlsJson   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   projects Project[]
 

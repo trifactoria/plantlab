@@ -70,12 +70,19 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
 
   await goto(page, `/projects/${ids.projectId}/camera`);
   await expect(page.getByRole("heading", { name: "Camera Setup" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Preview and Focus" })).toBeVisible();
   await expect(page.getByText("Preview is idle")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Autofocus Now" })).toBeVisible();
   await expect(page.getByLabel("Input format")).toContainText("MJPG");
   await expect(page.getByLabel("Resolution")).toContainText("1920 x 1080");
   await expect(page.getByLabel("Camera profile")).toContainText("Mock Germination Profile");
-  await expect(page.getByText("Focus Auto")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Quick Calibration" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Auto Calibrate" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Capture Schedule" })).toBeVisible();
+  await expect(page.getByText("Advanced Camera Controls")).toBeVisible();
+  await page.getByText("Advanced Camera Controls").click();
   await expect(page.getByText("Exposure Auto")).toBeVisible();
+  await expect(page.getByText("Inactive - a related automatic mode").first()).toBeVisible();
 
   await goto(page, `/projects/${ids.projectId}/timeline`);
   await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();

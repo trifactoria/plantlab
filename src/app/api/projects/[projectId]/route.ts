@@ -139,6 +139,8 @@ export async function PATCH(request: Request, context: Context) {
         cameraDevice: nextCameraDevice,
         cameraName:
           body?.cameraName === undefined ? undefined : optionalString(body.cameraName),
+        cameraStableId:
+          body?.cameraStableId === undefined ? undefined : optionalString(body.cameraStableId),
         cameraProfileId:
           body?.cameraProfileId === undefined
             ? undefined

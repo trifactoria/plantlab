@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { badRequest, notFound } from "@/lib/http";
+import { withCameraLock } from "@/lib/cameraLock";
+import { badRequest, cameraErrorInfo, notFound } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { listCameraFormats } from "@/lib/v4l2";
@@ -49,10 +50,10 @@ export async function GET(_request: Request, context: Context) {
   }
 
   try {
-    const formats = await listCameraFormats(device);
+    const formats = await withCameraLock(device, () => listCameraFormats(device));
     return NextResponse.json({ formats });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not read camera formats";
-    return NextResponse.json({ error: message, formats: [] }, { status: 400 });
+    const { message, status } = cameraErrorInfo(error, "Could not read camera formats");
+    return NextResponse.json({ error: message, formats: [] }, { status });
   }
 }

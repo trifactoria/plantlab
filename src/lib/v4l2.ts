@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
+import { composeStableId, readUsbIdentity } from "./cameraIdentity";
 
 export type LocalCamera = {
   name: string;
   device: string;
   supportsCapture: boolean;
+  /** Stable USB-based identity, when Linux exposes enough information to compute one. */
+  stableId: string | null;
 };
 
 export type CameraControl = {
@@ -15,7 +18,15 @@ export type CameraControl = {
   maximum?: number;
   step?: number;
   defaultValue?: number | boolean | string;
+  /** The driver reports this control as permanently non-writable. */
   readOnly: boolean;
+  /**
+   * The driver reports this control as temporarily non-writable because a
+   * related automatic mode is currently controlling it (e.g. manual focus
+   * while continuous autofocus is on). Unlike readOnly, this can change as
+   * soon as the related control changes - reload controls after any write.
+   */
+  inactive: boolean;
   options?: Array<{ value: number; label: string }>;
 };
 
@@ -66,7 +77,10 @@ export async function discoverLocalCameras(): Promise<LocalCamera[]> {
     }
 
     const supportsCapture = await deviceSupportsCapture(device).catch(() => false);
-    cameras.push({ name: currentName, device, supportsCapture });
+    const stableId = await readUsbIdentity(device)
+      .then((identity) => composeStableId(identity))
+      .catch(() => null);
+    cameras.push({ name: currentName, device, supportsCapture, stableId });
   }
 
   return cameras.sort((a, b) => {
@@ -83,8 +97,11 @@ async function deviceSupportsCapture(device: string) {
   return /Video Capture|Video Capture Multiplanar/.test(output);
 }
 
-export async function listCameraControls(device: string): Promise<CameraControl[]> {
-  const output = await execFileText("v4l2-ctl", ["-d", device, "--list-ctrls-menus"]);
+/**
+ * Parses the text output of `v4l2-ctl -d <device> --list-ctrls-menus`.
+ * Pure and hardware-free so it can be unit tested with recorded output.
+ */
+export function parseControlsOutput(output: string): CameraControl[] {
   const controls: CameraControl[] = [];
   let currentMenuControl: CameraControl | null = null;
 
@@ -98,6 +115,7 @@ export async function listCameraControls(device: string): Promise<CameraControl[
       const meta = parseControlMeta(rawMeta);
       const value = type === "bool" ? meta.value === 1 : meta.value ?? "";
       const defaultValue = type === "bool" ? meta.defaultValue === 1 : meta.defaultValue;
+      const flags = parseControlFlags(rawMeta);
       const control: CameraControl = {
         id,
         name: humanizeControlName(id),
@@ -107,7 +125,8 @@ export async function listCameraControls(device: string): Promise<CameraControl[
         maximum: meta.maximum,
         step: meta.step,
         defaultValue,
-        readOnly: /read-only|inactive/.test(rawMeta),
+        readOnly: flags.readOnly,
+        inactive: flags.inactive,
         options: type === "menu" ? [] : undefined,
       };
 
@@ -125,6 +144,11 @@ export async function listCameraControls(device: string): Promise<CameraControl[
   }
 
   return controls;
+}
+
+export async function listCameraControls(device: string): Promise<CameraControl[]> {
+  const output = await execFileText("v4l2-ctl", ["-d", device, "--list-ctrls-menus"]);
+  return parseControlsOutput(output);
 }
 
 export async function listCameraFormats(device: string): Promise<CameraFormat[]> {
@@ -165,6 +189,19 @@ export async function listCameraFormats(device: string): Promise<CameraFormat[]>
   }
 
   return formats;
+}
+
+function parseControlFlags(rawMeta: string) {
+  // v4l2-ctl reports e.g. "flags=inactive" or "flags=inactive, volatile".
+  const flagsMatch = /flags=([a-z0-9_,\s-]+)/i.exec(rawMeta);
+  const flags = flagsMatch
+    ? flagsMatch[1].split(",").map((flag) => flag.trim().toLowerCase())
+    : [];
+
+  return {
+    readOnly: flags.includes("read-only"),
+    inactive: flags.includes("inactive"),
+  };
 }
 
 function parseControlMeta(rawMeta: string) {

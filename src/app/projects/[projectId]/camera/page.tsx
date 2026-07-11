@@ -43,7 +43,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
         <div className="container grid gap-6 lg:grid-cols-[360px_1fr]">
           <aside className="grid content-start gap-4">
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-stone-950">Capture Schedule</h2>
+              <h2 className="text-lg font-semibold text-stone-950">Schedule Overview</h2>
               <dl className="mt-4 grid gap-3 text-sm">
                 <div>
                   <dt className="font-medium text-stone-950">Selected camera</dt>
@@ -92,6 +92,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
               projectId={project.id}
               cameraDevice={project.cameraDevice}
               cameraName={project.cameraName}
+              cameraStableId={project.cameraStableId}
               cameraProfileId={project.cameraProfileId}
               photoIntervalMinutes={project.photoIntervalMinutes}
               captureStartAt={project.captureStartAt.toISOString()}

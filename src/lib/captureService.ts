@@ -1,6 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
 import { checkCaptureEligibility } from "./captureEligibility";
-import { withCameraLock } from "./cameraLock";
 import { nextAlignedCaptureTime } from "./schedule";
 
 export type CaptureLogger = {
@@ -183,34 +182,35 @@ export class CaptureScheduler {
     let result: TickCaptureResult;
 
     try {
-      await withCameraLock(project.cameraDevice, async () => {
-        await this.prisma.captureRun.update({
-          where: { id: captureRun.id },
-          data: { startedAt: this.now() },
-        });
+      await this.prisma.captureRun.update({
+        where: { id: captureRun.id },
+        data: { startedAt: this.now() },
+      });
 
-        this.logger.info("Starting scheduled capture", {
-          projectId: project.id,
-          cameraDevice: project.cameraDevice,
-          scheduledFor: scheduledFor.toISOString(),
-        });
+      this.logger.info("Starting scheduled capture", {
+        projectId: project.id,
+        cameraDevice: project.cameraDevice,
+        scheduledFor: scheduledFor.toISOString(),
+      });
 
-        const captured = await this.captureProjectPhoto(project.id);
+      // captureProjectPhoto acquires the camera lock itself (shared with
+      // manual capture, preview, and calibration), so two due projects on
+      // the same camera are serialized there rather than here.
+      const captured = await this.captureProjectPhoto(project.id);
 
-        await this.prisma.captureRun.update({
-          where: { id: captureRun.id },
-          data: {
-            status: "success",
-            completedAt: this.now(),
-            photoId: captured.photo.id,
-          },
-        });
+      await this.prisma.captureRun.update({
+        where: { id: captureRun.id },
+        data: {
+          status: "success",
+          completedAt: this.now(),
+          photoId: captured.photo.id,
+        },
+      });
 
-        this.logger.info("Scheduled capture succeeded", {
-          projectId: project.id,
-          scheduledFor: scheduledFor.toISOString(),
-          savedPath: captured.savedPath,
-        });
+      this.logger.info("Scheduled capture succeeded", {
+        projectId: project.id,
+        scheduledFor: scheduledFor.toISOString(),
+        savedPath: captured.savedPath,
       });
 
       result = { projectId: project.id, status: "success", scheduledFor };

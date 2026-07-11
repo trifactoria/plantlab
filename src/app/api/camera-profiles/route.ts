@@ -49,6 +49,7 @@ export async function POST(request: Request) {
         name: requiredString(body?.name, "name"),
         cameraDevice: requiredString(body?.cameraDevice, "cameraDevice"),
         cameraName: optionalString(body?.cameraName),
+        cameraStableId: optionalString(body?.cameraStableId),
         width: requiredPositiveInt(body?.width, "width"),
         height: requiredPositiveInt(body?.height, "height"),
         inputFormat: requiredString(body?.inputFormat, "inputFormat"),

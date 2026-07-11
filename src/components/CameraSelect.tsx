@@ -6,16 +6,20 @@ type Camera = {
   name: string;
   device: string;
   supportsCapture: boolean;
+  stableId: string | null;
 };
 
 export function CameraSelect({
   defaultDevice,
   defaultName,
   onDeviceChange,
+  onCameraChange,
 }: {
   defaultDevice?: string | null;
   defaultName?: string | null;
   onDeviceChange?: (device: string) => void;
+  /** Fires with the matched discovered camera (including stableId), or null if not currently found. */
+  onCameraChange?: (camera: Camera | null) => void;
 }) {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selectedDevice, setSelectedDevice] = useState(defaultDevice ?? "");
@@ -29,6 +33,11 @@ export function CameraSelect({
     onDeviceChange?.(selectedDevice);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDevice]);
+
+  useEffect(() => {
+    onCameraChange?.(selectedCamera ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDevice, cameras]);
 
   async function loadCameras() {
     setLoading(true);

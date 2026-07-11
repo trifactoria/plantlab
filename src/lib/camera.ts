@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { CameraProfile, Photo, Project } from "@prisma/client";
+import { withCameraLock } from "./cameraLock";
 import { formatLocalTimestamp } from "./photos";
 import { prisma } from "./prisma";
 import { applyCameraControls } from "./v4l2";
@@ -81,9 +82,42 @@ async function applyProfileSettings(settings: CameraSettings) {
   }
 }
 
-function runFfmpeg(settings: CameraSettings, outputPath: string, options: { warmup?: boolean } = {}) {
-  const durationSeconds = options.warmup ? warmupSeconds() + 1 : 1;
-  const args = [
+export type FfmpegCaptureOptions = {
+  /**
+   * Intended warm-up behavior, made explicit:
+   *
+   * 1. ffmpeg opens the camera and requests one frame per second
+   *    (`-vf fps=1`) for `warmupSeconds + 1` total seconds.
+   * 2. `-update 1` tells ffmpeg's image2 muxer to keep overwriting the same
+   *    outputPath every second rather than writing frame0001.jpg,
+   *    frame0002.jpg, etc. Auto-exposure/auto-focus/auto-white-balance are
+   *    given that time to settle; every overwritten frame before the last
+   *    one is discarded - only the final, settled frame ends up on disk.
+   * 3. No temporary video file is ever produced - the muxer output is a
+   *    single still image the whole time, just repeatedly replaced.
+   * 4. The caller timestamps Photo.timestamp immediately after this
+   *    resolves, so it reflects when the final settled frame was written,
+   *    not when the request started.
+   * 5. The caller also writes to a `.tmp.jpg`-prefixed path and only
+   *    renames it to its real, final path after ffmpeg exits successfully,
+   *    so a still-settling capture can never be mistaken for a finished
+   *    Photo (a partially-written or mid-warmup file never appears at the
+   *    final path).
+   */
+  warmup?: boolean;
+  /** Override for testing; defaults to warmupSeconds() (env-configurable). */
+  warmupSeconds?: number;
+};
+
+/** Pure argument builder, kept separate from spawn() so it can be unit tested. */
+export function buildFfmpegArgs(
+  settings: CameraSettings,
+  outputPath: string,
+  options: FfmpegCaptureOptions = {},
+): string[] {
+  const durationSeconds = options.warmup ? (options.warmupSeconds ?? warmupSeconds()) + 1 : 1;
+
+  return [
     "-hide_banner",
     "-loglevel",
     "error",
@@ -106,6 +140,10 @@ function runFfmpeg(settings: CameraSettings, outputPath: string, options: { warm
     "-y",
     outputPath,
   ];
+}
+
+function runFfmpeg(settings: CameraSettings, outputPath: string, options: FfmpegCaptureOptions = {}) {
+  const args = buildFfmpegArgs(settings, outputPath, options);
 
   return new Promise<void>((resolve, reject) => {
     const child = spawn("ffmpeg", args, { shell: false });
@@ -130,7 +168,7 @@ function runFfmpeg(settings: CameraSettings, outputPath: string, options: { warm
   });
 }
 
-async function nextCapturePath(directory: string, capturedAt: Date) {
+export async function nextCapturePath(directory: string, capturedAt: Date) {
   const timestamp = formatLocalTimestamp(capturedAt);
   let candidate = path.join(directory, `${timestamp}.jpg`);
   let suffix = 1;
@@ -155,7 +193,6 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
 
   const settings = getCameraSettings(project);
   await mkdir(project.localPhotoDirectory, { recursive: true });
-  await applyProfileSettings(settings);
 
   const temporaryPath = path.join(
     project.localPhotoDirectory,
@@ -164,15 +201,21 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
   let savedPath = "";
   let capturedAt = new Date();
 
-  try {
-    await runFfmpeg(settings, temporaryPath, { warmup: true });
-    capturedAt = new Date();
-    savedPath = await nextCapturePath(project.localPhotoDirectory, capturedAt);
-    await rename(temporaryPath, savedPath);
-  } catch (error) {
-    await unlink(temporaryPath).catch(() => undefined);
-    throw error;
-  }
+  await withCameraLock(settings.device, async () => {
+    await applyProfileSettings(settings);
+
+    try {
+      await runFfmpeg(settings, temporaryPath, { warmup: true });
+      // The final settled frame was just written - timestamp the photo now,
+      // not at request time, so it reflects the actual captured moment.
+      capturedAt = new Date();
+      savedPath = await nextCapturePath(project.localPhotoDirectory, capturedAt);
+      await rename(temporaryPath, savedPath);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    }
+  });
 
   const photo = await prisma.photo.create({
     data: {
@@ -187,7 +230,29 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
   return { photo, savedPath };
 }
 
-const activePreviewDevices = new Set<string>();
+/**
+ * Captures a single temporary, non-gallery frame at the given settings and
+ * returns its bytes. Shared by the live preview, Auto Calibrate's
+ * before/after snapshots, and the resolution comparison tool - none of
+ * those register a Photo. Each call acquires and releases the camera lock
+ * individually, so a long-running preview/comparison session never holds
+ * the camera continuously.
+ */
+export async function capturePreviewFrame(settings: CameraSettings): Promise<Buffer> {
+  const temporaryPath = path.join(
+    os.tmpdir(),
+    `plantlab-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`,
+  );
+
+  return withCameraLock(settings.device, async () => {
+    try {
+      await runFfmpeg(settings, temporaryPath);
+      return await readFile(temporaryPath);
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  });
+}
 
 export async function capturePreviewImage(projectId: string) {
   const project = await prisma.project.findUnique({
@@ -199,23 +264,5 @@ export async function capturePreviewImage(projectId: string) {
     throw new Error(`Project not found: ${projectId}`);
   }
 
-  const settings = getCameraSettings(project);
-
-  if (activePreviewDevices.has(settings.device)) {
-    throw new Error("A preview capture is already in progress for this camera.");
-  }
-
-  activePreviewDevices.add(settings.device);
-  const temporaryPath = path.join(
-    os.tmpdir(),
-    `plantlab-preview-${projectId}-${Date.now()}.jpg`,
-  );
-
-  try {
-    await runFfmpeg(settings, temporaryPath);
-    return await readFile(temporaryPath);
-  } finally {
-    activePreviewDevices.delete(settings.device);
-    await unlink(temporaryPath).catch(() => undefined);
-  }
+  return capturePreviewFrame(getCameraSettings(project));
 }

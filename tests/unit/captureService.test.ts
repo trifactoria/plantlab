@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { withCameraLock } from "../../src/lib/cameraLock";
 import { CaptureScheduler, type CaptureFn } from "../../src/lib/captureService";
 import { prisma } from "../../src/lib/prisma";
 import { nextAlignedCaptureTime } from "../../src/lib/schedule";
@@ -127,20 +128,24 @@ describe("CaptureScheduler", () => {
     });
 
     const order: string[] = [];
-    const captureProjectPhoto: CaptureFn = async (projectId) => {
-      order.push(`${projectId}-start`);
-      if (projectId === first.id) {
-        // First job fails after a short delay; the lock must still release.
-        await delay(20);
-        order.push(`${projectId}-end`);
-        throw new Error("simulated failure on shared camera");
-      }
+    // The real captureProjectPhoto (src/lib/camera.ts) acquires the shared
+    // camera lock itself, so this fake mirrors that contract to verify the
+    // scheduler + lock combination actually serializes same-device work.
+    const captureProjectPhoto: CaptureFn = async (projectId) =>
+      withCameraLock(sharedDevice, async () => {
+        order.push(`${projectId}-start`);
+        if (projectId === first.id) {
+          // First job fails after a short delay; the lock must still release.
+          await delay(20);
+          order.push(`${projectId}-end`);
+          throw new Error("simulated failure on shared camera");
+        }
 
-      await delay(1);
-      order.push(`${projectId}-end`);
-      const photo = await createFakePhoto(prisma, projectId);
-      return { photo, savedPath: photo.path };
-    };
+        await delay(1);
+        order.push(`${projectId}-end`);
+        const photo = await createFakePhoto(prisma, projectId);
+        return { photo, savedPath: photo.path };
+      });
 
     const scheduler = new CaptureScheduler({ prisma, captureProjectPhoto, now: () => now, logger: silentLogger() });
     await scheduler.tick();

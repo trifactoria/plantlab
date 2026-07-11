@@ -1,7 +1,18 @@
 import { NextResponse } from "next/server";
+import { CameraBusyError } from "./cameraLock";
 
 export function badRequest(message: string) {
   return NextResponse.json({ error: message }, { status: 400 });
+}
+
+/** Maps a caught camera/v4l2 error to an { message, status } pair for JSON responses. */
+export function cameraErrorInfo(error: unknown, fallbackMessage: string) {
+  if (error instanceof CameraBusyError) {
+    return { message: error.message, status: 409 as const };
+  }
+
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  return { message, status: 400 as const };
 }
 
 export function notFound(message = "Not found") {
