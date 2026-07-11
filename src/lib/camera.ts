@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import type { CameraProfile, Photo, Project } from "@prisma/client";
 import { withCameraLock } from "./cameraLock";
+import { createPhotoRecord } from "./photoIngest";
 import { formatLocalTimestamp } from "./photos";
 import { prisma } from "./prisma";
 import { testCameraMockModeEnabled, testCaptureMockModeEnabled } from "./testProjectSafety";
@@ -236,15 +237,21 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
     }
   });
 
-  const photo = await prisma.photo.create({
-    data: {
+  let photo: Photo;
+  try {
+    ({ photo } = await createPhotoRecord(prisma, {
       projectId: project.id,
       filename: path.basename(savedPath),
       path: savedPath,
       timestamp: capturedAt,
       notes: options.notes ?? null,
-    },
-  });
+    }));
+  } catch (error) {
+    // The frame is already on disk at this point - don't leave it orphaned
+    // if the database write fails.
+    await unlink(savedPath).catch(() => undefined);
+    throw error;
+  }
 
   return { photo, savedPath };
 }

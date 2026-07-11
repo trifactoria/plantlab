@@ -4,6 +4,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import * as exifr from "exifr";
 import { badRequest, notFound } from "@/lib/http";
+import { createPhotoRecord } from "@/lib/photoIngest";
 import { prisma } from "@/lib/prisma";
 
 type Context = {
@@ -115,13 +116,11 @@ export async function POST(request: Request, context: Context) {
       await writeFile(savedPath, buffer);
 
       try {
-        const photo = await prisma.photo.create({
-          data: {
-            projectId: project.id,
-            filename,
-            path: savedPath,
-            timestamp,
-          },
+        const { photo } = await createPhotoRecord(prisma, {
+          projectId: project.id,
+          filename,
+          path: savedPath,
+          timestamp,
         });
 
         results.push({

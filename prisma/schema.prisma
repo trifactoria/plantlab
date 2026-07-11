@@ -8,34 +8,50 @@ datasource db {
 }
 
 model Project {
-  id                    String   @id @default(cuid())
-  name                  String
-  description           String?
-  gridWidth             Int
-  gridHeight            Int
-  photoIntervalMinutes  Int
-  captureStartAt        DateTime @default(now())
-  captureEnabled        Boolean  @default(false)
-  timeZone              String   @default("America/New_York")
-  captureWindowEnabled  Boolean  @default(false)
+  id                        String    @id @default(cuid())
+  name                      String
+  description               String?
+  gridWidth                 Int
+  gridHeight                Int
+  photoIntervalMinutes      Int
+  captureStartAt            DateTime  @default(now())
+  captureEnabled            Boolean   @default(false)
+  timeZone                  String    @default("America/New_York")
+  captureWindowEnabled      Boolean   @default(false)
   captureWindowStartMinutes Int?
   captureWindowEndMinutes   Int?
-  isTestProject         Boolean  @default(false)
-  plantedAt             DateTime?
-  localPhotoDirectory   String
-  cameraDevice          String?
-  cameraName            String?
-  cameraStableId        String?
-  cameraProfileId       String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  isTestProject             Boolean   @default(false)
+  plantedAt                 DateTime?
+  localPhotoDirectory       String
+  cameraDevice              String?
+  cameraName                String?
+  cameraStableId            String?
+  cameraProfileId           String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   plants        Plant[]
   photos        Photo[]
   events        PlantEvent[]
   milestones    ProjectMilestone[]
   captureRuns   CaptureRun[]
-  cameraProfile CameraProfile? @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+  cameraProfile CameraProfile?     @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+  cropPreset    ProjectCropPreset?
+  cropVersions  PlantCropVersion[]
+}
+
+// Sizing/shape suggestion only, applied when a plant has no crop history yet.
+// Never a fixed position - see src/lib/cropVersions.ts. One per project.
+model ProjectCropPreset {
+  id              String   @id @default(cuid())
+  projectId       String   @unique
+  width           Float
+  height          Float
+  aspectRatioMode String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
 
 model ProjectMilestone {
@@ -56,25 +72,61 @@ model ProjectMilestone {
 }
 
 model Plant {
-  id         String   @id @default(cuid())
-  projectId  String
-  name       String
-  tags       String?
-  notes      String?
-  gridX      Int
-  gridY      Int
-  visualAspectRatio String?
-  startedAt  DateTime @default(now())
-  startLabel String   @default("Added to project")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id                             String   @id @default(cuid())
+  projectId                      String
+  name                           String
+  tags                           String?
+  notes                          String?
+  gridX                          Int
+  gridY                          Int
+  visualAspectRatio              String?
+  startedAt                      DateTime @default(now())
+  startLabel                     String   @default("Added to project")
+  // Whether newly created project photos automatically receive this plant's
+  // active crop version. Defaults true so existing plants keep today's
+  // behavior; a plant with no crop version yet simply has nothing to
+  // materialize regardless of this flag.
+  automaticCropAssignmentEnabled Boolean  @default(true)
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
 
-  project    Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  events     PlantEvent[]
-  photoCrops PlantPhotoCrop[]
+  project       Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events        PlantEvent[]
+  photoCrops    PlantPhotoCrop[]
+  cropVersions  PlantCropVersion[]
   harvestResult PlantHarvestResult?
 
   @@unique([projectId, gridX, gridY])
+  @@index([projectId])
+}
+
+// A crop rectangle to use for this plant beginning at effectiveFrom, until a
+// newer version's effectiveFrom takes over. See src/lib/cropVersions.ts for
+// resolution order (newest version where effectiveFrom <= photo.timestamp).
+// Immutable once created - an adjustment always creates a new version rather
+// than editing an old one, so earlier PlantPhotoCrop rows never need to
+// change meaning retroactively.
+model PlantCropVersion {
+  id              String   @id @default(cuid())
+  plantId         String
+  projectId       String
+  cropX           Float
+  cropY           Float
+  cropWidth       Float
+  cropHeight      Float
+  aspectRatioMode String
+  effectiveFrom   DateTime
+  sourcePhotoId   String?
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  plant             Plant            @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourcePhoto       Photo?           @relation(fields: [sourcePhotoId], references: [id], onDelete: SetNull)
+  materializedCrops PlantPhotoCrop[]
+
+  @@index([plantId, effectiveFrom])
   @@index([projectId])
 }
 
@@ -88,38 +140,39 @@ model Photo {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  events      PlantEvent[]
-  captureRuns CaptureRun[]
-  plantCrops  PlantPhotoCrop[]
+  project            Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events             PlantEvent[]
+  captureRuns        CaptureRun[]
+  plantCrops         PlantPhotoCrop[]
+  cropVersionSources PlantCropVersion[]
 
   @@unique([projectId, path])
   @@index([projectId, timestamp])
 }
 
 model PlantEvent {
-  id         String   @id @default(cuid())
-  projectId  String
-  plantId    String
-  photoId    String?
+  id          String   @id @default(cuid())
+  projectId   String
+  plantId     String
+  photoId     String?
   milestoneId String?
   // "origin" | "observation". Origin is the single system-created "Added to
   // project" event per plant; see src/lib/experiment.ts for the constants and
   // guards. A partial unique index (see migration) enforces at most one
   // origin event per plant at the database level.
-  kind       String   @default("observation")
-  type       String
-  notes      String?
-  timestamp  DateTime
-  cropX      Float?
-  cropY      Float?
-  cropWidth  Float?
-  cropHeight Float?
-  createdAt  DateTime @default(now())
+  kind        String   @default("observation")
+  type        String
+  notes       String?
+  timestamp   DateTime
+  cropX       Float?
+  cropY       Float?
+  cropWidth   Float?
+  cropHeight  Float?
+  createdAt   DateTime @default(now())
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  plant   Plant   @relation(fields: [plantId], references: [id], onDelete: Cascade)
-  photo   Photo?  @relation(fields: [photoId], references: [id], onDelete: SetNull)
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  plant     Plant             @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  photo     Photo?            @relation(fields: [photoId], references: [id], onDelete: SetNull)
   milestone ProjectMilestone? @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
 
   @@index([projectId, timestamp])
@@ -129,21 +182,21 @@ model PlantEvent {
 }
 
 model PlantHarvestResult {
-  id                String   @id @default(cuid())
-  plantId           String   @unique
-  harvestedAt       DateTime
-  rootWeightGrams   Float?
-  rootDiameterMm    Float?
-  rootLengthMm      Float?
-  split             Boolean  @default(false)
-  bolted            Boolean  @default(false)
-  damaged           Boolean  @default(false)
-  acceptable        Boolean  @default(true)
-  flavorScore       Int?
-  selectedForSeed   Boolean  @default(false)
-  notes             String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id              String   @id @default(cuid())
+  plantId         String   @unique
+  harvestedAt     DateTime
+  rootWeightGrams Float?
+  rootDiameterMm  Float?
+  rootLengthMm    Float?
+  split           Boolean  @default(false)
+  bolted          Boolean  @default(false)
+  damaged         Boolean  @default(false)
+  acceptable      Boolean  @default(true)
+  flavorScore     Int?
+  selectedForSeed Boolean  @default(false)
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   plant Plant @relation(fields: [plantId], references: [id], onDelete: Cascade)
 }
@@ -188,24 +241,36 @@ model CaptureRun {
 
 // One saved crop rectangle for one plant within one project photo, used to
 // build a plant's visual history without needing a new photo capture.
+//
+// createdMethod is this row's provenance. Historical values: "manual",
+// "propagated" (old bulk-copy tool, src/lib/plantPhotoCropPropagation.ts).
+// New values added by the crop-version system, src/lib/cropVersions.ts:
+// "initial_version" (materialized when a plant's first crop version was
+// created), "active_version" (materialized automatically for a new photo
+// from the plant's active version), "repaired" (missing-frame repair),
+// "manual_adjusted" (edited directly on one photo, detached from any
+// version's automatic regeneration).
 model PlantPhotoCrop {
-  id         String   @id @default(cuid())
-  plantId    String
-  photoId    String
-  cropX      Float
-  cropY      Float
-  cropWidth  Float
-  cropHeight Float
-  sourceCropId String?
-  createdMethod String @default("manual")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id            String   @id @default(cuid())
+  plantId       String
+  photoId       String
+  cropX         Float
+  cropY         Float
+  cropWidth     Float
+  cropHeight    Float
+  sourceCropId  String?
+  createdMethod String   @default("manual")
+  cropVersionId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  plant Plant @relation(fields: [plantId], references: [id], onDelete: Cascade)
-  photo Photo @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  plant       Plant             @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  photo       Photo             @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  cropVersion PlantCropVersion? @relation(fields: [cropVersionId], references: [id], onDelete: SetNull)
 
   @@unique([plantId, photoId])
   @@index([plantId])
+  @@index([cropVersionId])
   @@index([photoId])
   @@index([sourceCropId])
 }

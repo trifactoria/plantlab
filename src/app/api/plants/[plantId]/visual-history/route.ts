@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { computeVisualHistoryStatus } from "@/lib/cropVersions";
 import { notFound } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 
@@ -37,7 +38,7 @@ export async function GET(request: Request, context: Context) {
   const limit = parseBoundedInt(searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
   const offset = parseBoundedInt(searchParams.get("offset"), 0, Number.MAX_SAFE_INTEGER);
 
-  const [totalCount, crops] = await Promise.all([
+  const [totalCount, crops, status] = await Promise.all([
     prisma.plantPhotoCrop.count({ where: { plantId } }),
     prisma.plantPhotoCrop.findMany({
       where: { plantId },
@@ -46,6 +47,7 @@ export async function GET(request: Request, context: Context) {
       take: limit,
       select: { photoId: true, photo: { select: { timestamp: true } } },
     }),
+    computeVisualHistoryStatus(prisma, plantId),
   ]);
 
   const frames = crops.map((crop) => ({
@@ -59,5 +61,6 @@ export async function GET(request: Request, context: Context) {
     offset,
     limit,
     hasMore: offset + frames.length < totalCount,
+    status,
   });
 }

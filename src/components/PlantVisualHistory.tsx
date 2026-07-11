@@ -3,10 +3,19 @@
 import Link from "next/link";
 import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CropVersionPanel } from "@/components/CropVersionPanel";
 import { ObservationForm } from "@/components/ObservationForm";
 import { QuickMilestoneEntry, type ExistingMilestone, type QuickMilestone } from "@/components/QuickMilestoneEntry";
 import { buildCropThumbnailUrl } from "@/lib/cropThumbnail";
 import { formatDateTime } from "@/lib/format";
+
+type VisualHistoryStatus = {
+  totalApplicablePhotos: number;
+  materializedCount: number;
+  missingCount: number;
+  automaticCropAssignmentEnabled: boolean;
+  versionCount: number;
+};
 
 export type FrameIndexEntry = {
   photoId: string;
@@ -106,6 +115,8 @@ export function PlantVisualHistory({
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
   const [addingEvent, setAddingEvent] = useState(false);
   const [editingEvent, setEditingEvent] = useState<FrameEvent | null>(null);
+  const [adjustingCrop, setAdjustingCrop] = useState(false);
+  const [status, setStatus] = useState<VisualHistoryStatus | null>(null);
 
   const currentFrame = frames[currentIndex] ?? null;
   const detail = currentFrame ? (detailCache.get(currentFrame.photoId) ?? null) : null;
@@ -244,7 +255,22 @@ export function PlantVisualHistory({
     draggingRef.current = false;
   }
 
+  async function loadStatus() {
+    const response = await fetch(`/api/plants/${plantId}/visual-history?limit=1`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as { status: VisualHistoryStatus };
+    setStatus(payload.status);
+  }
+
+  useEffect(() => {
+    void loadStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plantId]);
+
   async function refreshCurrentFrame() {
+    void loadStatus();
     if (!currentFrame) {
       return;
     }
@@ -278,6 +304,20 @@ export function PlantVisualHistory({
 
   return (
     <div className="grid gap-4">
+      {status ? (
+        <div
+          data-testid="visual-history-status"
+          className="grid gap-1 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700"
+        >
+          <p className="font-semibold text-stone-900">
+            Visual history: {status.materializedCount} of {status.totalApplicablePhotos} photos
+          </p>
+          {status.missingCount > 0 ? <p>{status.missingCount} frames missing</p> : null}
+          <p>Automatic crop assignment: {status.automaticCropAssignmentEnabled ? "On" : "Off"}</p>
+          <p>Crop versions: {status.versionCount}</p>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 sm:grid-cols-[2fr_1fr]">
         <div className="grid gap-3">
           <div
@@ -308,11 +348,22 @@ export function PlantVisualHistory({
               Frame {currentIndex + 1} of {totalCount}
             </span>
             {currentFrame ? <span>{formatDateTime(currentFrame.timestamp)}</span> : null}
-            {currentFrame ? (
-              <Link href={`/photos/${currentFrame.photoId}`} className="font-semibold text-emerald-700">
-                Open Full Photo
-              </Link>
-            ) : null}
+            <div className="flex flex-wrap gap-3">
+              {currentFrame ? (
+                <button
+                  type="button"
+                  className="font-semibold text-emerald-700"
+                  onClick={() => setAdjustingCrop(true)}
+                >
+                  Adjust Crop
+                </button>
+              ) : null}
+              {currentFrame ? (
+                <Link href={`/photos/${currentFrame.photoId}`} className="font-semibold text-emerald-700">
+                  Open Full Photo
+                </Link>
+              ) : null}
+            </div>
           </div>
 
           {detail?.photo.notes ? (
@@ -331,7 +382,7 @@ export function PlantVisualHistory({
                 className="button-secondary"
                 onClick={() => setAddingEvent(true)}
               >
-                Add Event
+                Record Observation
               </button>
             </div>
             <div className="mt-2 grid gap-2">
@@ -457,9 +508,28 @@ export function PlantVisualHistory({
             photoId={currentFrame.photoId}
             photoTimestamp={detail?.photo.timestamp}
             copyPlantPhotoCrop
+            title="Record Observation"
             onCancel={() => setAddingEvent(false)}
             onSaved={async () => {
               setAddingEvent(false);
+              await refreshCurrentFrame();
+            }}
+          />
+        </div>
+      ) : null}
+
+      {adjustingCrop && currentFrame && detail ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4">
+          <CropVersionPanel
+            plantId={plantId}
+            plantName="This plant"
+            projectId={projectId}
+            photoId={currentFrame.photoId}
+            photoTimestamp={detail.photo.timestamp}
+            imageUrl={`/api/photos/${currentFrame.photoId}/file`}
+            onCancel={() => setAdjustingCrop(false)}
+            onSaved={async () => {
+              setAdjustingCrop(false);
               await refreshCurrentFrame();
             }}
           />

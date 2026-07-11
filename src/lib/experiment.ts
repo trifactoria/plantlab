@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { EVENT_KIND_ORIGIN, ORIGIN_EVENT_TYPE, isOriginEvent } from "@/lib/observationKinds";
+import { isUniqueConstraintError } from "@/lib/prismaErrors";
 
 export { EVENT_KIND_ORIGIN, EVENT_KIND_OBSERVATION, ORIGIN_EVENT_TYPE, isOriginEvent } from "@/lib/observationKinds";
 export type { EventKind } from "@/lib/observationKinds";
@@ -75,12 +76,6 @@ export function originEventData(plant: { id: string; projectId: string; startedA
     type: ORIGIN_EVENT_TYPE,
     timestamp: plant.startedAt,
   };
-}
-
-function isUniqueConstraintError(error: unknown) {
-  return Boolean(
-    error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "P2002",
-  );
 }
 
 type OriginBackfillClient = Pick<PrismaClient, "plant" | "plantEvent">;

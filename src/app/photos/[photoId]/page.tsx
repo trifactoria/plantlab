@@ -163,7 +163,9 @@ export default async function PhotoPage({ params }: PageProps) {
             </div>
 
             <PlantCropSummary
+              projectId={photo.projectId}
               photoId={photo.id}
+              photoTimestamp={photo.timestamp.toISOString()}
               imageUrl={`/api/photos/${photo.id}/file`}
               plants={plants.map((plant) => ({
                 id: plant.id,

@@ -113,7 +113,7 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Quick Milestone Entry" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Plant Crops" })).toBeVisible();
   await expect(page.getByText("Radish A").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Edit Crop" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Adjust Crop" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove" })).toBeVisible();
   await page.getByRole("button", { name: "Delete Photo" }).click();
   await expect(page.getByRole("heading", { name: "Delete Photo" })).toBeVisible();
@@ -250,12 +250,14 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   await goto(page, `/photos/${ids.photoId}`);
   await page.getByLabel("Add plant crop").selectOption(ids.secondPlantId);
   await page.getByRole("button", { name: "Set Plant Crop" }).click();
-  await expect(page.getByText("Set Plant Crop - Radish B")).toBeVisible();
-  await expect(page.getByText("Apply crop to:")).toBeVisible();
-  await expect(page.getByText(/This and later photos without a crop - \d+ photos/)).toBeVisible();
+  await expect(page.getByText("Set Initial Crop - Radish B")).toBeVisible();
   await expect(page.getByRole("button", { name: "Landscape 16:9" })).toBeVisible();
 
   const stage = page.getByTestId("crop-editor-stage");
+  await stage.waitFor();
+  await expect
+    .poll(() => stage.locator("img").evaluate((img) => (img as HTMLImageElement).naturalWidth > 0))
+    .toBe(true);
   const box = await stage.boundingBox();
   if (!box) {
     throw new Error("crop editor stage did not render");
@@ -271,12 +273,14 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   });
   expect(previewRatio).toBeCloseTo(16 / 9, 1);
 
-  await page.getByRole("button", { name: "Save Crop" }).click();
-  await expect(page.getByText("Saved crop for Radish B.")).toBeVisible();
+  await page.getByRole("button", { name: "Set initial crop" }).click();
+  await expect(page.getByText("Initial crop set.")).toBeVisible();
 
-  // The plant now has one frame in its visual history.
+  // Setting the initial crop creates a crop version, which automatically
+  // applies to this and every later project photo - not just the one
+  // frame it was drawn on.
   await goto(page, `/plants/${ids.secondPlantId}`);
-  await expect(page.getByText("Frame 1 of 1")).toBeVisible();
+  await expect(page.getByText("Frame 1 of 2")).toBeVisible();
   await expect
     .poll(async () =>
       page.getByTestId("visual-history-frame").evaluate((element) => {
@@ -329,7 +333,7 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   // Add an event directly from the current frame.
   await page.getByRole("button", { name: "Previous" }).click();
   await expect(page.getByText("Frame 2 of 3")).toBeVisible();
-  await page.getByRole("button", { name: "Add Event" }).click();
+  await page.getByRole("button", { name: "Record Observation" }).click();
   const addEventForm = page.getByTestId("observation-form");
   await addEventForm.getByPlaceholder("Or type a custom observation").fill("Side shoot pinched");
   await addEventForm.getByRole("button", { name: "Save", exact: true }).click();
@@ -341,8 +345,8 @@ test("crop shape controls preserve preview proportions", async ({ page }) => {
   const ids = await seedVisualData();
 
   await goto(page, `/photos/${ids.photoId}`);
-  await page.getByRole("button", { name: "Edit Crop" }).first().click();
-  await expect(page.getByText("Set Plant Crop - Radish A")).toBeVisible();
+  await page.getByRole("button", { name: "Adjust Crop" }).first().click();
+  await expect(page.getByText("Set Initial Crop - Radish A")).toBeVisible();
 
   await page.getByRole("button", { name: "Portrait 9:16" }).click();
   await expect

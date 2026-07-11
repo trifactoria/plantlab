@@ -50,6 +50,10 @@ export async function PATCH(request: Request, context: Context) {
             : requiredString(body.startLabel, "startLabel"),
         startedAt:
           body?.startedAt === undefined ? undefined : optionalDate(body.startedAt),
+        automaticCropAssignmentEnabled:
+          body?.automaticCropAssignmentEnabled === undefined
+            ? undefined
+            : body.automaticCropAssignmentEnabled === true,
       },
     });
 

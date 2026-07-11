@@ -58,6 +58,15 @@ export function requiredPositiveInt(value: unknown, field: string) {
   return parsed;
 }
 
+export function requiredNormalizedFraction(value: unknown, field: string) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    throw new Error(`${field} must be greater than 0 and at most 1`);
+  }
+
+  return parsed;
+}
+
 export function requiredGridIndex(value: unknown, field: string) {
   const parsed = typeof value === "number" ? value : Number.parseInt(String(value), 10);
   if (!Number.isInteger(parsed) || parsed < 0) {

@@ -74,7 +74,35 @@ for (const viewport of viewports) {
 
     await page.getByLabel("Add plant crop").selectOption(ids.secondPlantId);
     await page.getByRole("button", { name: "Set Plant Crop" }).click();
-    await capture(page, `${prefix}-plant-crop-editor`);
+    await capture(page, `${prefix}-crop-initial-no-preset`);
+
+    // No preset or crop history yet - draw the crop from scratch.
+    const firstCropStage = page.getByTestId("crop-editor-stage");
+    const firstCropBox = await firstCropStage.boundingBox();
+    if (!firstCropBox) {
+      throw new Error("crop editor stage did not render");
+    }
+    await page.mouse.move(firstCropBox.x + firstCropBox.width * 0.2, firstCropBox.y + firstCropBox.height * 0.2);
+    await page.mouse.down();
+    await page.mouse.move(firstCropBox.x + firstCropBox.width * 0.5, firstCropBox.y + firstCropBox.height * 0.5, { steps: 5 });
+    await page.mouse.up();
+
+    await page.getByRole("button", { name: "Save size as project default" }).click();
+    await page.getByRole("button", { name: "Set initial crop" }).click();
+
+    // Create a third plant to demonstrate the project preset suggesting a
+    // same-sized movable crop rectangle for the next uncropped plant.
+    await goto(page, `/projects/${ids.projectId}`);
+    await page.getByTestId("grid-cell-2-0").click();
+    await page.getByLabel("Name").fill("Radish C");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await page.getByRole("heading", { name: "Create Plant" }).waitFor({ state: "hidden" });
+    await goto(page, `/photos/${ids.photoId}`);
+    await page.getByLabel("Add plant crop").selectOption({ label: "Radish C" });
+    await page.getByRole("button", { name: "Set Plant Crop" }).click();
+    await page.getByTestId("crop-editor-stage").waitFor();
+    await page.getByRole("button", { name: "Set initial crop" }).waitFor({ state: "visible" });
+    await capture(page, `${prefix}-crop-preset-suggestion`);
     await page.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByTestId("grid-cell-0-0").click();
@@ -87,11 +115,35 @@ for (const viewport of viewports) {
     await capture(page, `${prefix}-plant-detail`);
     await capture(page, `${prefix}-plant-milestone-progress`);
     await capture(page, `${prefix}-harvest-result-form`);
+    await page.getByTestId("visual-history-status").waitFor();
     await capture(page, `${prefix}-plant-visual-history`);
     await capture(page, `${prefix}-edit-plant-state`);
 
     await page.getByRole("button", { name: "Next" }).click();
     await capture(page, `${prefix}-plant-visual-history-event`);
+
+    await page.getByRole("button", { name: "Record Observation" }).click();
+    await capture(page, `${prefix}-record-observation-from-frame`);
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    // Adjust the crop from this frame forward - Radish A's seeded crops
+    // have no crop version yet, so this becomes its first version.
+    await page.getByRole("button", { name: "Adjust Crop" }).click();
+    await capture(page, `${prefix}-crop-adjust-from-frame`);
+    await page.getByRole("button", { name: "Set initial crop" }).click();
+
+    // Move to the last frame and adjust again, creating a second version -
+    // demonstrating multiple crop-version boundaries for one plant.
+    await page.getByRole("button", { name: "Next" }).click();
+    await page.getByRole("button", { name: "Adjust Crop" }).click();
+    await page.getByRole("button", { name: "Adjust crop from this frame forward" }).click();
+    await page.getByRole("button", { name: "Adjust Crop" }).click();
+    await page.getByText("Advanced").click();
+    await capture(page, `${prefix}-crop-version-boundaries`);
+
+    await page.getByRole("button", { name: "Fill missing frames" }).click();
+    await capture(page, `${prefix}-crop-missing-frame-repair`);
+    await page.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("button", { name: "Edit" }).first().click();
     await capture(page, `${prefix}-edit-event-state`);
