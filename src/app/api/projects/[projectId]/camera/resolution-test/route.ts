@@ -5,6 +5,7 @@ import { badRequest, cameraErrorInfo, notFound, readJson } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { compareResolutions, supportedCandidateResolutions } from "@/lib/resolutionCompare";
+import { testCameraMockModeEnabled, testProjectCameraError } from "@/lib/testProjectSafety";
 import { listCameraFormats } from "@/lib/v4l2";
 
 export const runtime = "nodejs";
@@ -27,6 +28,11 @@ export async function POST(request: Request, context: Context) {
 
   if (!project) {
     return notFound("Project not found");
+  }
+
+  if (project.isTestProject && !testCameraMockModeEnabled()) {
+    const blocked = testProjectCameraError();
+    return NextResponse.json({ error: blocked.error }, { status: blocked.status });
   }
 
   const device = process.env.CAMERA_DEVICE || project.cameraDevice;

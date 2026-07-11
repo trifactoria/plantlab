@@ -16,6 +16,11 @@ model Project {
   photoIntervalMinutes  Int
   captureStartAt        DateTime @default(now())
   captureEnabled        Boolean  @default(false)
+  timeZone              String   @default("America/New_York")
+  captureWindowEnabled  Boolean  @default(false)
+  captureWindowStartMinutes Int?
+  captureWindowEndMinutes   Int?
+  isTestProject         Boolean  @default(false)
   plantedAt             DateTime?
   localPhotoDirectory   String
   cameraDevice          String?
@@ -28,8 +33,26 @@ model Project {
   plants        Plant[]
   photos        Photo[]
   events        PlantEvent[]
+  milestones    ProjectMilestone[]
   captureRuns   CaptureRun[]
   cameraProfile CameraProfile? @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+}
+
+model ProjectMilestone {
+  id        String   @id @default(cuid())
+  projectId String
+  key       String
+  label     String
+  sortOrder Int
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  PlantEvent[]
+
+  @@unique([projectId, key])
+  @@index([projectId, sortOrder])
 }
 
 model Plant {
@@ -49,6 +72,7 @@ model Plant {
   project    Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   events     PlantEvent[]
   photoCrops PlantPhotoCrop[]
+  harvestResult PlantHarvestResult?
 
   @@unique([projectId, gridX, gridY])
   @@index([projectId])
@@ -78,6 +102,7 @@ model PlantEvent {
   projectId  String
   plantId    String
   photoId    String?
+  milestoneId String?
   type       String
   notes      String?
   timestamp  DateTime
@@ -90,10 +115,32 @@ model PlantEvent {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   plant   Plant   @relation(fields: [plantId], references: [id], onDelete: Cascade)
   photo   Photo?  @relation(fields: [photoId], references: [id], onDelete: SetNull)
+  milestone ProjectMilestone? @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
 
   @@index([projectId, timestamp])
   @@index([plantId, timestamp])
   @@index([photoId])
+  @@index([milestoneId])
+}
+
+model PlantHarvestResult {
+  id                String   @id @default(cuid())
+  plantId           String   @unique
+  harvestedAt       DateTime
+  rootWeightGrams   Float?
+  rootDiameterMm    Float?
+  rootLengthMm      Float?
+  split             Boolean  @default(false)
+  bolted            Boolean  @default(false)
+  damaged           Boolean  @default(false)
+  acceptable        Boolean  @default(true)
+  flavorScore       Int?
+  selectedForSeed   Boolean  @default(false)
+  notes             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  plant Plant @relation(fields: [plantId], references: [id], onDelete: Cascade)
 }
 
 model CameraProfile {

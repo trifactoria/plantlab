@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { validateCaptureConfig } from "@/lib/captureEligibility";
+import { DEFAULT_PROJECT_MILESTONES } from "@/lib/experiment";
+import { validateCaptureWindowConfig } from "@/lib/schedule";
+import { requireValidTimeZone, systemTimeZone } from "@/lib/timezone";
 import {
   badRequest,
   nullableDate,
@@ -39,6 +42,30 @@ export async function POST(request: Request) {
     );
     const cameraDevice = optionalString(body?.cameraDevice);
     const captureEnabled = body?.captureEnabled === true;
+    const isTestProject = body?.isTestProject === true;
+    const timeZone = body?.timeZone === undefined ? systemTimeZone() : requireValidTimeZone(body.timeZone);
+    const captureWindowEnabled = body?.captureWindowEnabled === true;
+    const captureWindowStartMinutes =
+      body?.captureWindowStartMinutes === undefined || body?.captureWindowStartMinutes === null
+        ? null
+        : Number(body.captureWindowStartMinutes);
+    const captureWindowEndMinutes =
+      body?.captureWindowEndMinutes === undefined || body?.captureWindowEndMinutes === null
+        ? null
+        : Number(body.captureWindowEndMinutes);
+    const windowErrors = validateCaptureWindowConfig({
+      timeZone,
+      captureWindowEnabled,
+      captureWindowStartMinutes,
+      captureWindowEndMinutes,
+    });
+    if (windowErrors.length > 0) {
+      return badRequest(windowErrors.join(" "));
+    }
+
+    if (isTestProject && captureEnabled) {
+      return badRequest("Test projects cannot enable scheduled capture.");
+    }
 
     if (captureEnabled) {
       const errors = validateCaptureConfig({
@@ -46,6 +73,11 @@ export async function POST(request: Request) {
         photoIntervalMinutes,
         cameraDevice,
         localPhotoDirectory,
+        timeZone,
+        captureWindowEnabled,
+        captureWindowStartMinutes,
+        captureWindowEndMinutes,
+        isTestProject,
       });
 
       if (errors.length > 0) {
@@ -62,13 +94,24 @@ export async function POST(request: Request) {
         gridHeight: requiredPositiveInt(body?.gridHeight, "gridHeight"),
         photoIntervalMinutes,
         captureStartAt,
-        captureEnabled,
+        captureEnabled: isTestProject ? false : captureEnabled,
+        timeZone,
+        captureWindowEnabled,
+        captureWindowStartMinutes,
+        captureWindowEndMinutes,
+        isTestProject,
         plantedAt:
           body?.plantedAt === undefined ? null : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory,
-        cameraDevice,
-        cameraName: optionalString(body?.cameraName),
-        cameraProfileId: optionalString(body?.cameraProfileId),
+        cameraDevice: isTestProject ? null : cameraDevice,
+        cameraName: isTestProject ? null : optionalString(body?.cameraName),
+        cameraProfileId: isTestProject ? null : optionalString(body?.cameraProfileId),
+        milestones: {
+          create: DEFAULT_PROJECT_MILESTONES.map((milestone) => ({
+            ...milestone,
+            enabled: true,
+          })),
+        },
       },
     });
 

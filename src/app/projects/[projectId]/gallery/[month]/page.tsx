@@ -1,9 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { formatDateTime } from "@/lib/format";
 import { groupPhotosByDay, localMonthRange, monthLabel } from "@/lib/gallery";
 import { prisma } from "@/lib/prisma";
+import { formatDateTimeInZone } from "@/lib/timezone";
 
 type PageProps = {
   params: Promise<{ projectId: string; month: string }>;
@@ -17,7 +17,7 @@ export default async function ProjectMonthGalleryPage({ params }: PageProps) {
     notFound();
   }
 
-  const { start, end } = localMonthRange(month);
+  const { start, end } = localMonthRange(month, project.timeZone);
   const photos = await prisma.photo.findMany({
     where: {
       projectId,
@@ -26,7 +26,7 @@ export default async function ProjectMonthGalleryPage({ params }: PageProps) {
     orderBy: { timestamp: "desc" },
     select: { id: true, timestamp: true },
   });
-  const dayCards = groupPhotosByDay(photos);
+  const dayCards = groupPhotosByDay(photos, project.timeZone);
 
   return (
     <main className="min-h-screen">
@@ -36,7 +36,7 @@ export default async function ProjectMonthGalleryPage({ params }: PageProps) {
             {project.name}
           </Link>
           <h1 className="mt-3 text-3xl font-semibold text-stone-950">
-            {monthLabel(month)}
+            {monthLabel(month, project.timeZone)}
           </h1>
         </div>
       </header>
@@ -66,7 +66,7 @@ export default async function ProjectMonthGalleryPage({ params }: PageProps) {
                   </div>
                   <p className="mt-2 text-sm font-semibold text-stone-950">{day.label}</p>
                   <p className="text-xs text-stone-500">
-                    {day.photoCount} photo{day.photoCount === 1 ? "" : "s"} / {formatDateTime(day.firstCaptureAt)} - {formatDateTime(day.lastCaptureAt)}
+                    {day.photoCount} photo{day.photoCount === 1 ? "" : "s"} / {formatDateTimeInZone(day.firstCaptureAt, project.timeZone)} - {formatDateTimeInZone(day.lastCaptureAt, project.timeZone)}
                   </p>
                 </Link>
               ))

@@ -10,6 +10,11 @@ type ProjectStatus = {
   eligible: boolean;
   errors: string[];
   nextCaptureAt: string | null;
+  timeZone: string;
+  captureWindow: string;
+  projectLocalTime: string;
+  insideCaptureWindow: boolean;
+  isTestProject: boolean;
   lastSuccessfulCaptureAt: string | null;
   lastError: { message: string; at: string } | null;
 };
@@ -59,7 +64,7 @@ export function ServiceStatusPanel() {
     return () => window.clearInterval(interval);
   }, []);
 
-  const enabledProjects = status?.projects.filter((project) => project.captureEnabled) ?? [];
+  const visibleProjects = status?.projects.filter((project) => project.captureEnabled || project.isTestProject) ?? [];
 
   return (
     <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
@@ -97,21 +102,40 @@ export function ServiceStatusPanel() {
             </div>
           </dl>
 
-          {enabledProjects.length > 0 ? (
+          {visibleProjects.length > 0 ? (
             <div className="overflow-x-auto rounded-md border border-stone-200">
               <table className="w-full text-left text-sm">
                 <thead className="bg-stone-50 text-xs font-semibold uppercase text-stone-600">
                   <tr>
                     <th className="px-3 py-2">Project</th>
+                    <th className="px-3 py-2">Timezone</th>
+                    <th className="px-3 py-2">Window</th>
                     <th className="px-3 py-2">Next capture</th>
                     <th className="px-3 py-2">Last success</th>
                     <th className="px-3 py-2">Last error</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {enabledProjects.map((project) => (
+                  {visibleProjects.map((project) => (
                     <tr key={project.projectId} className="border-t border-stone-100">
-                      <td className="px-3 py-2 font-medium text-stone-950">{project.name}</td>
+                      <td className="px-3 py-2 font-medium text-stone-950">
+                        {project.name}
+                        {project.isTestProject ? (
+                          <span className="ml-2 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
+                            Test
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 text-stone-600">
+                        <p>{project.timeZone}</p>
+                        <p className="text-xs">{project.projectLocalTime}</p>
+                      </td>
+                      <td className="px-3 py-2 text-stone-600">
+                        <p>{project.captureWindow}</p>
+                        <p className={project.insideCaptureWindow ? "text-xs text-emerald-700" : "text-xs text-amber-700"}>
+                          {project.insideCaptureWindow ? "Inside window" : "Outside window"}
+                        </p>
+                      </td>
                       <td className="px-3 py-2 text-stone-600">
                         {project.eligible
                           ? project.nextCaptureAt

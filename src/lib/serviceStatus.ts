@@ -1,7 +1,8 @@
 import os from "node:os";
 import type { PrismaClient, Project } from "@prisma/client";
 import { checkCaptureEligibility } from "./captureEligibility";
-import { nextAlignedCaptureTime } from "./schedule";
+import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "./schedule";
+import { formatDateTimeInZone } from "./timezone";
 
 export const SERVICE_STATUS_ID = "capture-service";
 export const SERVICE_NAME = "plantlab-capture";
@@ -55,6 +56,11 @@ export type ProjectCaptureStatus = {
   eligible: boolean;
   errors: string[];
   nextCaptureAt: string | null;
+  timeZone: string;
+  captureWindow: string;
+  projectLocalTime: string;
+  insideCaptureWindow: boolean;
+  isTestProject: boolean;
   lastSuccessfulCaptureAt: string | null;
   lastError: { message: string; at: string } | null;
 };
@@ -70,13 +76,22 @@ export async function getProjectCaptureStatus(
     photoIntervalMinutes: project.photoIntervalMinutes,
     cameraDevice: project.cameraDevice,
     localPhotoDirectory: project.localPhotoDirectory,
+    timeZone: project.timeZone,
+    captureWindowEnabled: project.captureWindowEnabled,
+    captureWindowStartMinutes: project.captureWindowStartMinutes,
+    captureWindowEndMinutes: project.captureWindowEndMinutes,
+    isTestProject: project.isTestProject,
   });
 
   const nextCaptureAt = eligibility.eligible
-    ? nextAlignedCaptureTime({
+    ? nextPermittedCaptureTime({
         startAt: project.captureStartAt,
         intervalMinutes: project.photoIntervalMinutes,
         now,
+        timeZone: project.timeZone,
+        captureWindowEnabled: project.captureWindowEnabled,
+        captureWindowStartMinutes: project.captureWindowStartMinutes,
+        captureWindowEndMinutes: project.captureWindowEndMinutes,
       })
     : null;
 
@@ -105,6 +120,11 @@ export async function getProjectCaptureStatus(
     eligible: eligibility.eligible,
     errors: eligibility.errors,
     nextCaptureAt: nextCaptureAt ? nextCaptureAt.toISOString() : null,
+    timeZone: project.timeZone,
+    captureWindow: captureWindowLabel(project),
+    projectLocalTime: formatDateTimeInZone(now, project.timeZone),
+    insideCaptureWindow: isInsideCaptureWindow(now, project),
+    isTestProject: project.isTestProject,
     lastSuccessfulCaptureAt: lastSuccess
       ? (lastSuccess.completedAt ?? lastSuccess.createdAt).toISOString()
       : null,

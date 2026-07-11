@@ -1,9 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { formatDateTime } from "@/lib/format";
 import { dayLabel, localDayRange } from "@/lib/gallery";
 import { prisma } from "@/lib/prisma";
+import { formatDateTimeInZone } from "@/lib/timezone";
 
 type PageProps = {
   params: Promise<{ projectId: string; month: string; day: string }>;
@@ -18,7 +18,7 @@ export default async function ProjectDayGalleryPage({ params }: PageProps) {
     notFound();
   }
 
-  const { start, end } = localDayRange(dayKey);
+  const { start, end } = localDayRange(dayKey, project.timeZone);
   const photos = await prisma.photo.findMany({
     where: {
       projectId,
@@ -38,7 +38,7 @@ export default async function ProjectDayGalleryPage({ params }: PageProps) {
             {project.name} / {month}
           </Link>
           <h1 className="mt-3 text-3xl font-semibold text-stone-950">
-            {dayLabel(dayKey)}
+            {dayLabel(dayKey, project.timeZone)}
           </h1>
         </div>
       </header>
@@ -67,7 +67,7 @@ export default async function ProjectDayGalleryPage({ params }: PageProps) {
                     />
                   </div>
                   <p className="mt-2 text-sm font-semibold text-stone-950">
-                    {formatDateTime(photo.timestamp)}
+                    {formatDateTimeInZone(photo.timestamp, project.timeZone)}
                   </p>
                   <p className="text-xs text-stone-500">
                     {photo._count.events} event{photo._count.events === 1 ? "" : "s"}

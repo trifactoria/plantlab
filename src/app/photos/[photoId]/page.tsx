@@ -5,6 +5,8 @@ import { EventActions } from "@/components/EventActions";
 import { PhotoEditor } from "@/components/PhotoEditor";
 import { PlantCropSummary } from "@/components/PlantCropSummary";
 import { PlantGrid } from "@/components/PlantGrid";
+import { QuickMilestoneEntry } from "@/components/QuickMilestoneEntry";
+import { ensureDefaultProjectMilestones } from "@/lib/experiment";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 
@@ -23,7 +25,8 @@ export default async function PhotoPage({ params }: PageProps) {
     notFound();
   }
 
-  const [plants, photos, events, plantCrops] = await Promise.all([
+  await ensureDefaultProjectMilestones(prisma, photo.projectId);
+  const [plants, photos, events, plantCrops, milestones, milestoneEvents] = await Promise.all([
     prisma.plant.findMany({
       where: { projectId: photo.projectId },
       orderBy: [{ gridY: "asc" }, { gridX: "asc" }],
@@ -42,6 +45,14 @@ export default async function PhotoPage({ params }: PageProps) {
       where: { photoId: photo.id },
       include: { plant: true },
       orderBy: { createdAt: "asc" },
+    }),
+    prisma.projectMilestone.findMany({
+      where: { projectId: photo.projectId, enabled: true },
+      orderBy: [{ sortOrder: "asc" }, { label: "asc" }],
+    }),
+    prisma.plantEvent.findMany({
+      where: { projectId: photo.projectId, milestoneId: { not: null } },
+      select: { plantId: true, milestoneId: true },
     }),
   ]);
 
@@ -93,6 +104,31 @@ export default async function PhotoPage({ params }: PageProps) {
 
             <div>
               <h2 className="text-xl font-semibold text-stone-950">Linked Events</h2>
+              <div className="mt-4">
+                <QuickMilestoneEntry
+                  plants={plants.map((plant) => ({ id: plant.id, name: plant.name }))}
+                  milestones={milestones.map((milestone) => ({
+                    id: milestone.id,
+                    key: milestone.key,
+                    label: milestone.label,
+                  }))}
+                  photoId={photo.id}
+                  photoTimestamp={photo.timestamp.toISOString()}
+                  imageUrl={`/api/photos/${photo.id}/file`}
+                  existingMilestones={milestoneEvents}
+                  cropByPlantId={Object.fromEntries(
+                    plantCrops.map((crop) => [
+                      crop.plantId,
+                      {
+                        cropX: crop.cropX,
+                        cropY: crop.cropY,
+                        cropWidth: crop.cropWidth,
+                        cropHeight: crop.cropHeight,
+                      },
+                    ]),
+                  )}
+                />
+              </div>
               <div className="mt-4 grid gap-3">
                 {events.length === 0 ? (
                   <p className="rounded-lg border border-dashed border-stone-300 bg-white p-5 text-stone-600">

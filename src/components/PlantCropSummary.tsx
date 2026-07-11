@@ -263,6 +263,7 @@ export function PlantCropSummary({
       {plantsWithoutCrop.length > 0 ? (
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-stone-200 pt-4">
           <select
+            aria-label="Add plant crop"
             className="input w-auto"
             value={addingPlantId}
             onChange={(event) => setAddingPlantId(event.target.value)}

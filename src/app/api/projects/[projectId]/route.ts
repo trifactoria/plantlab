@@ -13,6 +13,8 @@ import {
   serverError,
 } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { validateCaptureWindowConfig } from "@/lib/schedule";
+import { requireValidTimeZone } from "@/lib/timezone";
 
 type Context = {
   params: Promise<{ projectId: string }>;
@@ -103,8 +105,50 @@ export async function PATCH(request: Request, context: Context) {
       body?.cameraDevice === undefined ? undefined : optionalString(body.cameraDevice);
     const nextCaptureEnabled =
       body?.captureEnabled === undefined ? undefined : body.captureEnabled === true;
+    const nextIsTestProject =
+      body?.isTestProject === undefined ? undefined : body.isTestProject === true;
+    const mergedIsTestProject = nextIsTestProject ?? existingProject.isTestProject;
+    const nextTimeZone =
+      body?.timeZone === undefined ? undefined : requireValidTimeZone(body.timeZone);
+    const nextCaptureWindowEnabled =
+      body?.captureWindowEnabled === undefined ? undefined : body.captureWindowEnabled === true;
+    const nextCaptureWindowStartMinutes =
+      body?.captureWindowStartMinutes === undefined
+        ? undefined
+        : body.captureWindowStartMinutes === null
+          ? null
+          : Number(body.captureWindowStartMinutes);
+    const nextCaptureWindowEndMinutes =
+      body?.captureWindowEndMinutes === undefined
+        ? undefined
+        : body.captureWindowEndMinutes === null
+          ? null
+          : Number(body.captureWindowEndMinutes);
 
-    const mergedCaptureEnabled = nextCaptureEnabled ?? existingProject.captureEnabled;
+    const mergedCaptureEnabled = mergedIsTestProject ? false : (nextCaptureEnabled ?? existingProject.captureEnabled);
+    if (mergedIsTestProject && nextCaptureEnabled === true) {
+      return badRequest("Test projects cannot enable scheduled capture.");
+    }
+
+    const mergedTimeZone = nextTimeZone ?? existingProject.timeZone;
+    const mergedWindowEnabled = nextCaptureWindowEnabled ?? existingProject.captureWindowEnabled;
+    const mergedWindowStart =
+      nextCaptureWindowStartMinutes === undefined
+        ? existingProject.captureWindowStartMinutes
+        : nextCaptureWindowStartMinutes;
+    const mergedWindowEnd =
+      nextCaptureWindowEndMinutes === undefined
+        ? existingProject.captureWindowEndMinutes
+        : nextCaptureWindowEndMinutes;
+    const windowErrors = validateCaptureWindowConfig({
+      timeZone: mergedTimeZone,
+      captureWindowEnabled: mergedWindowEnabled,
+      captureWindowStartMinutes: mergedWindowStart,
+      captureWindowEndMinutes: mergedWindowEnd,
+    });
+    if (windowErrors.length > 0) {
+      return badRequest(windowErrors.join(" "));
+    }
 
     if (mergedCaptureEnabled) {
       const eligibility = await checkCaptureEligibility({
@@ -113,12 +157,24 @@ export async function PATCH(request: Request, context: Context) {
         photoIntervalMinutes: nextPhotoIntervalMinutes ?? existingProject.photoIntervalMinutes,
         cameraDevice: nextCameraDevice ?? existingProject.cameraDevice,
         localPhotoDirectory: nextPhotoDirectory ?? existingProject.localPhotoDirectory,
+        timeZone: mergedTimeZone,
+        captureWindowEnabled: mergedWindowEnabled,
+        captureWindowStartMinutes: mergedWindowStart,
+        captureWindowEndMinutes: mergedWindowEnd,
+        isTestProject: mergedIsTestProject,
       });
 
       if (!eligibility.eligible) {
         return badRequest(eligibility.errors.join(" "));
       }
     }
+
+    const cameraProfileId =
+      nextIsTestProject === true
+        ? null
+        : body?.cameraProfileId === undefined
+          ? undefined
+          : optionalString(body.cameraProfileId);
 
     const project = await prisma.project.update({
       where: { id: projectId },
@@ -130,21 +186,31 @@ export async function PATCH(request: Request, context: Context) {
         gridHeight: nextGridHeight,
         photoIntervalMinutes: nextPhotoIntervalMinutes,
         captureStartAt: nextCaptureStartAt,
-        captureEnabled: nextCaptureEnabled,
+        captureEnabled: nextIsTestProject === true ? false : nextCaptureEnabled,
+        timeZone: nextTimeZone,
+        captureWindowEnabled: nextCaptureWindowEnabled,
+        captureWindowStartMinutes: nextCaptureWindowStartMinutes,
+        captureWindowEndMinutes: nextCaptureWindowEndMinutes,
+        isTestProject: nextIsTestProject,
         plantedAt:
           body?.plantedAt === undefined
             ? undefined
             : nullableDate(body.plantedAt, "plantedAt"),
         localPhotoDirectory: nextPhotoDirectory,
-        cameraDevice: nextCameraDevice,
+        cameraDevice: nextIsTestProject === true ? null : nextCameraDevice,
         cameraName:
-          body?.cameraName === undefined ? undefined : optionalString(body.cameraName),
+          nextIsTestProject === true
+            ? null
+            : body?.cameraName === undefined
+              ? undefined
+              : optionalString(body.cameraName),
         cameraStableId:
-          body?.cameraStableId === undefined ? undefined : optionalString(body.cameraStableId),
-        cameraProfileId:
-          body?.cameraProfileId === undefined
-            ? undefined
-            : optionalString(body.cameraProfileId),
+          nextIsTestProject === true
+            ? null
+            : body?.cameraStableId === undefined
+              ? undefined
+              : optionalString(body.cameraStableId),
+        cameraProfileId,
       },
     });
 

@@ -4,6 +4,8 @@ import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export default async function HomePage() {
   const projects = await prisma.project.findMany({
     orderBy: { createdAt: "desc" },
@@ -58,6 +60,11 @@ export default async function HomePage() {
                         <h3 className="text-lg font-semibold text-stone-950">
                           {project.name}
                         </h3>
+                        {project.isTestProject ? (
+                          <span className="mt-1 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900">
+                            Test project
+                          </span>
+                        ) : null}
                         {project.description ? (
                           <p className="mt-1 text-sm text-stone-600">
                             {project.description}

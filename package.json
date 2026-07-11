@@ -13,6 +13,8 @@
     "camera:list": "tsx scripts/camera-list.ts",
     "camera:watch": "tsx scripts/camera-watch.ts",
     "camera:service": "tsx scripts/camera-service.ts",
+    "backup": "tsx scripts/backup.ts",
+    "backup:list": "tsx scripts/backup.ts list",
     "test:e2e": "playwright test tests/e2e.spec.ts",
     "test:unit": "vitest run",
     "screenshots": "playwright test tests/screenshots.spec.ts"
@@ -21,6 +23,7 @@
     "@prisma/client": "6.19.3",
     "@tailwindcss/postcss": "4.3.2",
     "exifr": "^7.1.3",
+    "luxon": "^3.7.2",
     "next": "15.5.20",
     "prisma": "6.19.3",
     "react": "19.2.7",
@@ -30,6 +33,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
+    "@types/luxon": "^3.7.2",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",

@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { checkCaptureEligibility } from "./captureEligibility";
-import { nextAlignedCaptureTime } from "./schedule";
+import { nextPermittedCaptureTime } from "./schedule";
 
 export type CaptureLogger = {
   info: (message: string, meta?: Record<string, unknown>) => void;
@@ -37,6 +37,10 @@ type TrackedSchedule = {
   target: Date;
   captureStartAt: Date;
   photoIntervalMinutes: number;
+  timeZone: string;
+  captureWindowEnabled: boolean;
+  captureWindowStartMinutes: number | null;
+  captureWindowEndMinutes: number | null;
 };
 
 export type TickCaptureResult = {
@@ -85,13 +89,17 @@ export class CaptureScheduler {
       cameraDevice: string;
       captureStartAt: Date;
       photoIntervalMinutes: number;
+      timeZone: string;
+      captureWindowEnabled: boolean;
+      captureWindowStartMinutes: number | null;
+      captureWindowEndMinutes: number | null;
       target: Date;
     }> = [];
 
     for (const project of projects) {
       seenIds.add(project.id);
 
-      if (!project.captureEnabled) {
+      if (!project.captureEnabled || project.isTestProject) {
         this.schedules.delete(project.id);
         continue;
       }
@@ -102,6 +110,11 @@ export class CaptureScheduler {
         photoIntervalMinutes: project.photoIntervalMinutes,
         cameraDevice: project.cameraDevice,
         localPhotoDirectory: project.localPhotoDirectory,
+        timeZone: project.timeZone,
+        captureWindowEnabled: project.captureWindowEnabled,
+        captureWindowStartMinutes: project.captureWindowStartMinutes,
+        captureWindowEndMinutes: project.captureWindowEndMinutes,
+        isTestProject: project.isTestProject,
       });
 
       if (!eligibility.eligible) {
@@ -119,18 +132,38 @@ export class CaptureScheduler {
       const configChanged =
         !existing ||
         existing.captureStartAt.getTime() !== project.captureStartAt.getTime() ||
-        existing.photoIntervalMinutes !== project.photoIntervalMinutes;
+        existing.photoIntervalMinutes !== project.photoIntervalMinutes ||
+        existing.timeZone !== project.timeZone ||
+        existing.captureWindowEnabled !== project.captureWindowEnabled ||
+        existing.captureWindowStartMinutes !== project.captureWindowStartMinutes ||
+        existing.captureWindowEndMinutes !== project.captureWindowEndMinutes;
 
       let schedule: TrackedSchedule;
       if (configChanged) {
+        const target = nextPermittedCaptureTime({
+          startAt: project.captureStartAt,
+          intervalMinutes: project.photoIntervalMinutes,
+          now: checkedAt,
+          timeZone: project.timeZone,
+          captureWindowEnabled: project.captureWindowEnabled,
+          captureWindowStartMinutes: project.captureWindowStartMinutes,
+          captureWindowEndMinutes: project.captureWindowEndMinutes,
+        });
+        if (!target) {
+          this.schedules.delete(project.id);
+          this.logger.warn("No permitted capture time found within the scheduling lookahead", {
+            projectId: project.id,
+          });
+          continue;
+        }
         schedule = {
-          target: nextAlignedCaptureTime({
-            startAt: project.captureStartAt,
-            intervalMinutes: project.photoIntervalMinutes,
-            now: checkedAt,
-          }),
+          target,
           captureStartAt: project.captureStartAt,
           photoIntervalMinutes: project.photoIntervalMinutes,
+          timeZone: project.timeZone,
+          captureWindowEnabled: project.captureWindowEnabled,
+          captureWindowStartMinutes: project.captureWindowStartMinutes,
+          captureWindowEndMinutes: project.captureWindowEndMinutes,
         };
         this.schedules.set(project.id, schedule);
       } else {
@@ -143,6 +176,10 @@ export class CaptureScheduler {
           cameraDevice: project.cameraDevice as string,
           captureStartAt: schedule.captureStartAt,
           photoIntervalMinutes: schedule.photoIntervalMinutes,
+          timeZone: schedule.timeZone,
+          captureWindowEnabled: schedule.captureWindowEnabled,
+          captureWindowStartMinutes: schedule.captureWindowStartMinutes,
+          captureWindowEndMinutes: schedule.captureWindowEndMinutes,
           target: schedule.target,
         });
       }
@@ -167,6 +204,10 @@ export class CaptureScheduler {
     cameraDevice: string;
     captureStartAt: Date;
     photoIntervalMinutes: number;
+    timeZone: string;
+    captureWindowEnabled: boolean;
+    captureWindowStartMinutes: number | null;
+    captureWindowEndMinutes: number | null;
     target: Date;
   }): Promise<TickCaptureResult> {
     const scheduledFor = project.target;
@@ -234,15 +275,28 @@ export class CaptureScheduler {
       // slow or delayed capture never causes missed intervals to be
       // backfilled - only the next future occurrence is scheduled.
       const recomputedNow = this.now();
-      this.schedules.set(project.id, {
-        target: nextAlignedCaptureTime({
-          startAt: project.captureStartAt,
-          intervalMinutes: project.photoIntervalMinutes,
-          now: recomputedNow,
-        }),
-        captureStartAt: project.captureStartAt,
-        photoIntervalMinutes: project.photoIntervalMinutes,
+      const target = nextPermittedCaptureTime({
+        startAt: project.captureStartAt,
+        intervalMinutes: project.photoIntervalMinutes,
+        now: recomputedNow,
+        timeZone: project.timeZone,
+        captureWindowEnabled: project.captureWindowEnabled,
+        captureWindowStartMinutes: project.captureWindowStartMinutes,
+        captureWindowEndMinutes: project.captureWindowEndMinutes,
       });
+      if (target) {
+        this.schedules.set(project.id, {
+          target,
+          captureStartAt: project.captureStartAt,
+          photoIntervalMinutes: project.photoIntervalMinutes,
+          timeZone: project.timeZone,
+          captureWindowEnabled: project.captureWindowEnabled,
+          captureWindowStartMinutes: project.captureWindowStartMinutes,
+          captureWindowEndMinutes: project.captureWindowEndMinutes,
+        });
+      } else {
+        this.schedules.delete(project.id);
+      }
     }
 
     return result;

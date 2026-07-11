@@ -224,4 +224,37 @@ describe("CaptureScheduler", () => {
 
     expect(tick.captures.map((capture) => capture.projectId)).not.toContain(noCamera.id);
   });
+
+  it("always ignores explicit test projects", async () => {
+    let now = new Date("2026-07-10T17:00:00Z");
+    const startAt = new Date("2026-07-10T16:59:00Z");
+
+    const testProject = await project({
+      captureStartAt: startAt,
+      photoIntervalMinutes: 1,
+      captureEnabled: true,
+      isTestProject: true,
+      cameraDevice: "/dev/video-should-not-open",
+    });
+
+    const capturedProjectIds: string[] = [];
+    const scheduler = new CaptureScheduler({
+      prisma,
+      captureProjectPhoto: async (projectId) => {
+        capturedProjectIds.push(projectId);
+        const photo = await createFakePhoto(prisma, projectId);
+        return { photo, savedPath: photo.path };
+      },
+      now: () => now,
+      logger: silentLogger(),
+    });
+
+    await scheduler.tick();
+    now = new Date(now.getTime() + 5 * 60_000);
+    const tick = await scheduler.tick();
+
+    expect(tick.dueCount).toBe(0);
+    expect(capturedProjectIds).not.toContain(testProject.id);
+    await expect(prisma.captureRun.count({ where: { projectId: testProject.id } })).resolves.toBe(0);
+  });
 });

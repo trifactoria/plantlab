@@ -9,6 +9,11 @@ export async function createTestProject(
   overrides: Partial<{
     name: string;
     captureEnabled: boolean;
+    isTestProject: boolean;
+    timeZone: string;
+    captureWindowEnabled: boolean;
+    captureWindowStartMinutes: number | null;
+    captureWindowEndMinutes: number | null;
     captureStartAt: Date;
     photoIntervalMinutes: number;
     cameraDevice: string | null;
@@ -28,6 +33,11 @@ export async function createTestProject(
       photoIntervalMinutes: overrides.photoIntervalMinutes ?? 30,
       captureStartAt: overrides.captureStartAt ?? new Date(),
       captureEnabled: overrides.captureEnabled ?? true,
+      isTestProject: overrides.isTestProject ?? false,
+      timeZone: overrides.timeZone ?? "America/New_York",
+      captureWindowEnabled: overrides.captureWindowEnabled ?? false,
+      captureWindowStartMinutes: overrides.captureWindowStartMinutes ?? null,
+      captureWindowEndMinutes: overrides.captureWindowEndMinutes ?? null,
       localPhotoDirectory,
       cameraDevice: overrides.cameraDevice === undefined ? `/dev/video-vitest-${id}` : overrides.cameraDevice,
     },

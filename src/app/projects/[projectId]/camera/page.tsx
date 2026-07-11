@@ -3,7 +3,8 @@ import { notFound } from "next/navigation";
 import { CameraSetupPanel } from "@/components/CameraSetupPanel";
 import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
-import { nextAlignedCaptureTime } from "@/lib/schedule";
+import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
+import { formatDateTimeInZone } from "@/lib/timezone";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -20,10 +21,15 @@ export default async function ProjectCameraPage({ params }: PageProps) {
     notFound();
   }
 
-  const nextCaptureAt = nextAlignedCaptureTime({
+  const nextCaptureAt = nextPermittedCaptureTime({
     startAt: project.captureStartAt,
     intervalMinutes: project.photoIntervalMinutes,
+    timeZone: project.timeZone,
+    captureWindowEnabled: project.captureWindowEnabled,
+    captureWindowStartMinutes: project.captureWindowStartMinutes,
+    captureWindowEndMinutes: project.captureWindowEndMinutes,
   });
+  const insideWindow = isInsideCaptureWindow(new Date(), project);
   const production =
     process.env.NODE_ENV === "production" &&
     process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI !== "1";
@@ -35,6 +41,11 @@ export default async function ProjectCameraPage({ params }: PageProps) {
           <Link href={`/projects/${project.id}`} className="text-sm font-semibold text-emerald-700">
             {project.name}
           </Link>
+          {project.isTestProject ? (
+            <span className="mt-3 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900">
+              Test project
+            </span>
+          ) : null}
           <h1 className="mt-3 text-3xl font-semibold text-stone-950">Camera Setup</h1>
         </div>
       </header>
@@ -45,6 +56,24 @@ export default async function ProjectCameraPage({ params }: PageProps) {
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
               <h2 className="text-lg font-semibold text-stone-950">Schedule Overview</h2>
               <dl className="mt-4 grid gap-3 text-sm">
+                <div>
+                  <dt className="font-medium text-stone-950">Timezone</dt>
+                  <dd className="text-stone-600">{project.timeZone}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Current project time</dt>
+                  <dd className="text-stone-600">{formatDateTimeInZone(new Date(), project.timeZone)}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Capture hours</dt>
+                  <dd className="text-stone-600">{captureWindowLabel(project)}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Capture window status</dt>
+                  <dd className={insideWindow ? "text-emerald-700" : "text-amber-700"}>
+                    {insideWindow ? "Inside capture window" : "Outside capture window"}
+                  </dd>
+                </div>
                 <div>
                   <dt className="font-medium text-stone-950">Selected camera</dt>
                   <dd className="text-stone-600">
@@ -67,7 +96,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Next aligned capture</dt>
-                  <dd className="text-stone-600">{formatDateTime(nextCaptureAt)}</dd>
+                  <dd className="text-stone-600">{nextCaptureAt ? formatDateTimeInZone(nextCaptureAt, project.timeZone) : "None found"}</dd>
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Capture service (long-term)</dt>
@@ -96,8 +125,13 @@ export default async function ProjectCameraPage({ params }: PageProps) {
               cameraProfileId={project.cameraProfileId}
               photoIntervalMinutes={project.photoIntervalMinutes}
               captureStartAt={project.captureStartAt.toISOString()}
+              timeZone={project.timeZone}
+              captureWindowEnabled={project.captureWindowEnabled}
+              captureWindowStartMinutes={project.captureWindowStartMinutes}
+              captureWindowEndMinutes={project.captureWindowEndMinutes}
               localPhotoDirectory={project.localPhotoDirectory}
               initialCaptureEnabled={project.captureEnabled}
+              isTestProject={project.isTestProject}
             />
           )}
         </div>

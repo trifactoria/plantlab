@@ -24,7 +24,7 @@ export async function GET() {
     })),
   );
 
-  const activeProjects = projectStatuses.filter((status) => status.captureEnabled && status.eligible);
+  const activeProjects = projectStatuses.filter((status) => status.captureEnabled && status.eligible && !status.isTestProject);
   const nextCaptureTimes = activeProjects
     .map((status) => status.nextCaptureAt)
     .filter((value): value is string => value !== null)

@@ -3,12 +3,19 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
+import {
+  CaptureScheduleFields,
+  captureSchedulePayload,
+  initialScheduleValue,
+  type CaptureScheduleValue,
+} from "@/components/CaptureScheduleFields";
 import { FocusInspector } from "@/components/FocusInspector";
 import { detectAutofocusSupport, type AutofocusPreviousState } from "@/lib/autofocus";
 import type { CalibrationResult } from "@/lib/calibration";
 import { matchSavedCamera } from "@/lib/cameraIdentityMatch";
 import { validateCaptureConfig } from "@/lib/captureValidation";
 import type { ResolutionTestResult } from "@/lib/resolutionCompare";
+import { safeTimeInputToMinutes } from "@/lib/timezone";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -53,8 +60,13 @@ export function CameraSetupPanel({
   cameraProfileId,
   photoIntervalMinutes,
   captureStartAt,
+  timeZone,
+  captureWindowEnabled,
+  captureWindowStartMinutes,
+  captureWindowEndMinutes,
   localPhotoDirectory,
   initialCaptureEnabled,
+  isTestProject,
 }: {
   projectId: string;
   cameraDevice: string | null;
@@ -63,8 +75,13 @@ export function CameraSetupPanel({
   cameraProfileId: string | null;
   photoIntervalMinutes: number;
   captureStartAt: string;
+  timeZone: string;
+  captureWindowEnabled: boolean;
+  captureWindowStartMinutes: number | null;
+  captureWindowEndMinutes: number | null;
   localPhotoDirectory: string;
   initialCaptureEnabled: boolean;
+  isTestProject: boolean;
 }) {
   const router = useRouter();
   const [savingCamera, setSavingCamera] = useState(false);
@@ -74,6 +91,16 @@ export function CameraSetupPanel({
   const [movedCameraMatch, setMovedCameraMatch] = useState<{ device: string } | null>(null);
   const [updatingMovedCamera, setUpdatingMovedCamera] = useState(false);
   const [captureEnabled, setCaptureEnabled] = useState(initialCaptureEnabled);
+  const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
+    initialScheduleValue({
+      timeZone,
+      photoIntervalMinutes,
+      captureStartAt,
+      captureWindowEnabled,
+      captureWindowStartMinutes,
+      captureWindowEndMinutes,
+    }),
+  );
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [captureToggleError, setCaptureToggleError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -134,10 +161,15 @@ export function CameraSetupPanel({
   }
 
   const captureErrors = validateCaptureConfig({
-    captureStartAt,
-    photoIntervalMinutes,
+    captureStartAt: schedule.captureStartAt,
+    photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
     cameraDevice: selectedCameraDevice || null,
     localPhotoDirectory,
+    timeZone: schedule.timeZone,
+    captureWindowEnabled: schedule.captureWindowEnabled,
+    captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
+    captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
+    isTestProject,
   });
 
   async function saveCamera(event: FormEvent<HTMLFormElement>) {
@@ -183,7 +215,10 @@ export function CameraSetupPanel({
     const response = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ captureEnabled }),
+      body: JSON.stringify({
+        ...captureSchedulePayload(schedule),
+        captureEnabled: isTestProject ? false : captureEnabled,
+      }),
     });
     const payload = (await response.json()) as { error?: string };
     setSavingSchedule(false);
@@ -995,9 +1030,17 @@ export function CameraSetupPanel({
               type="checkbox"
               checked={captureEnabled}
               onChange={(event) => setCaptureEnabled(event.target.checked)}
+              disabled={isTestProject}
             />
             Enable scheduled capture
           </label>
+          {isTestProject ? (
+            <p className="text-sm text-amber-800">Test projects cannot enable scheduled capture.</p>
+          ) : null}
+          <CaptureScheduleFields
+            value={schedule}
+            onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))}
+          />
           {captureEnabled && captureErrors.length > 0 ? (
             <ul className="list-disc pl-5 text-sm text-amber-800">
               {captureErrors.map((message) => (

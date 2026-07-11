@@ -7,6 +7,7 @@ import type { CameraProfile, Photo, Project } from "@prisma/client";
 import { withCameraLock } from "./cameraLock";
 import { formatLocalTimestamp } from "./photos";
 import { prisma } from "./prisma";
+import { testCameraMockModeEnabled, testCaptureMockModeEnabled } from "./testProjectSafety";
 import { applyCameraControls } from "./v4l2";
 
 type CameraSettings = {
@@ -205,6 +206,10 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
     throw new Error(`Project not found: ${projectId}`);
   }
 
+  if (project.isTestProject && !testCaptureMockModeEnabled()) {
+    throw new Error("Test projects cannot access physical camera hardware.");
+  }
+
   const settings = getCameraSettings(project);
   await mkdir(project.localPhotoDirectory, { recursive: true });
 
@@ -276,6 +281,10 @@ export async function capturePreviewImage(projectId: string) {
 
   if (!project) {
     throw new Error(`Project not found: ${projectId}`);
+  }
+
+  if (project.isTestProject && !testCameraMockModeEnabled()) {
+    throw new Error("Test projects cannot access physical camera hardware.");
   }
 
   return capturePreviewFrame(getCameraSettings(project));

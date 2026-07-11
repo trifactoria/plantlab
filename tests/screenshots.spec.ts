@@ -1,13 +1,17 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { test, type Page } from "@playwright/test";
-import { disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
+import { cleanupVisualData, disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
 import { goto } from "./helpers/navigation";
 
 const viewports = [
   { name: "desktop", width: 1440, height: 1000 },
   { name: "laptop", width: 1024, height: 768 },
 ];
+
+test.afterEach(async () => {
+  await cleanupVisualData();
+});
 
 test.afterAll(async () => {
   await disconnectPrisma();
@@ -32,9 +36,12 @@ for (const viewport of viewports) {
 
     await goto(page, "/");
     await capture(page, `${prefix}-home`);
+    await capture(page, `${prefix}-project-create-schedule-timezone`);
 
     await goto(page, `/projects/${ids.projectId}`);
     await capture(page, `${prefix}-project-dashboard`);
+    await capture(page, `${prefix}-project-outside-capture-window`);
+    await capture(page, `${prefix}-test-project-badge`);
     await capture(page, `${prefix}-manual-photo-upload`);
 
     await page.getByTestId("grid-cell-2-2").click();
@@ -43,6 +50,8 @@ for (const viewport of viewports) {
 
     await goto(page, `/projects/${ids.projectId}/settings`);
     await capture(page, `${prefix}-project-settings`);
+    await capture(page, `${prefix}-project-settings-capture-hours`);
+    await capture(page, `${prefix}-schedule-summary-next-five`);
 
     await page.getByRole("button", { name: "Delete Project" }).click();
     await capture(page, `${prefix}-delete-confirmation`);
@@ -54,12 +63,16 @@ for (const viewport of viewports) {
     await goto(page, `/projects/${ids.projectId}/timeline`);
     await capture(page, `${prefix}-project-timeline`);
 
+    await goto(page, `/projects/${ids.projectId}/comparison`);
+    await capture(page, `${prefix}-project-comparison`);
+
     await goto(page, `/photos/${ids.photoId}`);
     await capture(page, `${prefix}-photo-detail`);
+    await capture(page, `${prefix}-quick-milestone-entry`);
     await capture(page, `${prefix}-photo-detail-plant-crops`);
     await capture(page, `${prefix}-edit-photo-state`);
 
-    await page.getByRole("combobox").selectOption(ids.secondPlantId);
+    await page.getByLabel("Add plant crop").selectOption(ids.secondPlantId);
     await page.getByRole("button", { name: "Set Plant Crop" }).click();
     await capture(page, `${prefix}-plant-crop-editor`);
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -72,6 +85,8 @@ for (const viewport of viewports) {
 
     await goto(page, `/plants/${ids.plantId}`);
     await capture(page, `${prefix}-plant-detail`);
+    await capture(page, `${prefix}-plant-milestone-progress`);
+    await capture(page, `${prefix}-harvest-result-form`);
     await capture(page, `${prefix}-plant-visual-history`);
     await capture(page, `${prefix}-edit-plant-state`);
 

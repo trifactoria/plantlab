@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cropData, cropFromBody } from "@/lib/crops";
+import { warningNeedsConfirmation } from "@/lib/experiment";
 import {
   badRequest,
   notFound,
@@ -67,16 +68,59 @@ export async function PATCH(request: Request, context: Context) {
     }
 
     const nextCropData = nextPhotoId === null ? cropData(null) : cropData(crop);
+    const milestoneId =
+      body?.milestoneId === undefined ? undefined : optionalString(body.milestoneId);
+    const milestone = milestoneId
+      ? await prisma.projectMilestone.findUnique({ where: { id: milestoneId } })
+      : null;
+
+    if (milestoneId && !milestone) {
+      return badRequest("milestoneId is invalid");
+    }
+
+    if (milestone && milestone.projectId !== existingEvent.projectId) {
+      return badRequest("milestoneId belongs to a different project");
+    }
+
+    const nextTimestamp =
+      body?.timestamp === undefined
+        ? undefined
+        : optionalDate(body.timestamp, existingEvent.timestamp);
+    const effectiveTimestamp = nextTimestamp ?? existingEvent.timestamp;
+    const warnings: string[] = [];
+    const project = await prisma.project.findUnique({ where: { id: existingEvent.projectId } });
+    if (project?.plantedAt && effectiveTimestamp.getTime() < project.plantedAt.getTime()) {
+      warnings.push("Event timestamp is before the project planting time.");
+    }
+    if (milestone) {
+      const duplicate = await prisma.plantEvent.findFirst({
+        where: {
+          plantId: existingEvent.plantId,
+          milestoneId: milestone.id,
+          id: { not: existingEvent.id },
+        },
+      });
+      if (duplicate) {
+        warnings.push("This plant already has this milestone.");
+      }
+    }
+
+    if (warningNeedsConfirmation(warnings, body?.confirmWarnings === true)) {
+      return NextResponse.json({ warnings }, { status: 409 });
+    }
 
     const event = await prisma.plantEvent.update({
       where: { id: eventId },
       data: {
-        type: body?.type === undefined ? undefined : requiredString(body.type, "type"),
+        milestoneId,
+        type:
+          milestone !== null
+            ? milestone.label
+            : body?.type === undefined
+              ? undefined
+              : requiredString(body.type, "type"),
         notes: body?.notes === undefined ? undefined : optionalString(body.notes),
-        timestamp:
-          body?.timestamp === undefined
-            ? undefined
-            : optionalDate(body.timestamp, existingEvent.timestamp),
+        timestamp: nextTimestamp,
         photoId: nextPhotoId,
         ...nextCropData,
       },

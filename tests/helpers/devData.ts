@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import sharp from "sharp";
@@ -17,6 +17,12 @@ export const DEV_IDS = {
   plantCropOlderId: "dev-visual-plant-crop-older",
   plantCropId: "dev-visual-plant-crop",
   plantCropSecondId: "dev-visual-plant-crop-2",
+  milestoneFirstVisibleId: "dev-milestone-first-visible",
+  milestoneCotyledonsId: "dev-milestone-cotyledons",
+  milestoneFirstTrueLeafId: "dev-milestone-first-true-leaf",
+  milestoneRootShoulderId: "dev-milestone-root-shoulder",
+  milestoneHarvestReadyId: "dev-milestone-harvest-ready",
+  milestoneHarvestedId: "dev-milestone-harvested",
 };
 
 const TINY_JPEG_BASE64 =
@@ -95,13 +101,18 @@ export async function seedVisualData() {
       gridHeight: 3,
       photoIntervalMinutes: 30,
       captureStartAt: new Date("2026-07-10T13:00:00.000Z"),
-      captureEnabled: true,
+      captureEnabled: false,
+      timeZone: "America/New_York",
+      captureWindowEnabled: true,
+      captureWindowStartMinutes: 20 * 60,
+      captureWindowEndMinutes: 6 * 60,
+      isTestProject: true,
       plantedAt: new Date("2026-07-09T12:00:00.000Z"),
       localPhotoDirectory: photoDirectory,
-      cameraDevice: "/dev/video-test",
-      cameraName: "Mock USB Camera",
-      cameraStableId: "usb:1234:5678:MOCKSERIAL",
-      cameraProfileId: DEV_IDS.profileId,
+      cameraDevice: null,
+      cameraName: null,
+      cameraStableId: null,
+      cameraProfileId: null,
       plants: {
         create: [
           {
@@ -155,6 +166,17 @@ export async function seedVisualData() {
     },
   });
 
+  await prisma.projectMilestone.createMany({
+    data: [
+      { id: DEV_IDS.milestoneFirstVisibleId, projectId: DEV_IDS.projectId, key: "first_visible", label: "First visible", sortOrder: 1 },
+      { id: DEV_IDS.milestoneCotyledonsId, projectId: DEV_IDS.projectId, key: "cotyledons_open", label: "Cotyledons open", sortOrder: 2 },
+      { id: DEV_IDS.milestoneFirstTrueLeafId, projectId: DEV_IDS.projectId, key: "first_true_leaf", label: "First true leaf", sortOrder: 3 },
+      { id: DEV_IDS.milestoneRootShoulderId, projectId: DEV_IDS.projectId, key: "root_shoulder_visible", label: "Root shoulder visible", sortOrder: 4 },
+      { id: DEV_IDS.milestoneHarvestReadyId, projectId: DEV_IDS.projectId, key: "harvest_ready", label: "Harvest ready", sortOrder: 5 },
+      { id: DEV_IDS.milestoneHarvestedId, projectId: DEV_IDS.projectId, key: "harvested", label: "Harvested", sortOrder: 6 },
+    ],
+  });
+
   await prisma.plantEvent.createMany({
     data: [
       {
@@ -162,7 +184,8 @@ export async function seedVisualData() {
         projectId: DEV_IDS.projectId,
         plantId: DEV_IDS.plantId,
         photoId: DEV_IDS.photoId,
-        type: "Germinated",
+        milestoneId: DEV_IDS.milestoneFirstVisibleId,
+        type: "First visible",
         notes: "First visible sprout.",
         timestamp: new Date("2026-07-10T13:30:00.000Z"),
         cropX: 0,
@@ -175,11 +198,32 @@ export async function seedVisualData() {
         projectId: DEV_IDS.projectId,
         plantId: DEV_IDS.plantId,
         photoId: null,
-        type: "Cotyledons",
+        milestoneId: DEV_IDS.milestoneCotyledonsId,
+        type: "Cotyledons open",
         notes: "Recorded from manual inspection.",
         timestamp: new Date("2026-07-10T15:00:00.000Z"),
       },
+      {
+        id: "dev-visual-event-first-true-leaf",
+        projectId: DEV_IDS.projectId,
+        plantId: DEV_IDS.plantId,
+        photoId: DEV_IDS.secondPhotoId,
+        milestoneId: DEV_IDS.milestoneFirstTrueLeafId,
+        type: "First true leaf",
+        notes: null,
+        timestamp: new Date("2026-07-11T14:00:00.000Z"),
+      },
     ],
+  });
+
+  await prisma.plantHarvestResult.create({
+    data: {
+      plantId: DEV_IDS.plantId,
+      harvestedAt: new Date("2026-07-20T14:00:00.000Z"),
+      rootWeightGrams: 18.5,
+      rootDiameterMm: 24,
+      acceptable: true,
+    },
   });
 
   // Visual history fixtures for DEV_IDS.plantId across all three seeded
@@ -231,6 +275,13 @@ export async function seedVisualData() {
 
 export async function disconnectPrisma() {
   await prisma.$disconnect();
+}
+
+export async function cleanupVisualData() {
+  const photoDirectory = path.join(process.cwd(), "data", "playwright", "photos");
+  await prisma.project.deleteMany({ where: { id: DEV_IDS.projectId } });
+  await prisma.cameraProfile.deleteMany({ where: { id: DEV_IDS.profileId } });
+  await rm(photoDirectory, { recursive: true, force: true }).catch(() => undefined);
 }
 
 export async function mockCameraApis(page: Page) {
@@ -315,17 +366,22 @@ export async function mockCameraApis(page: Page) {
           version: null,
           lastError: null,
         },
-        activeProjectCount: 1,
-        nextScheduledCaptureAt: now,
+        activeProjectCount: 0,
+        nextScheduledCaptureAt: null,
         projects: [
           {
             projectId: DEV_IDS.projectId,
             name: "Playwright Radish Study",
-            captureEnabled: true,
-            eligible: true,
-            errors: [],
-            nextCaptureAt: now,
-            lastSuccessfulCaptureAt: now,
+            captureEnabled: false,
+            eligible: false,
+            errors: ["Test projects cannot enable scheduled capture."],
+            nextCaptureAt: null,
+            timeZone: "America/New_York",
+            captureWindow: "8:00 PM to 6:00 AM America/New_York time",
+            projectLocalTime: now,
+            insideCaptureWindow: false,
+            isTestProject: true,
+            lastSuccessfulCaptureAt: null,
             lastError: null,
           },
         ],

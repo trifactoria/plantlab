@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
+import { cleanupVisualData, disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
 import { goto } from "./helpers/navigation";
+
+test.afterEach(async () => {
+  await cleanupVisualData();
+});
 
 test.afterAll(async () => {
   await disconnectPrisma();
@@ -20,7 +24,9 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByText("Create and use a PlantLab photo folder")).toBeVisible();
   await expect(page.getByLabel("Planting date and time")).toBeVisible();
   await expect(page.getByText("Planting date/time unknown")).toBeVisible();
-  await expect(page.getByLabel("Schedule starting date and time")).toBeVisible();
+  await expect(page.getByLabel("Timezone")).toBeVisible();
+  await expect(page.getByLabel("Schedule anchor")).toBeVisible();
+  await expect(page.getByText(/Photos will be taken every 30 minutes/)).toBeVisible();
   await page.getByRole("button", { name: "Create Project" }).click();
   await expect(page.getByRole("heading", { name: "Playwright Auto Folder Project" })).toBeVisible();
   const createdProjectId = page.url().split("/").filter(Boolean).at(-1);
@@ -66,16 +72,19 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Save Settings" })).toBeVisible();
   await expect(page.getByLabel("Camera")).toContainText("Mock USB Camera");
   await expect(page.getByLabel("Planting date and time")).toBeVisible();
-  await expect(page.getByLabel("Schedule starting date and time")).toBeVisible();
+  await expect(page.getByLabel("Timezone")).toBeVisible();
+  await expect(page.getByLabel("Schedule anchor")).toBeVisible();
 
   await goto(page, `/projects/${ids.projectId}/camera`);
   await expect(page.getByRole("heading", { name: "Camera Setup" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Preview and Focus" })).toBeVisible();
   await expect(page.getByText("Preview is idle")).toBeVisible();
   await expect(page.getByRole("button", { name: "Autofocus Now" })).toBeVisible();
-  await expect(page.getByLabel("Input format")).toContainText("MJPG");
-  await expect(page.getByLabel("Resolution")).toContainText("1920 x 1080");
-  await expect(page.getByLabel("Camera profile")).toContainText("Mock Germination Profile");
+  await expect(page.getByText("Test project", { exact: true })).toBeVisible();
+  await expect(page.getByText("Test projects cannot enable scheduled capture.")).toBeVisible();
+  await expect(page.getByLabel("Input format")).toBeVisible();
+  await expect(page.getByLabel("Resolution")).toBeVisible();
+  await expect(page.getByLabel("Camera profile")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Quick Calibration" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Auto Calibrate" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Capture Schedule" })).toBeVisible();
@@ -87,7 +96,7 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await goto(page, `/projects/${ids.projectId}/timeline`);
   await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
   await expect(page.getByText("First visible").first()).toBeVisible();
-  await expect(page.getByText("Germinated").first()).toBeVisible();
+  await expect(page.getByText("First visible").first()).toBeVisible();
 
   await goto(page, `/projects/${ids.projectId}/gallery/2026-07`);
   await expect(page.getByRole("heading", { name: "July 2026" })).toBeVisible();
@@ -100,6 +109,7 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await goto(page, `/photos/${ids.photoId}`);
   await expect(page.getByRole("heading", { name: "Edit Photo" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Linked Events" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Quick Milestone Entry" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Plant Crops" })).toBeVisible();
   await expect(page.getByText("Radish A").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit Crop" })).toBeVisible();
@@ -113,6 +123,7 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await goto(page, `/plants/${ids.plantId}`);
+  await expect(page.getByRole("heading", { name: "Milestone Progress" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Visual History" })).toBeVisible();
   await expect(page.getByText("Frame 1 of 3")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Edit Plant" })).toBeVisible();
@@ -187,7 +198,7 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
 
   // Set a new plant crop from the photo page, using the crop editor.
   await goto(page, `/photos/${ids.photoId}`);
-  await page.getByRole("combobox").selectOption(ids.secondPlantId);
+  await page.getByLabel("Add plant crop").selectOption(ids.secondPlantId);
   await page.getByRole("button", { name: "Set Plant Crop" }).click();
   await expect(page.getByText("Set Plant Crop - Radish B")).toBeVisible();
   await expect(page.getByText("Apply crop to:")).toBeVisible();
@@ -240,7 +251,7 @@ test("plant visual history: crop editor, scrubber, playback, and events", async 
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("Frame 2 of 3")).toBeVisible();
   await expect(page.getByText("Events on this frame")).toBeVisible();
-  await expect(page.getByText("Germinated").first()).toBeVisible();
+  await expect(page.getByText("First visible").first()).toBeVisible();
 
   await page.getByRole("button", { name: "Previous" }).click();
   await expect(page.getByText("Frame 1 of 3")).toBeVisible();
@@ -305,4 +316,38 @@ test("crop shape controls preserve preview proportions", async ({ page }) => {
   await page.getByRole("button", { name: "Free" }).click();
   await expect(page.getByText(/Existing saved crops keep/)).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
+});
+
+test("experiment milestones, comparison, and harvest result flows", async ({ page }) => {
+  await mockCameraApis(page);
+  const ids = await seedVisualData();
+
+  await goto(page, `/photos/${ids.photoId}`);
+  const quick = page.getByTestId("quick-milestone-entry").first();
+  await quick.getByLabel("Plant").selectOption(ids.secondPlantId);
+  await quick.getByRole("button", { name: "First visible" }).click();
+  await expect(quick.getByText("Event saved.")).toBeVisible();
+  await quick.getByRole("button", { name: /First visible/ }).click();
+  await expect(quick.getByText(/already has this milestone/)).toBeVisible();
+
+  await goto(page, `/projects/${ids.projectId}/comparison`);
+  await expect(page.getByRole("heading", { name: "Comparison" })).toBeVisible();
+  await expect(page.getByText("Project planting date").first()).toBeVisible();
+  await page.getByRole("link", { name: "First true leaf" }).click();
+  await expect(page).toHaveURL(/sort=first_true_leaf/);
+
+  await goto(page, `/projects/${ids.projectId}/settings`);
+  await expect(page.getByRole("heading", { name: "Milestones" })).toBeVisible();
+  const settings = page.getByTestId("project-milestone-settings");
+  await settings.locator('input[value="First visible"]').fill("Visible sprout");
+  await settings.getByRole("button", { name: "Save" }).first().click();
+  await expect(settings.getByText("Milestone saved.")).toBeVisible();
+
+  await goto(page, `/plants/${ids.plantId}`);
+  await expect(page.getByText(/g\/day/)).toBeVisible();
+  await page.getByLabel("Root weight grams").fill("20");
+  await page.getByRole("button", { name: "Save Harvest Result" }).click();
+  await expect(page.getByText("This plant has a harvest result without a Harvested event.")).toBeVisible();
+  await page.getByRole("button", { name: "Save Anyway" }).click();
+  await expect(page.getByText("Harvest result saved.")).toBeVisible();
 });

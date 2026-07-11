@@ -2,8 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EventActions } from "@/components/EventActions";
 import { dayKey, dayLabel } from "@/lib/gallery";
-import { formatDateTime } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
+import { formatDateTimeInZone } from "@/lib/timezone";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -84,7 +84,7 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
 
   const grouped = new Map<string, TimelineEntry[]>();
   for (const entry of entries) {
-    const key = dayKey(entry.timestamp);
+    const key = dayKey(entry.timestamp, project.timeZone);
     grouped.set(key, [...(grouped.get(key) ?? []), entry]);
   }
 
@@ -118,7 +118,7 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
           ) : (
             Array.from(grouped.entries()).map(([key, dayEntries]) => (
               <section key={key} className="grid gap-3">
-                <h2 className="text-lg font-semibold text-stone-950">{dayLabel(key)}</h2>
+                <h2 className="text-lg font-semibold text-stone-950">{dayLabel(key, project.timeZone)}</h2>
                 {dayEntries.map((entry) => (
                   <article
                     key={entry.id}
@@ -137,7 +137,7 @@ export default async function ProjectTimelinePage({ params, searchParams }: Page
                           {entry.kind === "start" ? entry.label : entry.type}
                         </h3>
                         <p className="text-sm text-stone-500">
-                          {formatDateTime(entry.timestamp)}
+                          {formatDateTimeInZone(entry.timestamp, project.timeZone)}
                         </p>
                         {entry.kind === "start" ? (
                           <p className="mt-2 text-sm text-emerald-900">Plant starting entry</p>

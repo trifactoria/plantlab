@@ -1,61 +1,55 @@
+import {
+  dayLabelInZone,
+  localDateKey,
+  localDayRangeUtc,
+  localMonthKey,
+  localMonthRangeUtc,
+  monthLabelInZone,
+} from "./timezone";
+
 export type GalleryPhoto = {
   id: string;
   timestamp: Date;
 };
 
-export function monthKey(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+export function monthKey(date: Date, timeZone: string) {
+  return localMonthKey(date, timeZone);
 }
 
-export function dayKey(date: Date) {
-  return `${monthKey(date)}-${String(date.getDate()).padStart(2, "0")}`;
+export function dayKey(date: Date, timeZone: string) {
+  return localDateKey(date, timeZone);
 }
 
-export function monthLabel(key: string) {
-  const [year, month] = key.split("-").map(Number);
-  return new Intl.DateTimeFormat("en", {
-    month: "long",
-    year: "numeric",
-  }).format(new Date(year, month - 1, 1));
+export function monthLabel(key: string, timeZone: string) {
+  return monthLabelInZone(key, timeZone);
 }
 
-export function dayLabel(key: string) {
-  const [year, month, day] = key.split("-").map(Number);
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "full",
-  }).format(new Date(year, month - 1, day));
+export function dayLabel(key: string, timeZone: string) {
+  return dayLabelInZone(key, timeZone);
 }
 
-export function localDayRange(key: string) {
-  const [year, month, day] = key.split("-").map(Number);
-  const start = new Date(year, month - 1, day);
-  const end = new Date(year, month - 1, day + 1);
-
-  return { start, end };
+export function localDayRange(key: string, timeZone: string) {
+  return localDayRangeUtc(key, timeZone);
 }
 
-export function localMonthRange(key: string) {
-  const [year, month] = key.split("-").map(Number);
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-
-  return { start, end };
+export function localMonthRange(key: string, timeZone: string) {
+  return localMonthRangeUtc(key, timeZone);
 }
 
-export function groupPhotosByMonth(photos: GalleryPhoto[]) {
+export function groupPhotosByMonth(photos: GalleryPhoto[], timeZone: string) {
   const groups = new Map<string, GalleryPhoto[]>();
 
   for (const photo of photos) {
-    const key = monthKey(photo.timestamp);
+    const key = monthKey(photo.timestamp, timeZone);
     groups.set(key, [...(groups.get(key) ?? []), photo]);
   }
 
   return Array.from(groups.entries())
     .map(([key, monthPhotos]) => {
-      const days = new Set(monthPhotos.map((photo) => dayKey(photo.timestamp)));
+      const days = new Set(monthPhotos.map((photo) => dayKey(photo.timestamp, timeZone)));
       return {
         key,
-        label: monthLabel(key),
+        label: monthLabel(key, timeZone),
         photoCount: monthPhotos.length,
         dayCount: days.size,
         representativePhoto: monthPhotos[0],
@@ -64,11 +58,11 @@ export function groupPhotosByMonth(photos: GalleryPhoto[]) {
     .sort((a, b) => b.key.localeCompare(a.key));
 }
 
-export function groupPhotosByDay(photos: GalleryPhoto[]) {
+export function groupPhotosByDay(photos: GalleryPhoto[], timeZone: string) {
   const groups = new Map<string, GalleryPhoto[]>();
 
   for (const photo of photos) {
-    const key = dayKey(photo.timestamp);
+    const key = dayKey(photo.timestamp, timeZone);
     groups.set(key, [...(groups.get(key) ?? []), photo]);
   }
 
@@ -81,7 +75,7 @@ export function groupPhotosByDay(photos: GalleryPhoto[]) {
 
       return {
         key,
-        label: dayLabel(key),
+        label: dayLabel(key, timeZone),
         photoCount: sorted.length,
         representativePhoto: sorted[0],
         firstCaptureAt: last.timestamp,

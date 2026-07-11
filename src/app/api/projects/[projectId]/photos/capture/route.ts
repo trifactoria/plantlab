@@ -36,7 +36,11 @@ export async function POST(request: Request, context: Context) {
 
     const message =
       error instanceof Error ? error.message : "Could not capture photo";
-    const status = message.startsWith("Project not found") ? 404 : 400;
+    const status = message.startsWith("Project not found")
+      ? 404
+      : message.includes("physical camera hardware")
+        ? 403
+        : 400;
 
     return NextResponse.json({ error: message }, { status });
   }

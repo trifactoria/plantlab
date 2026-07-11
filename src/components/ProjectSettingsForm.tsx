@@ -3,9 +3,16 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
+import {
+  CaptureScheduleFields,
+  captureSchedulePayload,
+  initialScheduleValue,
+  type CaptureScheduleValue,
+} from "@/components/CaptureScheduleFields";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
 import { validateCaptureConfig } from "@/lib/captureValidation";
 import { toDateTimeLocal } from "@/lib/format";
+import { safeTimeInputToMinutes } from "@/lib/timezone";
 
 type ProjectSettings = {
   id: string;
@@ -16,6 +23,11 @@ type ProjectSettings = {
   photoIntervalMinutes: number;
   captureStartAt: string;
   captureEnabled: boolean;
+  timeZone: string;
+  captureWindowEnabled: boolean;
+  captureWindowStartMinutes: number | null;
+  captureWindowEndMinutes: number | null;
+  isTestProject: boolean;
   plantedAt: string | null;
   localPhotoDirectory: string;
   cameraDevice: string | null;
@@ -32,17 +44,28 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cameraDevice, setCameraDevice] = useState(project.cameraDevice ?? "");
-  const [photoIntervalMinutes, setPhotoIntervalMinutes] = useState(
-    String(project.photoIntervalMinutes),
+  const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
+    initialScheduleValue({
+      timeZone: project.timeZone,
+      photoIntervalMinutes: project.photoIntervalMinutes,
+      captureStartAt: toDateTimeLocal(project.captureStartAt),
+      captureWindowEnabled: project.captureWindowEnabled,
+      captureWindowStartMinutes: project.captureWindowStartMinutes,
+      captureWindowEndMinutes: project.captureWindowEndMinutes,
+    }),
   );
-  const [captureStartAt, setCaptureStartAt] = useState(toDateTimeLocal(project.captureStartAt));
   const [captureEnabled, setCaptureEnabled] = useState(project.captureEnabled);
 
   const captureErrors = validateCaptureConfig({
-    captureStartAt: captureStartAt || null,
-    photoIntervalMinutes: Number.parseInt(photoIntervalMinutes, 10),
+    captureStartAt: schedule.captureStartAt || null,
+    photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
     cameraDevice: cameraDevice || null,
     localPhotoDirectory: useCustomFolder ? photoDirectory : project.localPhotoDirectory,
+    timeZone: schedule.timeZone,
+    captureWindowEnabled: schedule.captureWindowEnabled,
+    captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
+    captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
+    isTestProject: project.isTestProject,
   });
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -67,9 +90,8 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
         description: formData.get("description"),
         gridWidth: formData.get("gridWidth"),
         gridHeight: formData.get("gridHeight"),
-        photoIntervalMinutes,
-        captureStartAt: new Date(captureStartAt).toISOString(),
-        captureEnabled,
+        ...captureSchedulePayload(schedule),
+        captureEnabled: project.isTestProject ? false : captureEnabled,
         plantedAt: plantingUnknown
           ? null
           : new Date(String(formData.get("plantedAt"))).toISOString(),
@@ -122,7 +144,7 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           Description
           <textarea className="input min-h-24" name="description" defaultValue={project.description ?? ""} />
         </label>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2">
           <label className="field">
             Grid width
             <input className="input" name="gridWidth" type="number" min="1" defaultValue={project.gridWidth} required />
@@ -130,18 +152,6 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           <label className="field">
             Grid height
             <input className="input" name="gridHeight" type="number" min="1" defaultValue={project.gridHeight} required />
-          </label>
-          <label className="field">
-            Photo interval
-            <input
-              className="input"
-              name="photoIntervalMinutes"
-              type="number"
-              min="1"
-              value={photoIntervalMinutes}
-              onChange={(event) => setPhotoIntervalMinutes(event.target.value)}
-              required
-            />
           </label>
         </div>
 
@@ -167,17 +177,10 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           Planting date/time unknown
         </label>
 
-        <label className="field">
-          Schedule starting date and time
-          <input
-            className="input"
-            name="captureStartAt"
-            type="datetime-local"
-            value={captureStartAt}
-            onChange={(event) => setCaptureStartAt(event.target.value)}
-            required
-          />
-        </label>
+        <CaptureScheduleFields
+          value={schedule}
+          onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))}
+        />
 
         <CameraSelect
           defaultDevice={project.cameraDevice}
@@ -227,9 +230,13 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
               type="checkbox"
               checked={captureEnabled}
               onChange={(event) => setCaptureEnabled(event.target.checked)}
+              disabled={project.isTestProject}
             />
             Enable scheduled capture
           </label>
+          {project.isTestProject ? (
+            <p className="text-sm text-amber-800">Test projects cannot enable scheduled capture.</p>
+          ) : null}
           {captureEnabled && captureErrors.length > 0 ? (
             <ul className="list-disc pl-5 text-sm text-amber-800">
               {captureErrors.map((captureError) => (

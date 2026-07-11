@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { EventActions } from "@/components/EventActions";
+import { QuickMilestoneEntry, type ExistingMilestone, type QuickMilestone } from "@/components/QuickMilestoneEntry";
 import { buildCropThumbnailUrl } from "@/lib/cropThumbnail";
 import { formatDateTime, toDateTimeLocal } from "@/lib/format";
 
@@ -77,6 +78,8 @@ export function PlantVisualHistory({
   initialFrames,
   initialTotalCount,
   initialHasMore,
+  milestones,
+  existingMilestones,
 }: {
   plantId: string;
   projectId: string;
@@ -84,6 +87,8 @@ export function PlantVisualHistory({
   initialFrames: FrameIndexEntry[];
   initialTotalCount: number;
   initialHasMore: boolean;
+  milestones: QuickMilestone[];
+  existingMilestones: ExistingMilestone[];
 }) {
   const router = useRouter();
   const trackRef = useRef<HTMLDivElement>(null);
@@ -369,6 +374,30 @@ export function PlantVisualHistory({
               </button>
             </div>
             <div className="mt-2 grid gap-2">
+              {currentFrame && detail ? (
+                <QuickMilestoneEntry
+                  plants={[{ id: plantId, name: "Current plant" }]}
+                  fixedPlantId={plantId}
+                  milestones={milestones}
+                  photoId={currentFrame.photoId}
+                  photoTimestamp={detail.photo.timestamp}
+                  imageUrl={`/api/photos/${currentFrame.photoId}/file`}
+                  existingMilestones={existingMilestones}
+                  cropByPlantId={{
+                    [plantId]: {
+                      cropX: detail.crop.cropX,
+                      cropY: detail.crop.cropY,
+                      cropWidth: detail.crop.cropWidth,
+                      cropHeight: detail.crop.cropHeight,
+                    },
+                  }}
+                  compact
+                  onSaved={async () => {
+                    fetchedFrameIds.current.delete(currentFrame.photoId);
+                    await loadFrameDetail(currentFrame.photoId);
+                  }}
+                />
+              ) : null}
               {detail && detail.events.length > 0 ? (
                 detail.events.map((event) => (
                   <div key={event.id} className="rounded-md border border-stone-200 p-3">

@@ -8,6 +8,7 @@ coverage
 /data/
 artifacts/screenshots/
 test-results/
+backups/
 prisma/dev.db
 prisma/dev.db-journal
 zips

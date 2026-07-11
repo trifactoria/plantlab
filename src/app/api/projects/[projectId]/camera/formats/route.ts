@@ -3,6 +3,7 @@ import { withCameraLock } from "@/lib/cameraLock";
 import { badRequest, cameraErrorInfo, notFound } from "@/lib/http";
 import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
+import { testCameraMockModeEnabled, testProjectCameraError } from "@/lib/testProjectSafety";
 import { listCameraFormats } from "@/lib/v4l2";
 
 export const runtime = "nodejs";
@@ -24,12 +25,17 @@ export async function GET(_request: Request, context: Context) {
     return notFound("Project not found");
   }
 
+  if (project.isTestProject && !testCameraMockModeEnabled()) {
+    const blocked = testProjectCameraError();
+    return NextResponse.json({ error: blocked.error }, { status: blocked.status });
+  }
+
   const device = process.env.CAMERA_DEVICE || project.cameraDevice;
   if (!device) {
     return badRequest("No camera selected for this project.");
   }
 
-  if (process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1" && device === "/dev/video-test") {
+  if (testCameraMockModeEnabled() && device === "/dev/video-test") {
     return NextResponse.json({
       formats: [
         {

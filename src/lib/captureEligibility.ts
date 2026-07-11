@@ -1,12 +1,8 @@
 import { mkdir } from "node:fs/promises";
-import { validateCaptureConfig } from "./captureValidation";
+import { validateCaptureConfig, type CaptureConfigInput } from "./captureValidation";
 
-export type CaptureEligibilityProject = {
+export type CaptureEligibilityProject = CaptureConfigInput & {
   captureEnabled: boolean;
-  captureStartAt: Date | null;
-  photoIntervalMinutes: number;
-  cameraDevice: string | null;
-  localPhotoDirectory: string | null;
 };
 
 export type CaptureEligibilityResult = {

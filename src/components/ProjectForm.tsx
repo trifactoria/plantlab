@@ -3,8 +3,16 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
+import {
+  CaptureScheduleFields,
+  browserTimeZone,
+  captureSchedulePayload,
+  initialScheduleValue,
+  type CaptureScheduleValue,
+} from "@/components/CaptureScheduleFields";
 import { validateCaptureConfig } from "@/lib/captureValidation";
 import { toDateTimeLocal } from "@/lib/format";
+import { safeTimeInputToMinutes } from "@/lib/timezone";
 
 type ProjectResponse = {
   id: string;
@@ -17,16 +25,25 @@ export function ProjectForm() {
   const [useDefaultFolder, setUseDefaultFolder] = useState(true);
   const [plantingUnknown, setPlantingUnknown] = useState(false);
   const [cameraDevice, setCameraDevice] = useState("");
-  const [photoIntervalMinutes, setPhotoIntervalMinutes] = useState("30");
-  const [captureStartAt, setCaptureStartAt] = useState(toDateTimeLocal(new Date().toISOString()));
+  const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
+    initialScheduleValue({
+      timeZone: browserTimeZone(),
+      photoIntervalMinutes: 30,
+      captureStartAt: toDateTimeLocal(new Date().toISOString()),
+    }),
+  );
   const [localPhotoDirectory, setLocalPhotoDirectory] = useState("");
   const [captureEnabled, setCaptureEnabled] = useState(false);
 
   const captureErrors = validateCaptureConfig({
-    captureStartAt: captureStartAt || null,
-    photoIntervalMinutes: Number.parseInt(photoIntervalMinutes, 10),
+    captureStartAt: schedule.captureStartAt || null,
+    photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
     cameraDevice: cameraDevice || null,
     localPhotoDirectory: useDefaultFolder ? "auto" : localPhotoDirectory,
+    timeZone: schedule.timeZone,
+    captureWindowEnabled: schedule.captureWindowEnabled,
+    captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
+    captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
   });
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -49,8 +66,7 @@ export function ProjectForm() {
         description: formData.get("description"),
         gridWidth: formData.get("gridWidth"),
         gridHeight: formData.get("gridHeight"),
-        photoIntervalMinutes,
-        captureStartAt: new Date(captureStartAt).toISOString(),
+        ...captureSchedulePayload(schedule),
         captureEnabled,
         plantedAt: plantingUnknown
           ? null
@@ -86,7 +102,7 @@ export function ProjectForm() {
         <textarea className="input min-h-24" name="description" />
       </label>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2">
         <label className="field">
           Grid width
           <input className="input" name="gridWidth" type="number" min="1" defaultValue="3" required />
@@ -94,18 +110,6 @@ export function ProjectForm() {
         <label className="field">
           Grid height
           <input className="input" name="gridHeight" type="number" min="1" defaultValue="6" required />
-        </label>
-        <label className="field">
-          Photo interval
-          <input
-            className="input"
-            name="photoIntervalMinutes"
-            type="number"
-            min="1"
-            value={photoIntervalMinutes}
-            onChange={(event) => setPhotoIntervalMinutes(event.target.value)}
-            required
-          />
         </label>
       </div>
 
@@ -129,17 +133,7 @@ export function ProjectForm() {
         Planting date/time unknown
       </label>
 
-      <label className="field">
-        Schedule starting date and time
-        <input
-          className="input"
-          name="captureStartAt"
-          type="datetime-local"
-          value={captureStartAt}
-          onChange={(event) => setCaptureStartAt(event.target.value)}
-          required
-        />
-      </label>
+      <CaptureScheduleFields value={schedule} onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))} />
 
       <CameraSelect onDeviceChange={setCameraDevice} />
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cropData, cropFromBody } from "@/lib/crops";
+import { warningNeedsConfirmation } from "@/lib/experiment";
 import {
   badRequest,
   optionalDate,
@@ -49,9 +50,50 @@ export async function POST(request: Request) {
       return badRequest("photoId belongs to a different project");
     }
 
-    const crop = cropFromBody(body);
+    const requestedCrop = cropFromBody(body);
+    let crop = requestedCrop;
+    if (!crop && body?.copyPlantPhotoCrop === true && photoId) {
+      const plantPhotoCrop = await prisma.plantPhotoCrop.findUnique({
+        where: { plantId_photoId: { plantId, photoId } },
+        select: { cropX: true, cropY: true, cropWidth: true, cropHeight: true },
+      });
+      crop = plantPhotoCrop ?? undefined;
+    }
+
     if (crop && !photoId) {
       return badRequest("A crop can only be saved when the event is linked to a photo.");
+    }
+
+    const milestoneId = optionalString(body?.milestoneId);
+    const milestone = milestoneId
+      ? await prisma.projectMilestone.findUnique({ where: { id: milestoneId } })
+      : null;
+
+    if (milestoneId && !milestone) {
+      return badRequest("milestoneId is invalid");
+    }
+
+    if (milestone && milestone.projectId !== plant.projectId) {
+      return badRequest("milestoneId belongs to a different project");
+    }
+
+    const timestamp = optionalDate(body?.timestamp, photo?.timestamp ?? new Date());
+    const warnings: string[] = [];
+    const project = await prisma.project.findUnique({ where: { id: plant.projectId } });
+    if (project?.plantedAt && timestamp.getTime() < project.plantedAt.getTime()) {
+      warnings.push("Event timestamp is before the project planting time.");
+    }
+    if (milestone) {
+      const duplicate = await prisma.plantEvent.findFirst({
+        where: { plantId, milestoneId: milestone.id },
+      });
+      if (duplicate) {
+        warnings.push("This plant already has this milestone.");
+      }
+    }
+
+    if (warningNeedsConfirmation(warnings, body?.confirmWarnings === true)) {
+      return NextResponse.json({ warnings }, { status: 409 });
     }
 
     const event = await prisma.plantEvent.create({
@@ -59,9 +101,10 @@ export async function POST(request: Request) {
         projectId: plant.projectId,
         plantId,
         photoId,
-        type: requiredString(body?.type, "type"),
+        milestoneId: milestone?.id,
+        type: milestone ? milestone.label : requiredString(body?.type, "type"),
         notes: optionalString(body?.notes),
-        timestamp: optionalDate(body?.timestamp, photo?.timestamp ?? new Date()),
+        timestamp,
         ...cropData(crop),
       },
     });

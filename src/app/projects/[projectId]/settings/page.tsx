@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ProjectMilestoneSettings } from "@/components/ProjectMilestoneSettings";
+import { ensureDefaultProjectMilestones } from "@/lib/experiment";
 import { ProjectSettingsForm } from "@/components/ProjectSettingsForm";
 import { prisma } from "@/lib/prisma";
 
@@ -9,7 +11,11 @@ type PageProps = {
 
 export default async function ProjectSettingsPage({ params }: PageProps) {
   const { projectId } = await params;
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  await ensureDefaultProjectMilestones(prisma, projectId);
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { milestones: { orderBy: [{ sortOrder: "asc" }, { label: "asc" }] } },
+  });
 
   if (!project) {
     notFound();
@@ -38,12 +44,29 @@ export default async function ProjectSettingsPage({ params }: PageProps) {
               photoIntervalMinutes: project.photoIntervalMinutes,
               captureStartAt: project.captureStartAt.toISOString(),
               captureEnabled: project.captureEnabled,
+              timeZone: project.timeZone,
+              captureWindowEnabled: project.captureWindowEnabled,
+              captureWindowStartMinutes: project.captureWindowStartMinutes,
+              captureWindowEndMinutes: project.captureWindowEndMinutes,
+              isTestProject: project.isTestProject,
               plantedAt: project.plantedAt?.toISOString() ?? null,
               localPhotoDirectory: project.localPhotoDirectory,
               cameraDevice: project.cameraDevice,
               cameraName: project.cameraName,
             }}
           />
+          <div className="mt-6">
+            <ProjectMilestoneSettings
+              projectId={project.id}
+              initialMilestones={project.milestones.map((milestone) => ({
+                id: milestone.id,
+                key: milestone.key,
+                label: milestone.label,
+                sortOrder: milestone.sortOrder,
+                enabled: milestone.enabled,
+              }))}
+            />
+          </div>
         </div>
       </section>
     </main>

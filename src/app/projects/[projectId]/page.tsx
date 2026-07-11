@@ -6,9 +6,20 @@ import { PlantGrid } from "@/components/PlantGrid";
 import { PhotoUploadForm } from "@/components/PhotoUploadForm";
 import { ScanPhotosButton } from "@/components/ScanPhotosButton";
 import { formatDateTime } from "@/lib/format";
+import {
+  FIRST_TRUE_LEAF_MILESTONE_KEY,
+  FIRST_VISIBLE_MILESTONE_KEY,
+  HARVEST_READY_MILESTONE_KEY,
+  HARVESTED_MILESTONE_KEY,
+  ensureDefaultProjectMilestones,
+  formatElapsed,
+  baselineForPlant,
+  elapsedMs,
+} from "@/lib/experiment";
 import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
 import { prisma } from "@/lib/prisma";
-import { nextAlignedCaptureTime } from "@/lib/schedule";
+import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
+import { formatDateTimeInZone } from "@/lib/timezone";
 
 type PageProps = {
   params: Promise<{ projectId: string }>;
@@ -26,31 +37,74 @@ export default async function ProjectPage({ params }: PageProps) {
   if (!project) {
     notFound();
   }
+  const projectRecord = project;
 
-  const [latestPhoto, galleryPhotos] = await Promise.all([
+  await ensureDefaultProjectMilestones(prisma, projectRecord.id);
+  const [latestPhoto, galleryPhotos, milestones, canonicalEvents, harvestResults] = await Promise.all([
     prisma.photo.findFirst({
-      where: { projectId: project.id },
+      where: { projectId: projectRecord.id },
       orderBy: { timestamp: "desc" },
     }),
     prisma.photo.findMany({
-      where: { projectId: project.id },
+      where: { projectId: projectRecord.id },
       orderBy: { timestamp: "desc" },
       select: { id: true, timestamp: true },
     }),
+    prisma.projectMilestone.findMany({ where: { projectId: projectRecord.id } }),
+    prisma.plantEvent.findMany({
+      where: { projectId: projectRecord.id, milestoneId: { not: null } },
+      include: { plant: true, milestone: true },
+      orderBy: { timestamp: "asc" },
+    }),
+    prisma.plantHarvestResult.findMany({ where: { plant: { projectId: projectRecord.id } } }),
   ]);
-  const monthCards = groupPhotosByMonth(galleryPhotos);
-  const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos) : [];
+  const monthCards = groupPhotosByMonth(galleryPhotos, projectRecord.timeZone);
+  const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos, projectRecord.timeZone) : [];
   const canCaptureLocally = process.env.NODE_ENV !== "production";
-  const nextCaptureAt = nextAlignedCaptureTime({
-    startAt: project.captureStartAt,
-    intervalMinutes: project.photoIntervalMinutes,
+  const nextCaptureAt = nextPermittedCaptureTime({
+    startAt: projectRecord.captureStartAt,
+    intervalMinutes: projectRecord.photoIntervalMinutes,
+    timeZone: projectRecord.timeZone,
+    captureWindowEnabled: projectRecord.captureWindowEnabled,
+    captureWindowStartMinutes: projectRecord.captureWindowStartMinutes,
+    captureWindowEndMinutes: projectRecord.captureWindowEndMinutes,
   });
-  const gridPlants = project.plants.map((plant) => ({
+  const insideWindow = isInsideCaptureWindow(new Date(), projectRecord);
+  const gridPlants = projectRecord.plants.map((plant) => ({
     id: plant.id,
     name: plant.name,
     gridX: plant.gridX,
     gridY: plant.gridY,
   }));
+  const milestoneByKey = new Map(milestones.map((milestone) => [milestone.key, milestone]));
+  function fastestFor(key: string) {
+    const milestone = milestoneByKey.get(key);
+    if (!milestone) {
+      return null;
+    }
+    return canonicalEvents
+      .filter((event) => event.milestoneId === milestone.id)
+      .map((event) => {
+        const plant = projectRecord.plants.find((item) => item.id === event.plantId);
+        if (!plant) {
+          return null;
+        }
+        const baseline = baselineForPlant(projectRecord, plant);
+        return { event, elapsed: elapsedMs(baseline.date, event.timestamp) };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((a, b) => a.elapsed - b.elapsed)[0] ?? null;
+  }
+  const firstVisible = fastestFor(FIRST_VISIBLE_MILESTONE_KEY);
+  const firstTrueLeaf = fastestFor(FIRST_TRUE_LEAF_MILESTONE_KEY);
+  const harvestReady = fastestFor(HARVEST_READY_MILESTONE_KEY);
+  const harvested = fastestFor(HARVESTED_MILESTONE_KEY);
+  const summaryItems: Array<[string, ReturnType<typeof fastestFor>]> = [
+    ["Fastest first visible", firstVisible],
+    ["Fastest first true leaf", firstTrueLeaf],
+    ["First harvest-ready plant", harvestReady],
+    ["First harvested plant", harvested],
+  ];
 
   return (
     <main className="min-h-screen">
@@ -62,6 +116,11 @@ export default async function ProjectPage({ params }: PageProps) {
           <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
             <div>
               <h1 className="text-3xl font-semibold text-stone-950">{project.name}</h1>
+              {project.isTestProject ? (
+                <span className="mt-2 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900">
+                  Test project
+                </span>
+              ) : null}
               {project.description ? (
                 <p className="mt-2 max-w-2xl text-stone-600">{project.description}</p>
               ) : null}
@@ -85,9 +144,16 @@ export default async function ProjectPage({ params }: PageProps) {
               >
                 Timeline
               </Link>
+              <span className="mx-2 text-stone-300">/</span>
+              <Link
+                href={`/projects/${project.id}/comparison`}
+                className="inline-flex text-sm font-semibold text-emerald-700 hover:text-emerald-900"
+              >
+                Comparison
+              </Link>
             </div>
             <div className="grid gap-2 sm:justify-items-end">
-              {canCaptureLocally ? (
+              {canCaptureLocally && !project.isTestProject ? (
                 <CapturePhotoButton projectId={project.id} />
               ) : null}
               <ScanPhotosButton projectId={project.id} />
@@ -102,6 +168,20 @@ export default async function ProjectPage({ params }: PageProps) {
             <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
               <h2 className="text-lg font-semibold text-stone-950">Project Information</h2>
               <dl className="mt-4 grid gap-3 text-sm">
+                <div>
+                  <dt className="font-medium text-stone-950">Timezone</dt>
+                  <dd className="text-stone-600">{project.timeZone}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Capture hours</dt>
+                  <dd className="text-stone-600">{captureWindowLabel(project)}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Window status</dt>
+                  <dd className={insideWindow ? "text-emerald-700" : "text-amber-700"}>
+                    {insideWindow ? "Inside capture window" : "Outside capture window"}
+                  </dd>
+                </div>
                 <div>
                   <dt className="font-medium text-stone-950">Grid</dt>
                   <dd className="text-stone-600">
@@ -134,11 +214,13 @@ export default async function ProjectPage({ params }: PageProps) {
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Schedule start</dt>
-                  <dd className="text-stone-600">{formatDateTime(project.captureStartAt)}</dd>
+                  <dd className="text-stone-600">{formatDateTimeInZone(project.captureStartAt, project.timeZone)}</dd>
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Next capture</dt>
-                  <dd className="text-stone-600">{formatDateTime(nextCaptureAt)}</dd>
+                  <dd className="text-stone-600">
+                    {nextCaptureAt ? formatDateTimeInZone(nextCaptureAt, project.timeZone) : "None found"}
+                  </dd>
                 </div>
                 <div>
                   <dt className="font-medium text-stone-950">Photo directory</dt>
@@ -167,7 +249,7 @@ export default async function ProjectPage({ params }: PageProps) {
                     {latestPhoto.filename}
                   </p>
                   <p className="text-sm text-stone-500">
-                    {formatDateTime(latestPhoto.timestamp)}
+                    {formatDateTimeInZone(latestPhoto.timestamp, project.timeZone)}
                   </p>
                 </Link>
               ) : (
@@ -181,6 +263,37 @@ export default async function ProjectPage({ params }: PageProps) {
           </aside>
 
           <div className="grid gap-6">
+            <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
+              <h2 className="text-xl font-semibold text-stone-950">Experiment Summary</h2>
+              <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                {summaryItems.map(([label, result]) => (
+                  <div key={label}>
+                    <dt className="font-medium text-stone-950">{label}</dt>
+                    <dd className="text-stone-600">
+                      {result ? (
+                        <>
+                          <Link href={`/plants/${result.event.plantId}`} className="font-semibold text-emerald-700">
+                            {result.event.plant.name}
+                          </Link>{" "}
+                          {formatElapsed(result.elapsed)}
+                        </>
+                      ) : (
+                        "Pending"
+                      )}
+                    </dd>
+                  </div>
+                ))}
+                <div>
+                  <dt className="font-medium text-stone-950">Active plants</dt>
+                  <dd className="text-stone-600">{project.plants.length - harvestResults.length}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-stone-950">Harvested</dt>
+                  <dd className="text-stone-600">{harvestResults.length}</dd>
+                </div>
+              </dl>
+            </div>
+
             <div>
               <h2 className="text-xl font-semibold text-stone-950">Grid</h2>
               <div className="mt-4">
@@ -246,7 +359,7 @@ export default async function ProjectPage({ params }: PageProps) {
                         {day.label}
                       </p>
                       <p className="text-xs text-stone-500">
-                        {day.photoCount} photo{day.photoCount === 1 ? "" : "s"} / {formatDateTime(day.firstCaptureAt)} - {formatDateTime(day.lastCaptureAt)}
+                        {day.photoCount} photo{day.photoCount === 1 ? "" : "s"} / {formatDateTimeInZone(day.firstCaptureAt, project.timeZone)} - {formatDateTimeInZone(day.lastCaptureAt, project.timeZone)}
                       </p>
                     </Link>
                   ))

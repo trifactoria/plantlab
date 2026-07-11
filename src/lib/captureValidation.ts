@@ -1,9 +1,12 @@
+import { validateCaptureWindowConfig, type CaptureWindowConfig } from "./schedule";
+
 export type CaptureConfigInput = {
   captureStartAt: Date | string | null;
   photoIntervalMinutes: number;
   cameraDevice: string | null;
   localPhotoDirectory: string | null;
-};
+  isTestProject?: boolean;
+} & CaptureWindowConfig;
 
 /**
  * Structural checks only (no disk access), safe to run in the browser.
@@ -28,6 +31,12 @@ export function validateCaptureConfig(project: CaptureConfigInput): string[] {
   if (!project.localPhotoDirectory || project.localPhotoDirectory.trim().length === 0) {
     errors.push("A local photo directory is required for scheduled capture.");
   }
+
+  if (project.isTestProject) {
+    errors.push("Test projects cannot enable scheduled capture.");
+  }
+
+  errors.push(...validateCaptureWindowConfig(project));
 
   return errors;
 }
