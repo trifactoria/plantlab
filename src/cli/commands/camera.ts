@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { createInterface } from "node:readline/promises";
 import { runCameraTestCapture } from "../../lib/operations/doctor";
 import { attachNodeCamera, firstSupportedMode, listNodeCameras } from "../../lib/operations/nodeCameras";
 import { prisma } from "../../lib/prisma";
@@ -18,6 +19,125 @@ async function listCameras(): Promise<void> {
     console.log(`  name:      ${camera.name ?? "(unknown)"}`);
     console.log(`  stable id: ${camera.stableId ?? "(none - device path may change across reboots)"}`);
   }
+}
+
+type CameraAttachOptions = {
+  node: string;
+  camera?: string;
+  captureSource?: string;
+  name?: string;
+  width?: number;
+  height?: number;
+  format?: string;
+  yes?: boolean;
+  json?: boolean;
+};
+
+async function ask(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function chooseIndex(prompt: string, count: number, fallback = 1): Promise<number> {
+  for (;;) {
+    const answer = await ask(`${prompt} [${fallback}-${count}]: `);
+    if (!answer) return fallback - 1;
+    const index = Number(answer);
+    if (Number.isInteger(index) && index >= 1 && index <= count) {
+      return index - 1;
+    }
+    console.log(`Enter a number between 1 and ${count}.`);
+  }
+}
+
+export async function runCameraAttachFlow(options: CameraAttachOptions) {
+  const nodes = await listNodeCameras(prisma, options.node);
+  const node = nodes[0];
+  if (!node) {
+    throw new Error(`No registered node named "${options.node}". Run "plantlab node attach ${options.node}" first.`);
+  }
+  if (node.cameras.length === 0) {
+    throw new Error(`Node "${options.node}" has not reported any cameras yet. Ensure plantlab-agent.service is running.`);
+  }
+
+  let selectedCamera =
+    options.camera && /^\d+$/.test(options.camera)
+      ? node.cameras[Number(options.camera) - 1]
+      : options.camera
+        ? node.cameras.find((item) => item.stableId === options.camera)
+        : undefined;
+
+  if (!selectedCamera && process.stdin.isTTY && !options.yes) {
+    console.log("Select a camera:");
+    node.cameras.forEach((camera, index) => {
+      console.log(`\n${index + 1}) ${camera.name ?? "Unknown camera"}`);
+      console.log(`   ${camera.devicePath}`);
+      console.log(`   Stable ID: ${camera.stableId}`);
+    });
+    selectedCamera = node.cameras[await chooseIndex("Camera", node.cameras.length)];
+  }
+  selectedCamera ??= node.cameras[0];
+  if (!selectedCamera) {
+    throw new Error(`Camera "${options.camera}" was not found on node "${options.node}".`);
+  }
+
+  const sources = await prisma.captureSource.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } });
+  let captureSourceId = options.captureSource ?? null;
+  let newName = options.name ?? `${node.name} ${selectedCamera.name ?? "Camera"}`;
+
+  if (!captureSourceId && process.stdin.isTTY && !options.yes) {
+    console.log("\nAttach to:");
+    console.log("1) Existing capture source");
+    console.log("2) Create new capture source");
+    const choice = sources.length > 0 ? await chooseIndex("Choice", 2, 2) : 1;
+    if (choice === 0 && sources.length > 0) {
+      console.log("\nExisting capture sources:");
+      sources.forEach((source, index) => console.log(`${index + 1}) ${source.name}`));
+      captureSourceId = sources[await chooseIndex("Capture source", sources.length)].id;
+    } else {
+      const answer = await ask(`Capture source name [${newName}]: `);
+      if (answer) newName = answer;
+    }
+  }
+
+  const mode = firstSupportedMode(selectedCamera);
+  const resolutionChoices = selectedCamera.formats.flatMap((format) =>
+    format.resolutions.map((resolution) => ({
+      width: resolution.width,
+      height: resolution.height,
+      inputFormat: format.pixelFormat || "mjpeg",
+    })),
+  );
+  let width = options.width ?? mode.width;
+  let height = options.height ?? mode.height;
+  let inputFormat = options.format ?? mode.inputFormat;
+  if (!options.width && !options.height && process.stdin.isTTY && !options.yes && resolutionChoices.length > 0) {
+    console.log("\nResolution:");
+    resolutionChoices.forEach((choice, index) => console.log(`${index + 1}) ${choice.width}x${choice.height} ${choice.inputFormat.toUpperCase()}`));
+    const selected = resolutionChoices[await chooseIndex("Resolution", resolutionChoices.length)];
+    width = selected.width;
+    height = selected.height;
+    inputFormat = selected.inputFormat;
+  }
+
+  if (!options.yes && !process.stdin.isTTY) {
+    throw new Error("Refusing to attach a camera without confirmation. Re-run with --yes.");
+  }
+
+  const result = await attachNodeCamera(prisma, {
+    nodeName: node.name,
+    stableId: selectedCamera.stableId,
+    captureSourceId,
+    newCaptureSourceName: newName,
+    width,
+    height,
+    inputFormat,
+  });
+  return result;
 }
 
 export function registerCameraCommand(program: Command): void {
@@ -91,84 +211,21 @@ Examples:
     .option("--yes", "Proceed without interactive confirmation")
     .option("--json", "Print structured JSON")
     .action(
-      async (options: {
-        node: string;
-        camera?: string;
-        captureSource?: string;
-        name?: string;
-        width?: number;
-        height?: number;
-        format?: string;
-        yes?: boolean;
-        json?: boolean;
-      }) => {
-        const nodes = await listNodeCameras(prisma, options.node);
-        const node = nodes[0];
-        if (!node) {
-          console.error(`No registered node named "${options.node}". Run "plantlab node attach ${options.node}" first.`);
-          process.exitCode = 1;
-          return;
-        }
-        if (node.cameras.length === 0) {
-          console.error(`Node "${options.node}" has not reported any cameras yet. Ensure plantlab-agent.service is running.`);
-          process.exitCode = 1;
-          return;
-        }
-        const camera =
-          options.camera && /^\d+$/.test(options.camera)
-            ? node.cameras[Number(options.camera) - 1]
-            : options.camera
-              ? node.cameras.find((item) => item.stableId === options.camera)
-              : node.cameras[0];
-        if (!camera) {
-          console.error(`Camera "${options.camera}" was not found on node "${options.node}".`);
-          process.exitCode = 1;
-          return;
-        }
-        const mode = firstSupportedMode(camera);
-        const width = options.width ?? mode.width;
-        const height = options.height ?? mode.height;
-        const inputFormat = options.format ?? mode.inputFormat;
-        const newName = options.name ?? `${node.name} ${camera.name ?? "Camera"}`;
-
-        if (!options.yes && process.stdin.isTTY) {
-          console.log(`Attach camera "${camera.name ?? camera.stableId}" on node "${node.name}"`);
-          console.log(`CaptureSource: ${options.captureSource ? `existing ${options.captureSource}` : `new "${newName}"`}`);
-          console.log(`Mode: ${inputFormat.toUpperCase()} ${width}x${height}`);
-          const { createInterface } = await import("node:readline/promises");
-          const rl = createInterface({ input: process.stdin, output: process.stdout });
-          try {
-            const answer = (await rl.question("Proceed? [y/N] ")).trim().toLowerCase();
-            if (answer !== "y" && answer !== "yes") {
-              console.log("No changes made.");
-              return;
-            }
-          } finally {
-            rl.close();
+      async (options: CameraAttachOptions) => {
+        try {
+          const result = await runCameraAttachFlow(options);
+          if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            console.log("Camera attached.");
+            console.log(`Node: ${result.node.name}`);
+            console.log(`Camera: ${result.camera.name ?? result.camera.stableId}`);
+            console.log(`CaptureSource: ${result.captureSource.name}`);
+            console.log(`Mode: ${result.assignment.inputFormat.toUpperCase()} ${result.assignment.width}x${result.assignment.height}`);
           }
-        } else if (!options.yes && !process.stdin.isTTY) {
-          console.error("Refusing to attach a camera without confirmation. Re-run with --yes.");
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
           process.exitCode = 1;
-          return;
-        }
-
-        const result = await attachNodeCamera(prisma, {
-          nodeName: node.name,
-          stableId: camera.stableId,
-          captureSourceId: options.captureSource ?? null,
-          newCaptureSourceName: newName,
-          width,
-          height,
-          inputFormat,
-        });
-        if (options.json) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log("Camera attached.");
-          console.log(`Node: ${result.node.name}`);
-          console.log(`Camera: ${result.camera.name ?? result.camera.stableId}`);
-          console.log(`CaptureSource: ${result.captureSource.name}`);
-          console.log(`Mode: ${result.assignment.inputFormat.toUpperCase()} ${result.assignment.width}x${result.assignment.height}`);
         }
       },
     );

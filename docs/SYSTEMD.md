@@ -17,10 +17,22 @@ plantlab service stop
 plantlab service restart
 ```
 
+By default, service commands manage the services expected for the configured
+role:
+
+- coordinator: `plantlab-web.service`
+- camera-node: `plantlab-agent.service`
+- standalone: `plantlab-web.service` and `plantlab-camera.service`
+
+Use `--service web`, `--service camera`, or `--service agent` for one
+low-level service. Use `--all` only when you intentionally want every
+PlantLab service.
+
 Remote service checks:
 
 ```bash
 plantlab service status --node xps
+plantlab service restart --node xps --service agent
 ```
 
 ## Logs

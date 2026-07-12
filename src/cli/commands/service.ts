@@ -1,21 +1,30 @@
 import { spawnSync } from "node:child_process";
 import type { Command } from "commander";
-import { validateSshHost } from "../../lib/operations/remoteNode";
+import { readNodeConfig } from "../../lib/operations/config";
+import { inspectRemoteHost, validateSshHost } from "../../lib/operations/remoteNode";
+import { serviceUnitsForSelection } from "../../lib/operations/serviceRoles";
 
-const UNITS = ["plantlab-web.service", "plantlab-camera.service", "plantlab-agent.service"];
-
-function runSystemctl(action: string, node?: string): number {
+async function runSystemctl(action: string, options: { node?: string; service?: string; all?: boolean }): Promise<number> {
   let result;
-  if (node) {
+  let role: string | null = null;
+  if (options.node) {
     try {
-      validateSshHost(node);
+      validateSshHost(options.node);
+      if (!options.all && !options.service) {
+        role = (await inspectRemoteHost(options.node)).role;
+      }
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       return 1;
     }
-    result = spawnSync("ssh", [node, "systemctl", "--user", action, ...UNITS], { stdio: "inherit" });
+    const units = serviceUnitsForSelection({ role, service: options.service, all: options.all });
+    result = spawnSync("ssh", [options.node, "systemctl", "--user", action, ...units], { stdio: "inherit" });
   } else {
-    result = spawnSync("systemctl", ["--user", action, ...UNITS], { stdio: "inherit" });
+    if (!options.all && !options.service) {
+      role = (await readNodeConfig())?.role ?? null;
+    }
+    const units = serviceUnitsForSelection({ role, service: options.service, all: options.all });
+    result = spawnSync("systemctl", ["--user", action, ...units], { stdio: "inherit" });
   }
 
   if (result.error) {
@@ -30,35 +39,42 @@ function runSystemctl(action: string, node?: string): number {
 export function registerServiceCommand(program: Command): void {
   const service = program.command("service").description("Manage PlantLab systemd user services");
 
+  function addServiceOptions(command: Command) {
+    return command
+      .option("--node <ssh-host>", "Run the command over SSH on a configured node")
+      .option("--service <service>", "Manage one service: web, camera, or agent")
+      .option("--all", "Manage all PlantLab services instead of the services expected for this node role");
+  }
+
   service
     .command("status")
     .description("Show systemd status for PlantLab services")
-    .option("--node <ssh-host>", "Run the status command over SSH on a configured node")
-    .action((options: { node?: string }) => {
-      process.exitCode = runSystemctl("status", options.node);
+    .addHelpText("after", "\nExamples:\n  plantlab service status\n  plantlab service status --node xps\n  plantlab service status --all\n")
+    .configureHelp({ showGlobalOptions: true });
+
+  addServiceOptions(service.commands.find((command) => command.name() === "status")!)
+    .action(async (options: { node?: string; service?: string; all?: boolean }) => {
+      process.exitCode = await runSystemctl("status", options);
     });
 
-  service
-    .command("start")
+  addServiceOptions(service.command("start")
     .description("Start PlantLab services")
-    .option("--node <ssh-host>", "Run the start command over SSH on a configured node")
-    .action((options: { node?: string }) => {
-      process.exitCode = runSystemctl("start", options.node);
+    .addHelpText("after", "\nExamples:\n  plantlab service start\n  plantlab service start --node xps\n  plantlab service start --service agent\n  plantlab service start --all\n"))
+    .action(async (options: { node?: string; service?: string; all?: boolean }) => {
+      process.exitCode = await runSystemctl("start", options);
     });
 
-  service
-    .command("stop")
+  addServiceOptions(service.command("stop")
     .description("Stop PlantLab services")
-    .option("--node <ssh-host>", "Run the stop command over SSH on a configured node")
-    .action((options: { node?: string }) => {
-      process.exitCode = runSystemctl("stop", options.node);
+    .addHelpText("after", "\nExamples:\n  plantlab service stop\n  plantlab service stop --node xps\n  plantlab service stop --service web\n  plantlab service stop --all\n"))
+    .action(async (options: { node?: string; service?: string; all?: boolean }) => {
+      process.exitCode = await runSystemctl("stop", options);
     });
 
-  service
-    .command("restart")
+  addServiceOptions(service.command("restart")
     .description("Restart PlantLab services")
-    .option("--node <ssh-host>", "Run the restart command over SSH on a configured node")
-    .action((options: { node?: string }) => {
-      process.exitCode = runSystemctl("restart", options.node);
+    .addHelpText("after", "\nExamples:\n  plantlab service restart\n  plantlab service restart --node xps\n  plantlab service restart --service agent\n  plantlab service restart --all\n"))
+    .action(async (options: { node?: string; service?: string; all?: boolean }) => {
+      process.exitCode = await runSystemctl("restart", options);
     });
 }

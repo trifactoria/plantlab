@@ -1,8 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import os from "node:os";
-import path from "node:path";
 import packageJson from "../../../package.json";
 import type { NodeRole } from "./config";
+import { SERVICE_UNITS, type PlantLabServiceName } from "./serviceRoles";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/remoteNode.ts shells out to ssh and must not run in a browser.");
@@ -46,6 +46,9 @@ export type RemoteInspection = {
   tailscaleConnected: boolean | null;
   tailscaleIPv4: string | null;
   lanIPv4Addresses: string[];
+  bridgeIPv4Addresses: string[];
+  otherIPv4Addresses: string[];
+  ipv6Addresses: string[];
   freeDiskSpace: string | null;
   videoDevices: string[];
   cameras: RemoteCameraInfo[];
@@ -67,8 +70,10 @@ export function validateSshHost(host: string): void {
   }
 }
 
-function runLocal(command: string, args: string[], options: { input?: string; timeoutMs?: number } = {}) {
-  return new Promise<{ stdout: string; stderr: string; status: number | null }>((resolve, reject) => {
+export type CommandResult = { stdout: string; stderr: string; status: number | null };
+
+function runLocal(command: string, args: string[], options: { input?: string; timeoutMs?: number } = {}): Promise<CommandResult> {
+  return new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(command, args, { shell: false, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -92,6 +97,19 @@ function runLocal(command: string, args: string[], options: { input?: string; ti
     });
     if (options.input) child.stdin.end(options.input);
     else child.stdin.end();
+  });
+}
+
+export async function runRemoteShell(
+  sshHost: string,
+  script: string,
+  args: string[] = [],
+  options: { input?: string; timeoutMs?: number } = {},
+): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  return runLocal("ssh", [sshHost, "sh", "-s", "--", ...args], {
+    input: `${script}\n${options.input ?? ""}`,
+    timeoutMs: options.timeoutMs ?? 20_000,
   });
 }
 
@@ -152,10 +170,24 @@ tailscale="false"; tailscale_connected="null"; tailscale_ip=""
 if cmd tailscale; then
   tailscale="true"
   ts_status="$(tailscale status --json 2>/dev/null || true)"
-  if printf '%s' "$ts_status" | grep -q '"Online":true'; then tailscale_connected="true"; else tailscale_connected="false"; fi
+  if printf '%s' "$ts_status" | grep -Eq '"Online"[[:space:]]*:[[:space:]]*true|"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then tailscale_connected="true"; else tailscale_connected="false"; fi
   tailscale_ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
 fi
-lan_ips="$(hostname -I 2>/dev/null || true)"
+all_ips="$(hostname -I 2>/dev/null || true)"
+lan_ips=""
+bridge_ips=""
+other_ips=""
+ipv6_ips=""
+for ip in $all_ips; do
+  case "$ip" in
+    *:*) ipv6_ips="$ipv6_ips $ip" ;;
+    "$tailscale_ip") ;;
+    100.*) other_ips="$other_ips $ip" ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|10.42.*|192.168.122.*) bridge_ips="$bridge_ips $ip" ;;
+    10.*|192.168.*|172.*) lan_ips="$lan_ips $ip" ;;
+    *) other_ips="$other_ips $ip" ;;
+  esac
+done
 disk="$(df -h "$HOME" 2>/dev/null | awk 'NR==2 {print $4 " free on " $6}' || true)"
 video_devices="$(ls /dev/video* 2>/dev/null | tr '\n' ' ' || true)"
 web_status="$(systemctl --user is-active plantlab-web.service 2>/dev/null || true)"
@@ -184,6 +216,9 @@ printf '"tailscaleInstalled":%s,' "$tailscale"
 printf '"tailscaleConnected":%s,' "$tailscale_connected"
 printf '"tailscaleIPv4":"%s",' "$(json_escape "$tailscale_ip")"
 printf '"lanIPv4Addresses":[%s],' "$(printf '%s' "$lan_ips" | tr ' ' '\n' | awk 'NF {printf "%s\"%s\"", sep, $0; sep=","}')"
+printf '"bridgeIPv4Addresses":[%s],' "$(printf '%s' "$bridge_ips" | tr ' ' '\n' | awk 'NF {printf "%s\"%s\"", sep, $0; sep=","}')"
+printf '"otherIPv4Addresses":[%s],' "$(printf '%s' "$other_ips" | tr ' ' '\n' | awk 'NF {printf "%s\"%s\"", sep, $0; sep=","}')"
+printf '"ipv6Addresses":[%s],' "$(printf '%s' "$ipv6_ips" | tr ' ' '\n' | awk 'NF {printf "%s\"%s\"", sep, $0; sep=","}')"
 printf '"freeDiskSpace":"%s",' "$(json_escape "$disk")"
 printf '"videoDevices":[%s],' "$(printf '%s' "$video_devices" | tr ' ' '\n' | awk 'NF {printf "%s\"%s\"", sep, $0; sep=","}')"
 printf '"services":{"web":"%s","camera":"%s","agent":"%s"},' "$(json_escape "$web_status")" "$(json_escape "$camera_status")" "$(json_escape "$agent_status")"
@@ -224,6 +259,9 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
       tailscaleConnected: null,
       tailscaleIPv4: null,
       lanIPv4Addresses: [],
+      bridgeIPv4Addresses: [],
+      otherIPv4Addresses: [],
+      ipv6Addresses: [],
       freeDiskSpace: null,
       videoDevices: [],
       cameras: [],
@@ -296,6 +334,9 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
     tailscaleConnected: typeof parsed.tailscaleConnected === "boolean" ? parsed.tailscaleConnected : null,
     tailscaleIPv4: stringOrNull(parsed.tailscaleIPv4),
     lanIPv4Addresses: stringArray(parsed.lanIPv4Addresses),
+    bridgeIPv4Addresses: stringArray(parsed.bridgeIPv4Addresses),
+    otherIPv4Addresses: stringArray(parsed.otherIPv4Addresses),
+    ipv6Addresses: stringArray(parsed.ipv6Addresses),
     freeDiskSpace: stringOrNull(parsed.freeDiskSpace),
     videoDevices: stringArray(parsed.videoDevices),
     cameras: Array.isArray(parsed.cameras) ? (parsed.cameras as RemoteCameraInfo[]) : [],
@@ -332,12 +373,74 @@ WantedBy=default.target
 `;
 }
 
+export function buildConfigureRemoteAgentScript(): string {
+  return String.raw`
+set -eu
+repo="$1"
+home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"
+if [ -z "$home_dir" ]; then home_dir="$HOME"; fi
+env_dir="$home_dir/.config/plantlab"
+unit_dir="$home_dir/.config/systemd/user"
+env_path="$env_dir/agent.env"
+unit_path="$unit_dir/plantlab-agent.service"
+spool="$2"
+has_credential="$4"
+mkdir -p "$repo" "$env_dir" "$unit_dir" "$spool"
+chmod 700 "$env_dir"
+umask 077
+tmp="$(mktemp)"
+config_tmp="$(mktemp "$repo/plantlab.config.json.tmp.XXXXXX")"
+env_tmp="$(mktemp "$env_dir/agent.env.tmp.XXXXXX")"
+unit_tmp="$(mktemp "$unit_dir/plantlab-agent.service.tmp.XXXXXX")"
+trap 'rm -f "$tmp" "$config_tmp" "$env_tmp" "$unit_tmp"' EXIT
+cat > "$tmp"
+awk '
+  /^__PLANTLAB_CONFIG__$/ { section="config"; next }
+  /^__PLANTLAB_ENV__$/ { section="env"; next }
+  /^__PLANTLAB_UNIT__$/ { section="unit"; next }
+  /^__PLANTLAB_END__$/ { section=""; next }
+  section=="config" { print > config_path; next }
+  section=="env" { print > env_path; next }
+  section=="unit" { print > unit_path; next }
+' config_path="$config_tmp" env_path="$env_tmp" unit_path="$unit_tmp" "$tmp"
+run_bin="$(command -v pnpm || command -v npm || true)"
+if [ -z "$run_bin" ]; then
+  echo "Neither pnpm nor npm found on remote PATH." >&2
+  exit 12
+fi
+mv "$config_tmp" "$repo/plantlab.config.json"
+if [ "$has_credential" = "1" ]; then
+  chmod 600 "$env_tmp"
+  mv "$env_tmp" "$env_path"
+else
+  rm -f "$env_tmp"
+fi
+sed "s#__REPO_PATH__#$repo#g; s#__RUN_BIN__#$run_bin#g; s#__ENV_PATH__#$env_path#g" "$unit_tmp" > "$unit_path"
+if [ ! -f "$env_path" ]; then
+  echo "Agent credential file was not created at $env_path" >&2
+  exit 20
+fi
+chmod 600 "$env_path"
+env_mode="$(stat -c '%a' "$env_path")"
+env_owner="$(stat -c '%U' "$env_path")"
+dir_mode="$(stat -c '%a' "$env_dir")"
+if [ "$env_mode" != "600" ]; then echo "Credential file mode is $env_mode, expected 600" >&2; exit 21; fi
+if [ "$dir_mode" != "700" ]; then echo "Credential directory mode is $dir_mode, expected 700" >&2; exit 22; fi
+systemctl --user daemon-reload
+if [ "$3" = "1" ]; then
+  systemctl --user disable --now plantlab-web.service plantlab-camera.service >/dev/null 2>&1 || true
+  systemctl --user enable --now plantlab-agent.service
+fi
+printf '{"envPath":"%s","envMode":"%s","envOwner":"%s","envDirMode":"%s","unitPath":"%s"}\n' "$env_path" "$env_mode" "$env_owner" "$dir_mode" "$unit_path"
+`;
+}
+
 export async function configureRemoteAgent(input: {
   sshHost: string;
   repoPath: string;
   nodeName: string;
   coordinatorUrl: string;
-  credential: string;
+  credential: string | null;
   spoolRoot: string;
   startService: boolean;
 }) {
@@ -351,41 +454,8 @@ export async function configureRemoteAgent(input: {
     nodeName: input.nodeName,
     spoolRoot: input.spoolRoot,
   };
-  const env = `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n`;
-  const remoteScript = String.raw`
-set -eu
-repo="$1"
-env_path="\${HOME}/.config/plantlab/agent.env"
-unit_path="\${HOME}/.config/systemd/user/plantlab-agent.service"
-spool="$2"
-mkdir -p "$repo" "\${HOME}/.config/plantlab" "\${HOME}/.config/systemd/user" "$spool"
-umask 077
-tmp="$(mktemp)"
-unit_tmp="$(mktemp)"
-trap 'rm -f "$tmp" "$unit_tmp"' EXIT
-cat > "$tmp"
-awk '
-  /^__PLANTLAB_CONFIG__$/ { section="config"; next }
-  /^__PLANTLAB_ENV__$/ { section="env"; next }
-  /^__PLANTLAB_UNIT__$/ { section="unit"; next }
-  /^__PLANTLAB_END__$/ { section=""; next }
-  section=="config" { print > config_path; next }
-  section=="env" { print > env_path; next }
-  section=="unit" { print > unit_path; next }
-' config_path="$repo/plantlab.config.json" env_path="$env_path" unit_path="$unit_tmp" "$tmp"
-run_bin="$(command -v pnpm || command -v npm || true)"
-if [ -z "$run_bin" ]; then
-  echo "Neither pnpm nor npm found on remote PATH." >&2
-  exit 12
-fi
-sed "s#__REPO_PATH__#$repo#g; s#__RUN_BIN__#$run_bin#g; s#__ENV_PATH__#$env_path#g" "$unit_tmp" > "$unit_path"
-chmod 600 "$env_path"
-systemctl --user daemon-reload
-if [ "$3" = "1" ]; then
-  systemctl --user enable --now plantlab-agent.service
-fi
-printf '{"envPath":"%s","unitPath":"%s"}\n' "$env_path" "$unit_path"
-`;
+  const env = input.credential ? `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n` : "";
+  const remoteScript = buildConfigureRemoteAgentScript();
   const unitTemplate = buildAgentServiceUnit({ repoPath: "__REPO_PATH__", runBin: "__RUN_BIN__", envPath: "__ENV_PATH__" });
   const payload = [
     "__PLANTLAB_CONFIG__",
@@ -397,7 +467,7 @@ printf '{"envPath":"%s","unitPath":"%s"}\n' "$env_path" "$unit_path"
     "__PLANTLAB_END__",
     "",
   ].join("\n");
-  return runLocal("ssh", [input.sshHost, "sh", "-s", "--", input.repoPath, input.spoolRoot, input.startService ? "1" : "0"], {
+  return runLocal("ssh", [input.sshHost, "sh", "-s", "--", input.repoPath, input.spoolRoot, input.startService ? "1" : "0", input.credential ? "1" : "0"], {
     input: `${remoteScript}\n${payload}`,
     timeoutMs: 20_000,
   });
@@ -409,6 +479,117 @@ export function defaultCoordinatorUrl(): string {
 
 export function expectedRemoteVersion() {
   return packageJson.version;
+}
+
+export type RemoteAgentDiagnostics = {
+  configExists: boolean;
+  credentialExists: boolean;
+  credentialMode: string | null;
+  credentialDirMode: string | null;
+  coordinatorUrl: string | null;
+  spoolRoot: string | null;
+  spoolWritable: boolean;
+  agentScriptExists: boolean;
+  nodePath: string | null;
+  runBin: string | null;
+  ffmpegAvailable: boolean;
+  v4l2CtlAvailable: boolean;
+  coordinatorReachable: boolean | null;
+  agentStatus: string | null;
+  agentJournal: string[];
+};
+
+export async function diagnoseRemoteAgent(sshHost: string, repoPath?: string | null): Promise<RemoteAgentDiagnostics> {
+  const script = String.raw`
+set -eu
+repo="$1"
+if [ -z "$repo" ]; then
+  for p in "$HOME/projects/plantlab" "$HOME/plantlab" "$(pwd 2>/dev/null || printf '')"; do
+    [ -n "$p" ] && [ -f "$p/package.json" ] && repo="$p" && break
+  done
+fi
+home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"
+if [ -z "$home_dir" ]; then home_dir="$HOME"; fi
+env_dir="$home_dir/.config/plantlab"
+env_path="$env_dir/agent.env"
+config_path="$repo/plantlab.config.json"
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' | tr -d '\n'; }
+config_exists=false; [ -f "$config_path" ] && config_exists=true
+credential_exists=false; [ -f "$env_path" ] && credential_exists=true
+credential_mode=""; [ -e "$env_path" ] && credential_mode="$(stat -c '%a' "$env_path" 2>/dev/null || true)"
+credential_dir_mode=""; [ -d "$env_dir" ] && credential_dir_mode="$(stat -c '%a' "$env_dir" 2>/dev/null || true)"
+coordinator_url=""
+spool_root=""
+if [ -f "$config_path" ]; then
+  coordinator_url="$(node -e "const fs=require('fs');try{const c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(c.coordinatorUrl||'')}catch{}" "$config_path" 2>/dev/null || true)"
+  spool_root="$(node -e "const fs=require('fs');try{const c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(c.spoolRoot||'')}catch{}" "$config_path" 2>/dev/null || true)"
+fi
+spool_writable=false
+if [ -n "$spool_root" ]; then mkdir -p "$spool_root" 2>/dev/null && [ -w "$spool_root" ] && spool_writable=true; fi
+agent_script_exists=false; [ -f "$repo/scripts/agent-service.ts" ] && agent_script_exists=true
+node_path="$(command -v node 2>/dev/null || true)"
+run_bin="$(command -v pnpm 2>/dev/null || command -v npm 2>/dev/null || true)"
+ffmpeg=false; command -v ffmpeg >/dev/null 2>&1 && ffmpeg=true
+v4l2=false; command -v v4l2-ctl >/dev/null 2>&1 && v4l2=true
+coordinator_reachable=null
+if [ -n "$coordinator_url" ]; then
+  if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "$coordinator_url/api/node-info" >/dev/null 2>&1; then coordinator_reachable=true; else coordinator_reachable=false; fi
+fi
+agent_status="$(systemctl --user is-active plantlab-agent.service 2>/dev/null || true)"
+journal="$(journalctl --user -u plantlab-agent.service -n 20 --no-pager 2>/dev/null | tail -n 20 || true)"
+printf '{'
+printf '"configExists":%s,' "$config_exists"
+printf '"credentialExists":%s,' "$credential_exists"
+printf '"credentialMode":"%s",' "$(json_escape "$credential_mode")"
+printf '"credentialDirMode":"%s",' "$(json_escape "$credential_dir_mode")"
+printf '"coordinatorUrl":"%s",' "$(json_escape "$coordinator_url")"
+printf '"spoolRoot":"%s",' "$(json_escape "$spool_root")"
+printf '"spoolWritable":%s,' "$spool_writable"
+printf '"agentScriptExists":%s,' "$agent_script_exists"
+printf '"nodePath":"%s",' "$(json_escape "$node_path")"
+printf '"runBin":"%s",' "$(json_escape "$run_bin")"
+printf '"ffmpegAvailable":%s,' "$ffmpeg"
+printf '"v4l2CtlAvailable":%s,' "$v4l2"
+printf '"coordinatorReachable":%s,' "$coordinator_reachable"
+printf '"agentStatus":"%s",' "$(json_escape "$agent_status")"
+printf '"agentJournal":[%s]' "$(printf '%s\n' "$journal" | awk 'NF {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); printf "%s\"%s\"", sep, $0; sep=","}')"
+printf '}\n'
+`;
+  const result = await runRemoteShell(sshHost, script, [repoPath ?? ""], { timeoutMs: 20_000 });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || "Remote agent diagnostics failed.");
+  }
+  const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+  return {
+    configExists: parsed.configExists === true,
+    credentialExists: parsed.credentialExists === true,
+    credentialMode: stringOrNull(parsed.credentialMode),
+    credentialDirMode: stringOrNull(parsed.credentialDirMode),
+    coordinatorUrl: stringOrNull(parsed.coordinatorUrl),
+    spoolRoot: stringOrNull(parsed.spoolRoot),
+    spoolWritable: parsed.spoolWritable === true,
+    agentScriptExists: parsed.agentScriptExists === true,
+    nodePath: stringOrNull(parsed.nodePath),
+    runBin: stringOrNull(parsed.runBin),
+    ffmpegAvailable: parsed.ffmpegAvailable === true,
+    v4l2CtlAvailable: parsed.v4l2CtlAvailable === true,
+    coordinatorReachable: typeof parsed.coordinatorReachable === "boolean" ? parsed.coordinatorReachable : null,
+    agentStatus: stringOrNull(parsed.agentStatus),
+    agentJournal: stringArray(parsed.agentJournal),
+  };
+}
+
+export async function applyRemoteServiceRole(sshHost: string, role: NodeRole | string): Promise<CommandResult> {
+  const expected: PlantLabServiceName[] = role === "camera-node" ? ["agent"] : role === "coordinator" ? ["web"] : ["web", "camera"];
+  const stop = (Object.keys(SERVICE_UNITS) as PlantLabServiceName[]).filter((service) => !expected.includes(service));
+  const startUnits = expected.map((service) => SERVICE_UNITS[service]);
+  const stopUnits = stop.map((service) => SERVICE_UNITS[service]);
+  const script = [
+    "set -eu",
+    stopUnits.length > 0 ? `systemctl --user disable --now ${stopUnits.map((unit) => `'${unit}'`).join(" ")} >/dev/null 2>&1 || true` : ":",
+    startUnits.length > 0 ? `systemctl --user enable --now ${startUnits.map((unit) => `'${unit}'`).join(" ")}` : ":",
+  ].join("\n");
+  return runRemoteShell(sshHost, script, [], { timeoutMs: 20_000 });
 }
 
 function stringOrNull(value: unknown): string | null {

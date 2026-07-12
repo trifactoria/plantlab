@@ -17,6 +17,14 @@ This writes:
 - `~/.config/plantlab/agent.env` with the node credential
 - `plantlab-agent.service` as a systemd user service
 
+The credential directory is created with mode `0700`; the credential file is
+created atomically with mode `0600`. Credentials are not printed or stored in
+plain text on the coordinator.
+
+Rerunning `plantlab node attach xps` is safe. It reuses a healthy credential
+file by default. Use `--rotate-credential` only when you intentionally need a
+new node credential.
+
 ## Local Spool
 
 The agent stores durable local state under:
@@ -40,6 +48,7 @@ From the coordinator:
 
 ```bash
 plantlab doctor --node xps
+plantlab doctor --node xps --fix
 plantlab service status --node xps
 plantlab camera list --node xps
 ```

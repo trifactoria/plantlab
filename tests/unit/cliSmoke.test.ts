@@ -31,11 +31,15 @@ describe("plantlab CLI (subprocess smoke test)", () => {
   });
 
   it.each([
-    ["node", "inspect", "--help"],
-    ["node", "attach", "--help"],
-    ["camera", "attach", "--help"],
-    ["capture", "test", "--help"],
-  ])("plantlab %s %s %s prints help", (...args) => {
+    [["doctor", "--help"]],
+    [["backup", "--help"]],
+    [["node", "inspect", "--help"]],
+    [["node", "attach", "--help"]],
+    [["camera", "list", "--help"]],
+    [["camera", "attach", "--help"]],
+    [["capture", "test", "--help"]],
+    [["service", "start", "--help"]],
+  ])("plantlab %s prints help", (args) => {
     const result = runCli(args);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Usage:");

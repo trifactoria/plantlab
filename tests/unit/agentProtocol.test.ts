@@ -86,4 +86,24 @@ describe("agent protocol", () => {
     const result = await completeJob(prisma, registered.node.id, completed.id, "capture-ok");
     expect(result).toMatchObject({ ok: true, sourceCapture: { id: sourceCapture.id } });
   });
+
+  it("keeps camera attachment idempotent for the same node camera and capture source", async () => {
+    const { attached } = await makeNodeWithAssignment();
+    const rerun = await attachNodeCamera(prisma, {
+      nodeName: "xps",
+      stableId: "usb-logitech-1",
+      captureSourceId: attached.captureSource.id,
+      width: 1920,
+      height: 1080,
+      inputFormat: "mjpeg",
+    });
+
+    const assignments = await prisma.nodeCameraAssignment.findMany({
+      where: { nodeId: attached.node.id, nodeCameraId: attached.camera.id, captureSourceId: attached.captureSource.id },
+    });
+    expect(rerun.assignment.id).toBe(attached.assignment.id);
+    expect(rerun.createdAssignment).toBe(false);
+    expect(rerun.assignment.width).toBe(1920);
+    expect(assignments).toHaveLength(1);
+  });
 });

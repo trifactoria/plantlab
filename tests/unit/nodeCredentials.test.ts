@@ -28,4 +28,17 @@ describe("node credentials", () => {
       node: { name: "xps" },
     });
   });
+
+  it("reuses an active credential when attach is rerun without rotation", async () => {
+    const first = await registerOrRotateNode(prisma, { name: "xps", role: "camera-node", rotateCredential: true });
+    const second = await registerOrRotateNode(prisma, { name: "xps", role: "camera-node", rotateCredential: false });
+
+    expect(second.node.id).toBe(first.node.id);
+    expect(second.rotated).toBe(false);
+    expect(second.credential).toBe("");
+    expect(second.credentialHash).toBe(first.credentialHash);
+    await expect(authenticateNodeCredential(prisma, `Bearer ${first.credential}`)).resolves.toMatchObject({
+      node: { name: "xps" },
+    });
+  });
 });

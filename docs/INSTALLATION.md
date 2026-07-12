@@ -46,3 +46,8 @@ plantlab --help
 plantlab camera list
 plantlab backup list
 ```
+
+`./install.sh` bootstraps the local checkout. `plantlab install` performs
+deliberate local role setup or local role changes. Use
+`plantlab node attach <host>` from a coordinator to enroll or convert a
+remote camera node, and use `plantlab doctor --fix` for guided repair.
