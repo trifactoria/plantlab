@@ -240,6 +240,62 @@ async function checkNodeStatus(): Promise<DoctorCheck> {
   }
 }
 
+/**
+ * Distinguishes missing / not-writable / initialized / corrupt (Part 10 of
+ * the task this was built for) rather than the single "writable: boolean"
+ * a naive check would give. Only meaningful for a camera-node role -
+ * every other role reports pass (not applicable) so this never shows as a
+ * false problem on a coordinator/standalone machine.
+ */
+async function checkAgentSpoolHealth(): Promise<DoctorCheck> {
+  try {
+    const config = await readNodeConfig();
+    if (!config || config.role !== "camera-node") {
+      return pass("nodeStatus", "agent-spool", "Not applicable - this node is not configured as a camera-node.");
+    }
+
+    const spoolRoot = config.spoolRoot || path.join(process.env.HOME ?? "/root", ".local", "state", "plantlab-agent");
+    const rootStat = await stat(spoolRoot).catch(() => null);
+    if (!rootStat) {
+      return fail("nodeStatus", "agent-spool", `Spool root ${spoolRoot} is missing. Run "plantlab update" or "plantlab doctor --fix" to initialize it.`);
+    }
+
+    const { access, constants } = await import("node:fs/promises");
+    try {
+      await access(spoolRoot, constants.W_OK);
+    } catch {
+      return fail("nodeStatus", "agent-spool", `Spool root ${spoolRoot} exists but is not writable.`);
+    }
+
+    const requiredDirs = ["spool/pending", "spool/uploading", "spool/acknowledged", "spool/failed"];
+    const missing: string[] = [];
+    for (const dir of requiredDirs) {
+      const exists = await stat(path.join(spoolRoot, dir)).catch(() => null);
+      if (!exists) missing.push(dir);
+    }
+    if (missing.length > 0) {
+      return warn("nodeStatus", "agent-spool", `Spool root exists but is missing: ${missing.join(", ")}. Run "plantlab update" to initialize it.`);
+    }
+
+    const dbPath = path.join(spoolRoot, "state.sqlite");
+    const dbExists = await stat(dbPath).catch(() => null);
+    if (dbExists) {
+      try {
+        const { DatabaseSync } = await import("node:sqlite");
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        db.prepare("SELECT COUNT(*) FROM spool_records").get();
+        db.close();
+      } catch (error) {
+        return fail("nodeStatus", "agent-spool", `state.sqlite at ${dbPath} appears corrupt: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    return pass("nodeStatus", "agent-spool", `Initialized at ${spoolRoot}.`);
+  } catch (error) {
+    return warn("nodeStatus", "agent-spool", error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function coordinatorTableExists(tableName: string): Promise<boolean> {
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -251,7 +307,7 @@ async function coordinatorTableExists(tableName: string): Promise<boolean> {
 async function checkRegisteredNodes(): Promise<DoctorCheck> {
   try {
     if (!(await coordinatorTableExists("PlantLabNode"))) {
-      return warn("nodeStatus", "registered-nodes", 'Coordinator node tables are not migrated yet. Run "pnpm db:push" or apply migrations before attaching nodes.');
+      return warn("nodeStatus", "registered-nodes", 'Coordinator node tables are not migrated yet. Run "plantlab update" before attaching nodes.');
     }
     const count = await prisma.plantLabNode.count();
     if (count === 0) {
@@ -272,7 +328,7 @@ async function checkRegisteredNodes(): Promise<DoctorCheck> {
 async function checkAgentJobs(): Promise<DoctorCheck> {
   try {
     if (!(await coordinatorTableExists("AgentCaptureJob"))) {
-      return warn("captureService", "agent-capture-jobs", 'Agent job tables are not migrated yet. Run "pnpm db:push" or apply migrations before testing remote captures.');
+      return warn("captureService", "agent-capture-jobs", 'Agent job tables are not migrated yet. Run "plantlab update" before testing remote captures.');
     }
     const failed = await prisma.agentCaptureJob.count({ where: { status: "failed" } });
     const active = await prisma.agentCaptureJob.count({ where: { status: { in: ["queued", "claimed"] } } });
@@ -400,6 +456,7 @@ export async function runDoctorReport(options: DoctorReportOptions = {}): Promis
   checks.push(await checkCaptureServiceHealth());
   checks.push(await checkAgentJobs());
   checks.push(await checkNodeStatus());
+  checks.push(await checkAgentSpoolHealth());
   checks.push(await checkRegisteredNodes());
   checks.push(await checkBackupsHealth());
 

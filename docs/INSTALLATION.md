@@ -51,3 +51,19 @@ plantlab backup list
 deliberate local role setup or local role changes. Use
 `plantlab node attach <host>` from a coordinator to enroll or convert a
 remote camera node, and use `plantlab doctor --fix` for guided repair.
+
+## Upgrading (already-installed machine)
+
+```bash
+git pull
+plantlab update
+```
+
+`plantlab update` is the canonical upgrade path - not `./install.sh`
+again. It installs dependencies, regenerates the Prisma client, applies
+any pending database migrations (with a backup first, for a role that
+owns the canonical database), rebuilds, and restarts the services expected
+for this machine's configured role. It never runs `git pull` itself and
+never touches services or the database for roles that don't need it (a
+camera-node update never starts web/camera or migrates the domain
+database).

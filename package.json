@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
     "camera:capture": "tsx scripts/camera-capture.ts",
     "camera:list": "tsx scripts/camera-list.ts",
     "camera:watch": "tsx scripts/camera-watch.ts",

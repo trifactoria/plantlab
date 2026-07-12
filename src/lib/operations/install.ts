@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import path from "node:path";
-import { resolveAllPaths, resolveRootDir } from "../paths.server";
 import { checkExecutable, checkWritableDirectory } from "../startupChecks";
-import { resolveNodeConfigPath, type NodeRole, writeNodeConfig } from "./config";
+import { resolveAllPaths } from "../paths.server";
+import { resolveNodeConfigPath, type NodeRole } from "./config";
+import { applyMigrations } from "./migrations";
+import { convergeNodeRole } from "./roleConvergence";
 
 // See src/lib/paths.server.ts for why this is a plain runtime guard rather
 // than the `server-only` package.
@@ -16,7 +15,7 @@ if (typeof window !== "undefined") {
 export type InstallOptions = {
   role: NodeRole;
   coordinatorUrl?: string | null;
-  /** Skip generating systemd units - useful in a dev sandbox or CI where no systemd user session exists. */
+  /** Skip generating systemd units and starting services - useful in a dev sandbox or CI where no systemd user session exists. */
   skipSystemd?: boolean;
 };
 
@@ -29,15 +28,20 @@ export type InstallResult = {
   ok: boolean;
 };
 
+const DOMAIN_DB_ROLES = new Set<NodeRole>(["coordinator", "standalone"]);
+
 /**
  * Establishes the install architecture without trying to do every future
  * installation task (see ARCHITECTURE.md): validates the dependencies
- * `plantlab doctor` also checks (reused, not re-implemented), prepares
- * every data/backup/lock/ingest directory, records the chosen role in
- * plantlab.config.json, and - unless skipped - shells out to the existing,
- * already-reviewed deploy/systemd/install.sh for unit generation rather
- * than re-implementing systemd templating here. Coordinator registration
- * stays manual, exactly as this task's spec allows.
+ * `plantlab doctor` also checks (reused, not re-implemented), applies
+ * pending migrations for a role that owns the canonical domain database
+ * (see migrations.ts - a coordinator/standalone role must have its schema
+ * current *before* web/camera ever starts), then delegates directory
+ * preparation, systemd unit installation (mask-safe), and service
+ * enable/start entirely to convergeNodeRole() - the same canonical
+ * operation `plantlab node attach` and `plantlab doctor --fix` use, so
+ * install never duplicates any of those rules (see Part 2 of the task this
+ * was built for).
  */
 export async function runInstall(options: InstallOptions): Promise<InstallResult> {
   const steps: InstallStep[] = [];
@@ -55,29 +59,34 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     steps.push({ name: `directory:${name}`, ok: result.status !== "fail", detail: result.detail });
   }
 
-  const config = await writeNodeConfig(options.role, { coordinatorUrl: options.coordinatorUrl });
-  steps.push({ name: "node-config", ok: true, detail: `role="${config.role}" recorded for this node.` });
-
-  if (options.skipSystemd) {
-    steps.push({ name: "systemd-units", ok: true, detail: "Skipped (--skip-systemd)." });
-  } else {
-    const scriptPath = path.join(resolveRootDir(), "deploy", "systemd", "install.sh");
-    if (!existsSync(scriptPath)) {
-      steps.push({ name: "systemd-units", ok: false, detail: `deploy/systemd/install.sh not found at ${scriptPath}.` });
-    } else {
-      const result = spawnSync("bash", [scriptPath], { cwd: resolveRootDir(), stdio: "inherit" });
-      steps.push({
-        name: "systemd-units",
-        ok: result.status === 0,
-        detail: result.status === 0 ? "Generated systemd user units (see output above)." : `install.sh exited with status ${result.status}.`,
-      });
+  if (DOMAIN_DB_ROLES.has(options.role)) {
+    const migration = await applyMigrations();
+    for (const step of migration.steps) {
+      steps.push({ name: `migration:${step.name}`, ok: step.ok, detail: step.detail });
     }
+    if (!migration.ok) {
+      steps.push({ name: "migration-gate", ok: false, detail: "Migration did not succeed - refusing to start web/camera services against a stale or broken schema." });
+      return { role: options.role, configPath: resolveNodeConfigPath(), steps, ok: false };
+    }
+  } else {
+    steps.push({ name: "migrations", ok: true, detail: `Skipped - role "${options.role}" does not use the canonical domain database.` });
+  }
+
+  const convergence = await convergeNodeRole({
+    target: { kind: "local" },
+    role: options.role,
+    coordinatorUrl: options.coordinatorUrl ?? null,
+    startServices: !options.skipSystemd,
+    manageSystemd: !options.skipSystemd,
+  });
+  for (const step of convergence.steps) {
+    steps.push({ name: `service:${step.name}`, ok: step.status !== "failed", detail: step.detail });
   }
 
   return {
     role: options.role,
     configPath: resolveNodeConfigPath(),
     steps,
-    ok: steps.every((s) => s.ok),
+    ok: steps.every((s) => s.ok) && convergence.ok,
   };
 }

@@ -176,12 +176,20 @@ ensure_database_schema() {
   fi
 
   if [[ -f "$db_path" ]]; then
-    ok "Existing database detected; schema changes left untouched"
+    # Left untouched here on purpose - `plantlab install` (run below via
+    # run_plantlab_install) applies any pending/legacy migrations itself,
+    # with a backup first, for roles that use the canonical domain
+    # database. See DEPLOYMENT.md "Database migration policy".
+    ok "Existing database detected; schema changes left untouched (plantlab install will migrate it if needed)"
     return
   fi
 
+  # A brand-new database uses `prisma migrate deploy`, never `db push` -
+  # this is what gives it real migration history (_prisma_migrations) from
+  # day one, so it never needs the legacy-baselining recovery path this
+  # task added (see migrations.ts) for any *future* update.
   step "Preparing local SQLite database..."
-  run_quiet "database setup" bash -lc "cd '$REPO_ROOT' && pnpm db:push"
+  run_quiet "database setup" bash -lc "cd '$REPO_ROOT' && pnpm db:migrate"
   ok "Database schema prepared"
 }
 

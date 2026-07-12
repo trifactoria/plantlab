@@ -33,6 +33,13 @@ export async function recordHeartbeat(
     softwareVersion?: string | null;
   },
 ) {
+  // Unconditionally overwrites `status` - this is also how a
+  // "repair-required" flag (see nodeCredentials.ts markNodeStatus()) gets
+  // cleared: a real heartbeat is direct evidence the agent is running
+  // correctly again, so it always wins over a stale repair flag. The
+  // effective display status (pending/active/repair-required/revoked/
+  // offline) is computed from this field + lastHeartbeatAt by
+  // computeNodeStatus(), never read verbatim.
   return prisma.plantLabNode.update({
     where: { id: nodeId },
     data: {

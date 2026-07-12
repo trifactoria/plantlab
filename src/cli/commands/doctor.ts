@@ -1,17 +1,19 @@
 import type { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { formatBytes, runDoctorReport, runStorageAudit, applyStorageRemediation } from "../../lib/operations/doctor";
-import { registerOrRotateNode } from "../../lib/operations/nodeCredentials";
+import { checkMigrationStatus } from "../../lib/operations/migrations";
+import { computeNodeStatus, hasActiveCredential, markNodeStatus, registerOrRotateNode } from "../../lib/operations/nodeCredentials";
 import {
-  applyRemoteServiceRole,
-  configureRemoteAgent,
   defaultCoordinatorUrl,
   diagnoseRemoteAgent,
   inspectRemoteHost,
   type RemoteAgentDiagnostics,
   validateSshHost,
 } from "../../lib/operations/remoteNode";
-import { expectedServicesForRole, inappropriateServicesForRole } from "../../lib/operations/serviceRoles";
+import { convergeNodeRole } from "../../lib/operations/roleConvergence";
+import { expectedServicesForRole, inappropriateServicesForRole, SERVICE_UNITS } from "../../lib/operations/serviceRoles";
+import { buildQueryUnitStatesScript, classifyUnitState, isMaskedState, parseUnitStatesOutput } from "../../lib/operations/systemdUnits";
+import { runRemoteShell } from "../../lib/operations/shellExec";
 import { prisma } from "../../lib/prisma";
 import { printDoctorReport } from "../format";
 
@@ -164,131 +166,241 @@ Examples:
     );
 }
 
+/**
+ * Correlates the remote inspection with the coordinator's own PlantLabNode
+ * record (Part 12: "Doctor should be able to correlate: coordinator node
+ * record, remote hostname, remote config, credential state, last
+ * heartbeat") so a partially-enrolled node is recognized as such even when
+ * the remote's own local config is incomplete or wasn't written for some
+ * reason (Part 4) - the coordinator's recorded role/credential state is
+ * treated as at least as authoritative as whatever the remote machine's
+ * own plantlab.config.json currently says.
+ */
+async function loadCoordinatorRecord(sshHost: string) {
+  const node = await prisma.plantLabNode.findUnique({ where: { name: sshHost } });
+  if (!node) return null;
+  const activeCredential = await hasActiveCredential(prisma, node.id);
+  return { node, activeCredential, status: computeNodeStatus(node, activeCredential) };
+}
+
+async function queryRemoteAgentUnitState(sshHost: string) {
+  const script = buildQueryUnitStatesScript(["plantlab-agent.service", "plantlab-web.service", "plantlab-camera.service"]);
+  const result = await runRemoteShell(sshHost, script).catch(() => null);
+  return result ? parseUnitStatesOutput(result.stdout) : [];
+}
+
 async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: boolean }): Promise<void> {
   const inspection = await inspectRemoteHost(sshHost);
-  const role = inspection.role ?? "not configured";
   const repoPath = inspection.repoPath;
+  const coordinatorRecord = await loadCoordinatorRecord(sshHost);
+  // The intended role: prefer what the remote itself reports, but fall
+  // back to the coordinator's recorded intent when the remote's own config
+  // is missing/incomplete - see the doc comment above.
+  const intendedRole = inspection.role || coordinatorRecord?.node.role || null;
+
   const problems: string[] = [];
   const repairs: string[] = [];
 
-  let diagnostics: RemoteAgentDiagnostics | null = null;
-  if (repoPath) {
-    try {
-      diagnostics = await diagnoseRemoteAgent(sshHost, repoPath);
-    } catch (error) {
-      problems.push(`Agent diagnostics failed: ${error instanceof Error ? error.message : String(error)}`);
-      repairs.push(`Re-run: plantlab node attach ${sshHost}`);
-    }
-  } else {
-    problems.push("PlantLab repository was not found on the remote node.");
-    repairs.push("Clone or install PlantLab on the remote node before attaching it.");
+  if (!repoPath) {
+    console.log("Problems detected:");
+    console.log("1. PlantLab repository was not found on the remote node.");
+    console.log("");
+    console.log("Recommended repairs:");
+    console.log("1. Clone or install PlantLab on the remote node before attaching it.");
+    process.exitCode = 1;
+    return;
   }
 
-  if (inspection.role === "camera-node") {
+  let diagnostics: RemoteAgentDiagnostics | null = null;
+  try {
+    diagnostics = await diagnoseRemoteAgent(sshHost, repoPath);
+  } catch (error) {
+    problems.push(`Agent diagnostics failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const unitStates = await queryRemoteAgentUnitState(sshHost);
+  const agentUnit = unitStates.find((s) => s.id === "plantlab-agent.service");
+
+  if (intendedRole === "camera-node") {
     const expected = expectedServicesForRole("camera-node");
-    const inappropriate = inappropriateServicesForRole("camera-node").filter((service) => inspection.services[service] === "active");
-    if (diagnostics?.agentStatus !== "active") {
-      problems.push(`Agent service is ${diagnostics?.agentStatus ?? inspection.services.agent ?? "unknown"}.`);
-      repairs.push("Restart plantlab-agent.service.");
+    const inappropriateActive = inappropriateServicesForRole("camera-node")
+      .map((service) => ({ service, unit: SERVICE_UNITS[service] }))
+      .filter(({ unit }) => unitStates.find((s) => s.id === unit)?.activeState === "active");
+
+    if (agentUnit && isMaskedState(agentUnit)) {
+      problems.push(`Required unit plantlab-agent.service is masked (state: ${classifyUnitState(agentUnit)}).`);
+      repairs.push("Unmask plantlab-agent.service.");
+    }
+    if (!inspection.role) {
+      problems.push(coordinatorRecord ? "Remote role configuration is missing or incomplete (coordinator has a pending enrollment record)." : "Node role is not configured.");
+      repairs.push("Rewrite camera-node configuration.");
+    }
+    if (coordinatorRecord) {
+      problems.push(`Coordinator enrollment exists: ${coordinatorRecord.node.role} (${coordinatorRecord.status}).`);
+    } else {
+      problems.push("No coordinator enrollment record exists for this node yet.");
+      repairs.push("Register this node with the coordinator.");
     }
     if (!diagnostics?.credentialExists) {
       problems.push("Agent credential file is missing.");
-      repairs.push("Create or repair the agent credential file.");
+      repairs.push("Create/fix the agent credential file.");
     } else if (diagnostics.credentialMode !== "600" || diagnostics.credentialDirMode !== "700") {
       problems.push(`Agent credential permissions are ${diagnostics.credentialMode ?? "unknown"}/${diagnostics.credentialDirMode ?? "unknown"}, expected 0600/0700.`);
       repairs.push("Rewrite the credential file with restrictive permissions.");
     }
+    if (!diagnostics?.spoolWritable) {
+      problems.push("Agent spool root is missing or not writable.");
+      repairs.push("Create/fix the agent spool directory.");
+    }
     if (diagnostics?.coordinatorReachable === false) {
       problems.push(`Coordinator is unreachable from the node: ${diagnostics.coordinatorUrl ?? "(not configured)"}.`);
-      repairs.push("Verify the coordinator URL and network reachability.");
     }
-    for (const service of inappropriate) {
-      problems.push(`${service} service is running but should be stopped for camera-node role.`);
+    for (const { unit } of inappropriateActive) {
+      problems.push(`${unit} is active but should be stopped for camera-node role.`);
+      repairs.push(`Stop ${unit}.`);
     }
-    if (inappropriate.length > 0) {
-      repairs.push(`Stop inappropriate services; expected service(s): ${expected.join(", ")}.`);
+    if (!agentUnit || agentUnit.activeState !== "active") {
+      problems.push(`plantlab-agent.service is ${agentUnit ? classifyUnitState(agentUnit) : "not installed"}.`);
+      repairs.push("Install/update the agent unit and start it.");
+    }
+    if (coordinatorRecord && coordinatorRecord.status !== "active") {
+      problems.push(`Node status is "${coordinatorRecord.status}" (no recent heartbeat).`);
+      repairs.push("Restart the agent and wait for a heartbeat.");
     }
     if (inspection.cameras.length === 0) {
-      problems.push("No camera inventory has been reported by inspection.");
-      repairs.push("Restart the agent and refresh camera inventory.");
+      problems.push("No camera inventory has been reported.");
     }
-  } else if (inspection.role && inspection.role !== "camera-node") {
-    problems.push(`Node role is ${inspection.role}; remote camera attachment expects camera-node.`);
-    repairs.push(`Run: plantlab node attach ${sshHost}`);
-  } else {
-    problems.push("Node role is not configured.");
-    repairs.push(`Run: plantlab node attach ${sshHost}`);
-  }
 
-  if (problems.length === 0) {
-    console.log(`Remote node ${sshHost} looks healthy for role ${role}.`);
-    return;
-  }
+    if (problems.length === 0) {
+      console.log(`Remote node ${sshHost} looks healthy for role camera-node.`);
+      return;
+    }
 
-  console.log("Problems detected:");
-  problems.forEach((problem, index) => console.log(`${index + 1}. ${problem}`));
-  console.log("");
-  console.log("Recommended repairs:");
-  Array.from(new Set(repairs)).forEach((repair, index) => console.log(`${index + 1}. ${repair}`));
+    console.log("Problems detected:");
+    problems.forEach((problem, index) => console.log(`${index + 1}. ${problem}`));
+    console.log("");
+    console.log("Recommended repairs:");
+    Array.from(new Set(repairs)).forEach((repair, index) => console.log(`${index + 1}. ${repair}`));
 
-  if (!options.fix) {
-    process.exitCode = 1;
-    return;
-  }
-  if (!repoPath) {
-    process.exitCode = 1;
-    return;
-  }
+    if (!options.fix) {
+      process.exitCode = 1;
+      return;
+    }
 
-  console.log("");
-  if (inspection.role === "camera-node" && diagnostics) {
-    const needsCredentialRepair =
-      !diagnostics.credentialExists || diagnostics.credentialMode !== "600" || diagnostics.credentialDirMode !== "700";
-    if (needsCredentialRepair && (await confirmOrYes("Create or repair agent credential file? [Y/n] ", options.yes))) {
-      const registered = await registerOrRotateNode(prisma, {
+    console.log("");
+    const coordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || defaultCoordinatorUrl();
+
+    // convergeNodeRole() performs these together as one interdependent
+    // operation (you cannot sensibly install/start the agent unit without
+    // also unmasking it if masked, or without the config it reads on
+    // startup) - each question is asked individually for visibility and
+    // control per DEPLOYMENT.md "doctor --fix checklist", but any "yes"
+    // triggers the same underlying convergence.
+    const confirmations = [
+      await confirmOrYes("Unmask agent service? [Y/n] ", options.yes),
+      await confirmOrYes("Rewrite camera-node configuration? [Y/n] ", options.yes),
+      await confirmOrYes("Create/fix spool directory? [Y/n] ", options.yes),
+      await confirmOrYes("Stop web service? [Y/n] ", options.yes),
+      await confirmOrYes("Stop camera service? [Y/n] ", options.yes),
+      await confirmOrYes("Install/update agent unit? [Y/n] ", options.yes),
+      await confirmOrYes("Restart agent? [Y/n] ", options.yes),
+    ];
+    const waitForHeartbeat = await confirmOrYes("Wait for heartbeat? [Y/n] ", options.yes);
+
+    if (!confirmations.some(Boolean)) {
+      console.log("No repairs applied.");
+      return;
+    }
+
+    const needsCredentialRepair = !diagnostics?.credentialExists || diagnostics.credentialMode !== "600" || diagnostics.credentialDirMode !== "700";
+    let registered: Awaited<ReturnType<typeof registerOrRotateNode>> | null = null;
+    try {
+      registered = await registerOrRotateNode(prisma, {
         name: sshHost,
         hostname: inspection.remoteHostname ?? sshHost,
         role: "camera-node",
         operatingSystem: inspection.operatingSystem,
         architecture: inspection.architecture,
         softwareVersion: inspection.plantLabVersion,
-        coordinatorUrl: diagnostics.coordinatorUrl ?? inspection.coordinatorUrl ?? defaultCoordinatorUrl(),
-        rotateCredential: true,
+        coordinatorUrl,
+        rotateCredential: needsCredentialRepair,
       });
-      const configured = await configureRemoteAgent({
-        sshHost,
-        repoPath,
-        nodeName: sshHost,
-        coordinatorUrl: diagnostics.coordinatorUrl ?? inspection.coordinatorUrl ?? defaultCoordinatorUrl(),
-        credential: registered.credential,
-        spoolRoot: diagnostics.spoolRoot ?? `/home/${inspection.remoteUser ?? sshHost}/.local/state/plantlab-agent`,
-        startService: false,
-      });
-      if (configured.status !== 0) {
-        console.error(configured.stderr.trim() || "Credential repair failed.");
-        process.exitCode = 1;
-        return;
-      }
-      console.log("PASS: Agent credential file repaired.");
+    } catch (error) {
+      console.error(`Coordinator registration failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+      return;
     }
 
-    if (await confirmOrYes("Stop inappropriate services and restart the agent service? [Y/n] ", options.yes)) {
-      const result = await applyRemoteServiceRole(sshHost, "camera-node");
-      if (result.status !== 0) {
-        console.error(result.stderr.trim() || "Service repair failed.");
+    const heartbeatSince = new Date();
+    const convergence = await convergeNodeRole({
+      target: { kind: "remote", sshHost, repoPath },
+      role: "camera-node",
+      coordinatorUrl,
+      nodeName: sshHost,
+      spoolRoot: diagnostics?.spoolRoot || `/home/${inspection.remoteUser ?? sshHost}/.local/state/plantlab-agent`,
+      credential: registered.credential || null,
+      startServices: true,
+      remoteUser: inspection.remoteUser,
+    });
+
+    for (const step of convergence.steps) {
+      console.log(`${step.status === "failed" ? "FAIL" : step.status === "skipped" ? "SKIP" : "PASS"}: ${step.name}: ${step.detail}`);
+    }
+
+    if (!convergence.ok) {
+      await markNodeStatus(prisma, registered.node.id, "repair-required");
+      console.error("");
+      console.error(`Repair did not fully succeed. Safe to retry: ${convergence.retryCommand}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (waitForHeartbeat) {
+      console.log("Waiting for heartbeat...");
+      const started = Date.now();
+      let heartbeat = false;
+      while (Date.now() - started < 45_000) {
+        const node = await prisma.plantLabNode.findUnique({ where: { id: registered.node.id }, select: { lastHeartbeatAt: true } });
+        if (node?.lastHeartbeatAt && node.lastHeartbeatAt >= heartbeatSince) {
+          heartbeat = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      if (!heartbeat) {
+        await markNodeStatus(prisma, registered.node.id, "repair-required");
+        console.error("No heartbeat received within 45 seconds - the repair may not be fully effective yet.");
         process.exitCode = 1;
         return;
       }
-      console.log("PASS: camera-node services repaired.");
+      await markNodeStatus(prisma, registered.node.id, "pending");
+      console.log("PASS: Heartbeat received.");
     }
-  } else {
-    console.log(`Run this conversion flow instead: plantlab node attach ${sshHost}`);
-    process.exitCode = 1;
+
+    console.log("");
+    console.log(`Repair actions completed. Re-run: plantlab doctor --node ${sshHost}`);
     return;
   }
 
+  if (intendedRole && intendedRole !== "camera-node") {
+    const schemaCheck = await checkMigrationStatus().catch((error) => ({
+      current: false,
+      detail: error instanceof Error ? error.message : String(error),
+      pendingMigrations: [] as string[],
+    }));
+    if (!schemaCheck.current) {
+      problems.push(`Local database schema is stale: ${schemaCheck.detail}`);
+      repairs.push("Run: plantlab update (applies pending migrations after a backup).");
+    }
+  }
+  problems.push(intendedRole ? `Node role is ${intendedRole}; remote camera attachment expects camera-node.` : "Node role is not configured.");
+  repairs.push(`Run: plantlab node attach ${sshHost}`);
+
+  console.log("Problems detected:");
+  problems.forEach((problem, index) => console.log(`${index + 1}. ${problem}`));
   console.log("");
-  console.log(`Repair actions completed. Re-run: plantlab doctor --node ${sshHost}`);
+  console.log("Recommended repairs:");
+  Array.from(new Set(repairs)).forEach((repair, index) => console.log(`${index + 1}. ${repair}`));
+  process.exitCode = 1;
 }
 
 async function confirmOrYes(question: string, yes?: boolean): Promise<boolean> {

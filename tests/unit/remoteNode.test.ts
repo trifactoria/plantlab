@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentServiceUnit, buildConfigureRemoteAgentScript, validateSshHost } from "../../src/lib/operations/remoteNode";
+import { validateSshHost } from "../../src/lib/operations/remoteNode";
+import { buildAgentServiceUnit } from "../../src/lib/operations/systemdUnits";
 import { serviceUnitsForSelection } from "../../src/lib/operations/serviceRoles";
 
 describe("remote node helpers", () => {
@@ -21,21 +22,6 @@ describe("remote node helpers", () => {
     expect(unit).toContain("EnvironmentFile=/home/andy/.config/plantlab/agent.env");
     expect(unit).toContain("ExecStart=/usr/bin/pnpm run agent:service");
     expect(unit).not.toContain("run start");
-  });
-
-  it("resolves the remote home directory before writing the credential file", () => {
-    const script = buildConfigureRemoteAgentScript();
-
-    expect(script).toContain('home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"');
-    expect(script).toContain('env_dir="$home_dir/.config/plantlab"');
-    expect(script).toContain('env_path="$env_dir/agent.env"');
-    expect(script).not.toContain("'${HOME}/.config/plantlab/agent.env'");
-    expect(script).toContain('mkdir -p "$repo" "$env_dir" "$unit_dir" "$spool"');
-    expect(script).toContain('chmod 700 "$env_dir"');
-    expect(script).toContain('chmod 600 "$env_tmp"');
-    expect(script).toContain('mv "$env_tmp" "$env_path"');
-    expect(script).toContain('if [ "$env_mode" != "600" ]');
-    expect(script).toContain('if [ "$dir_mode" != "700" ]');
   });
 
   it("selects services by role instead of defaulting to every service", () => {

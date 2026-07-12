@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { isValidNodeRole, NODE_ROLES, readNodeConfig, resolveNodeConfigPath, writeNodeConfig } from "../../src/lib/operations/config";
+import { isValidNodeRole, NODE_ROLES, readNodeConfig, resolveNodeConfigPath, writeNodeConfig, writeNodeConfigRaw } from "../../src/lib/operations/config";
 import { resolveRootDir } from "../../src/lib/paths.server";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 describe("operations/config", () => {
@@ -43,5 +44,51 @@ describe("operations/config", () => {
 
   it("rejects an unknown role string", () => {
     expect(isValidNodeRole("not-a-role")).toBe(false);
+  });
+
+  describe("write atomicity", () => {
+    it("never leaves a temp file behind after a successful write", async () => {
+      await writeNodeConfig("standalone");
+      const entries = await readdir(resolveRootDir());
+      const tmpFiles = entries.filter((name) => name.includes(".tmp-"));
+      expect(tmpFiles).toEqual([]);
+    });
+
+    it("fully replaces the previous content rather than merging - a partial/corrupt intermediate state is never observable", async () => {
+      await writeNodeConfig("coordinator", { coordinatorUrl: "http://old:3000" });
+      await writeNodeConfig("camera-node", { coordinatorUrl: "http://new:3000", nodeName: "xps", spoolRoot: "/tmp/spool" });
+
+      const read = await readNodeConfig();
+      // Every field reflects the SECOND write only - nothing from the
+      // first write survives partially (e.g. old coordinatorUrl kept
+      // alongside a new role would indicate a non-atomic merge).
+      expect(read).toEqual({
+        formatVersion: 1,
+        role: "camera-node",
+        configuredAt: read!.configuredAt,
+        hostname: read!.hostname,
+        coordinatorUrl: "http://new:3000",
+        nodeName: "xps",
+        spoolRoot: "/tmp/spool",
+      });
+    });
+
+    it("writeNodeConfigRaw writes atomically for a hand-built config object", async () => {
+      const config = {
+        formatVersion: 1 as const,
+        role: "standalone" as const,
+        configuredAt: new Date().toISOString(),
+        hostname: "test-host",
+        coordinatorUrl: null,
+        nodeName: null,
+        spoolRoot: null,
+      };
+      await writeNodeConfigRaw(config);
+      const read = await readNodeConfig();
+      expect(read).toEqual(config);
+
+      const entries = await readdir(resolveRootDir());
+      expect(entries.filter((name) => name.includes(".tmp-"))).toEqual([]);
+    });
   });
 });

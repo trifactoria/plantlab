@@ -8,6 +8,7 @@ import { registerInstallCommand } from "./commands/install";
 import { registerNodeCommand } from "./commands/node";
 import { registerProjectCommand } from "./commands/project";
 import { registerServiceCommand } from "./commands/service";
+import { registerUpdateCommand } from "./commands/update";
 import { registerVersionCommand } from "./commands/version";
 
 /**
@@ -41,6 +42,7 @@ Examples:
   registerVersionCommand(program);
   registerDoctorCommand(program);
   registerInstallCommand(program);
+  registerUpdateCommand(program);
   registerServiceCommand(program);
   registerNodeCommand(program);
   registerCameraCommand(program);

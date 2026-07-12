@@ -4,15 +4,16 @@ import type { Command } from "commander";
 import { updateCameraInventory } from "../../lib/operations/agentProtocol";
 import { readNodeConfig } from "../../lib/operations/config";
 import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operations/manualCapture";
-import { registerOrRotateNode } from "../../lib/operations/nodeCredentials";
+import { markNodeStatus, registerOrRotateNode } from "../../lib/operations/nodeCredentials";
 import {
-  configureRemoteAgent,
+  checkCoordinatorReachableFromRemote,
   defaultCoordinatorUrl,
   diagnoseRemoteAgent,
   inspectRemoteHost,
   type RemoteAgentDiagnostics,
   type RemoteCameraInfo,
 } from "../../lib/operations/remoteNode";
+import { convergeNodeRole, type ConvergenceResult } from "../../lib/operations/roleConvergence";
 import { resolveAllPaths } from "../../lib/paths.server";
 import { prisma } from "../../lib/prisma";
 import type { CameraFormat } from "../../lib/v4l2";
@@ -186,6 +187,19 @@ Examples:
           return;
         }
 
+        // Step 2: validate coordinator reachability from the remote node's
+        // own vantage point - a warning, not a hard stop, since a
+        // transient network blip shouldn't block the rest of convergence.
+        const reachability = await checkCoordinatorReachableFromRemote(sshHost, options.coordinatorUrl).catch((error) => ({
+          reachable: false,
+          detail: error instanceof Error ? error.message : String(error),
+        }));
+        if (reachability.reachable) {
+          steps.complete("Coordinator reachability", reachability.detail);
+        } else {
+          console.log(`WARN: ${reachability.detail} Continuing - the agent will retry once network access is restored.`);
+        }
+
         if (inspection.role && inspection.role !== desiredRole) {
           console.log("");
           console.log(`${sshHost} is currently configured as ${inspection.role}.`);
@@ -215,6 +229,11 @@ Examples:
           return;
         }
 
+        // Credential reuse (Part 12): only rotate if the caller explicitly
+        // asked, or if the remote target's actual credential file is
+        // missing/has wrong permissions - a coordinator-side record alone
+        // is not "valid" if the remote file it's supposed to match isn't
+        // really there.
         let diagnostics: RemoteAgentDiagnostics | null = null;
         try {
           diagnostics = await diagnoseRemoteAgent(sshHost, repoPath);
@@ -225,6 +244,11 @@ Examples:
           !diagnostics?.credentialExists || diagnostics.credentialMode !== "600" || diagnostics.credentialDirMode !== "700";
         const rotateCredential = Boolean(options.rotateCredential || needsCredentialRepair);
 
+        // Coordinator registration happens before remote convergence
+        // completes (see DEPLOYMENT.md "Coordinator enrollment state") -
+        // registerOrRotateNode() now creates a brand new node with status
+        // "pending", never "active", so a partially-attached node is never
+        // displayed as healthy even though this step already succeeded.
         let registered: Awaited<ReturnType<typeof registerOrRotateNode>>;
         try {
           registered = await registerOrRotateNode(prisma, {
@@ -245,33 +269,43 @@ Examples:
           return;
         }
 
+        // Steps 6-14: the canonical convergence operation. Handles
+        // directory/spool prep, mask-safe unit install, atomic config +
+        // credential writes, stopping inappropriate services, enabling and
+        // starting the agent, and verifying the resulting systemd state -
+        // see roleConvergence.ts. Safe to re-run: every write here is
+        // either atomic or naturally idempotent.
         const heartbeatSince = new Date();
-        const configured = await configureRemoteAgent({
-          sshHost,
-          repoPath,
-          nodeName: sshHost,
+        const convergence: ConvergenceResult = await convergeNodeRole({
+          target: { kind: "remote", sshHost, repoPath },
+          role: "camera-node",
           coordinatorUrl: options.coordinatorUrl,
-          credential: registered.credential || null,
+          nodeName: sshHost,
           spoolRoot,
-          startService: true,
+          credential: registered.credential || null,
+          startServices: true,
+          remoteUser: inspection.remoteUser,
         });
-        if (configured.status !== 0) {
-          steps.fail("Remote configuration write", sanitizeText(configured.stderr.trim() || configured.stdout.trim() || "Remote configuration command failed."));
+        for (const step of convergence.steps) {
+          if (step.status === "failed") steps.fail(step.name, sanitizeText(step.detail));
+          else steps.complete(step.name, step.detail);
+        }
+        if (!convergence.ok) {
+          await markNodeStatus(prisma, registered.node.id, "repair-required");
           await printAgentDiagnosis(sshHost, repoPath);
-          printAttachIncomplete(steps, sshHost);
+          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
           process.exitCode = 1;
           return;
         }
-        steps.complete("Remote configuration write", "Config, credential file, and user service unit verified");
-        steps.complete("Service unit installation", "plantlab-agent.service installed");
-        steps.complete("Service start", "plantlab-agent.service start requested; web/camera services stopped for camera-node role");
 
+        // Step 15: wait for heartbeat/inventory.
         console.log("Waiting for heartbeat...");
         const heartbeat = await waitForNodeHeartbeat(registered.node.id, heartbeatSince, options.timeoutMs);
         if (!heartbeat) {
           steps.fail("Heartbeat", `No heartbeat received within ${Math.round(options.timeoutMs / 1000)} seconds`);
+          await markNodeStatus(prisma, registered.node.id, "repair-required");
           await printAgentDiagnosis(sshHost, repoPath);
-          printAttachIncomplete(steps, sshHost);
+          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
           process.exitCode = 1;
           return;
         }
@@ -288,11 +322,17 @@ Examples:
         }
         if (inventory.length === 0) {
           steps.fail("Camera report", "No camera inventory was reported or discovered by SSH probe");
-          printAttachIncomplete(steps, sshHost);
+          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
           process.exitCode = 1;
           return;
         }
         steps.complete("Camera report", `${inventory.length} camera(s) detected from ${inventorySource}`);
+
+        // Step 16: mark enrollment complete. Clears any "repair-required"
+        // flag from a previous attempt - the fresh heartbeat just above is
+        // direct evidence the node is genuinely healthy now, so
+        // computeNodeStatus() will report "active" from here on.
+        await markNodeStatus(prisma, registered.node.id, "pending");
 
         const result = {
           inspection,
@@ -301,7 +341,6 @@ Examples:
           credentialRotated: registered.rotated,
           inventorySource,
           cameras: inventory.length,
-          remoteOutput: configured.stdout.trim(),
         };
         if (options.json) {
           console.log(JSON.stringify(result, null, 2));
@@ -434,11 +473,23 @@ class AttachSteps {
   }
 }
 
-function printAttachIncomplete(steps: AttachSteps, sshHost: string): void {
+const ATTACH_STEP_ORDER = [
+  "Inspection",
+  "Coordinator reachability",
+  "Role confirmation",
+  "Coordinator registration",
+  "Heartbeat",
+  "Camera report",
+] as const;
+
+function printAttachIncomplete(steps: AttachSteps, sshHost: string, retryCommand?: string): void {
   console.error("");
   console.error("Attachment incomplete.");
   const completed = steps.items.filter((step) => step.status === "completed");
   const failed = steps.items.filter((step) => step.status === "failed");
+  const completedNames = new Set(steps.items.map((step) => step.name));
+  const pending = ATTACH_STEP_ORDER.filter((name) => !completedNames.has(name));
+
   if (completed.length > 0) {
     console.error("");
     console.error("Completed:");
@@ -449,11 +500,21 @@ function printAttachIncomplete(steps: AttachSteps, sshHost: string): void {
     console.error("Failed:");
     for (const step of failed) console.error(`FAIL: ${step.name}: ${step.detail}`);
   }
+  if (pending.length > 0) {
+    console.error("");
+    console.error("Not yet reached:");
+    for (const name of pending) console.error(`PENDING: ${name}`);
+  }
   console.error("");
-  console.error("Was anything changed? Completed steps above may have changed coordinator registration or remote user-service files.");
+  console.error(
+    steps.items.some((step) => step.name === "Coordinator registration" && step.status === "completed")
+      ? "A coordinator credential was created or reused for this node - it is retained (not deleted) so a retry can reuse it. See DEPLOYMENT.md \"Coordinator enrollment state\"."
+      : "No coordinator registration was written.",
+  );
   console.error("Rollback was not attempted automatically; no project data, photos, backups, or capture-source files were deleted.");
   console.error("");
-  console.error(`Suggested repair: plantlab doctor --node ${sshHost} --fix`);
+  console.error(`Safe to retry - re-running converges rather than repeating broken steps: ${retryCommand ?? `plantlab node attach ${sshHost}`}`);
+  console.error(`Or run guided repair: plantlab doctor --node ${sshHost} --fix`);
 }
 
 function sanitizeError(error: unknown): string {

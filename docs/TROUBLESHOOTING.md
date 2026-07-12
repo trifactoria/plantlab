@@ -52,6 +52,53 @@ camera node. `plantlab doctor --node <host> --fix` is the right command for
 credential, service, heartbeat, and camera-inventory repair after attachment.
 Do not rerun `./install.sh` for normal remote agent failures.
 
+## A required service is "masked"
+
+`plantlab node attach`/`plantlab doctor --fix` detect and clear this
+automatically - a required unit masked by a previous installation attempt
+(or by hand, e.g. `systemctl --user mask <unit>` during earlier manual
+debugging) is unmasked before it's reinstalled and started. You should
+never need to run `systemctl --user unmask` yourself; if you ever do,
+that's a sign `plantlab doctor --node <host> --fix` should be filed as a
+bug instead.
+
+Symptom: `Failed to enable unit: Unit ... is masked`. Fix:
+
+```bash
+plantlab doctor --node <host> --fix
+```
+
+## "Node role is not configured" but I already ran attach
+
+This means a previous attach attempt failed partway through. It is safe to
+retry - convergence is idempotent and resumes rather than repeating broken
+steps:
+
+```bash
+plantlab node attach <host>
+# or, for a guided repair with more granular prompts:
+plantlab doctor --node <host> --fix
+```
+
+The coordinator retains any credential already issued for the node and
+reuses it rather than rotating unnecessarily.
+
+## "Column does not exist" / stale database schema
+
+A service was started against a database that hasn't received recent
+migrations. Fix:
+
+```bash
+plantlab update
+```
+
+This backs up the database first, then applies pending migrations (or, for
+a database that predates this project's migration history, safely
+baselines it first - see `DEPLOYMENT.md` "Database migration policy").
+`plantlab service start`/`restart` also refuse outright (rather than
+crashing later) if the schema is not current when starting
+`plantlab-web.service` or `plantlab-camera.service`.
+
 ## Logs
 
 See [Systemd Services](SYSTEMD.md) for `journalctl` commands.

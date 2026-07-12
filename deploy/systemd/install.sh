@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# Installs the PlantLab web and camera/scheduler services as user-level
-# systemd units. Run once per machine: ./deploy/systemd/install.sh
+# Low-level unit-file generation only - installs the PlantLab web,
+# camera/scheduler, and agent user-level systemd unit files.
+#
+# `plantlab install` / `plantlab update` (which use the shared
+# convergeNodeRole() operation - see src/lib/operations/roleConvergence.ts)
+# are the CANONICAL way to set up or repair a machine now: they also
+# select the right units for the configured role, detect and clear a
+# stale mask, write plantlab.config.json, and start/stop the right
+# services. This script is kept only as a manual/advanced fallback for
+# regenerating bare unit files without going through role convergence -
+# see DEPLOYMENT.md "Canonical deployment paths".
 #
 # This only writes unit files - it does not enable, start, build, or
-# install dependencies. See DEPLOYMENT.md for the full sequence.
+# install dependencies.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,12 +30,28 @@ mkdir -p "$UNIT_DIR"
 install_unit() {
   local name="$1"
   local template_path="$SCRIPT_DIR/${name}.service.template"
-  local unit_path="$UNIT_DIR/${name}.service"
+  local unit_name="${name}.service"
+  local unit_path="$UNIT_DIR/${unit_name}"
 
+  # If this unit is currently masked (a `-> /dev/null` symlink), plain
+  # shell redirection (`sed ... > "$unit_path"`) would silently write
+  # THROUGH that symlink to /dev/null and leave the mask in place forever -
+  # see DEPLOYMENT.md "Systemd mask recovery" for how this was discovered.
+  # Detect and clear it first, then always write via a temp file + `mv`
+  # (which replaces the directory entry itself rather than following a
+  # symlink), never via `>` directly.
+  if systemctl --user is-enabled "$unit_name" 2>/dev/null | grep -q '^masked'; then
+    echo "Unmasking previously-masked unit: $unit_name"
+    systemctl --user unmask "$unit_name" 2>/dev/null || true
+  fi
+
+  local unit_tmp
+  unit_tmp="$(mktemp "$UNIT_DIR/${unit_name}.tmp.XXXXXX")"
   sed \
     -e "s#__REPO_PATH__#$REPO_PATH#g" \
     -e "s#__RUN_BIN__#$RUN_BIN#g" \
-    "$template_path" > "$unit_path"
+    "$template_path" > "$unit_tmp"
+  mv "$unit_tmp" "$unit_path"
 
   echo "Installed unit: $unit_path"
 }

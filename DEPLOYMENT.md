@@ -59,12 +59,18 @@ SQLite database and image storage, plus a camera node that captures locally
 and uploads frames back over ordinary HTTP. SSH is used only for inspection,
 enrollment, configuration, and systemd management.
 
-Before attaching nodes, apply the additive coordinator migration:
+Before attaching nodes, apply the additive coordinator migration - use
+`plantlab update` (preferred - backs up first and verifies the result; see
+"Database migration policy" below) or, equivalently:
 
 ```bash
 pnpm db:generate
-pnpm db:push
+pnpm db:migrate
 ```
+
+**Not** `pnpm db:push` - see "Database migration policy" below for why
+that must never be the default way to bring an *existing* database up to
+date.
 
 No existing project, photo, backup, capture source, or source capture is
 modified by that migration. The new tables store deployment metadata only:
@@ -94,6 +100,139 @@ The agent runtime (`pnpm agent:service`) keeps its own local
 then uploads it to `/api/agent-ingest` using the node credential. The
 coordinator acknowledges the job only after the canonical `SourceCapture` is
 created; failed uploads remain in the local spool for retry.
+
+## Canonical deployment paths
+
+Several mechanisms exist for installation, upgrade, and repair - this is
+the canonical mapping (see `ARCHITECTURE.md` for the full rationale):
+
+| Command | Purpose |
+| --- | --- |
+| `./install.sh` | Bootstrap only: dependencies, CLI symlink, first-run database setup, then hands off to `plantlab install`. Safe to re-run. |
+| `plantlab install` | Initial (or explicit) role setup on **this** machine - dependency checks, directories, migrations (for a domain-database role), systemd units, service start. |
+| `plantlab update` | Code/schema/service upgrade on an **already-configured** machine. Idempotent, role-aware. Never runs `git pull`. |
+| `plantlab node attach <host>` | Remote enrollment/role conversion over SSH - the only path that turns another machine into a camera node. |
+| `plantlab doctor --fix` / `--node <host> --fix` | Guided repair/convergence for an already-attempted (possibly partial) install or attach. |
+| `plantlab service ...` | Explicit, low-level systemctl control - a thin wrapper, never a substitute for install/update/attach/fix. |
+| `deploy/systemd/install.sh` | Low-level unit-file (re)generation only - a manual fallback, not invoked by any of the above. |
+
+`plantlab install`, `plantlab update`, `plantlab node attach`, and
+`plantlab doctor --fix` all share one implementation for the actual
+system-state changes - `convergeNodeRole()` in
+`src/lib/operations/roleConvergence.ts` (local target for the first two,
+remote/SSH target for the latter two) - so none of them can drift out of
+sync with each other on unit installation, mask handling, or which
+services are "expected" for a role. See "Canonical role-convergence
+design" in this session's task report for the full breakdown.
+
+`plantlab.config.json` (gitignored, node-local) is the only persistent
+role/coordinator-URL record on a given machine - see "Node roles" above.
+It is never itself a "deployment path"; every command above reads and
+writes it through `src/lib/operations/config.ts`, never ad hoc.
+
+## Systemd mask recovery
+
+**Root cause of a required unit staying masked forever across repeated
+attach/repair attempts** (found and fixed in this task - see the task
+report's "exact origin of the masked unit" for the full investigation):
+writing a systemd unit file via plain shell redirection
+(`sed ... > "$unit_path"`) against a path that is currently a
+`-> /dev/null` mask symlink **succeeds silently** and writes *through* the
+symlink to `/dev/null` - the mask is never cleared, and the "new" unit
+content is discarded every single time. This is what made a masked
+`plantlab-agent.service` un-recoverable by simply re-running attach: every
+retry silently no-opped on the one file write that mattered.
+
+No code in this repository's history ever called `systemctl --user mask`
+- a mask found on a real machine came from something outside this
+codebase (most plausibly manual `systemctl --user mask <unit>` during
+earlier ad hoc debugging, before the agent implementation existed).
+
+**Fix, applied everywhere a unit file is written** (`src/lib/operations/systemdUnits.ts`'s
+`buildUnitConvergenceScript()`, used by `convergeNodeRole()`, and
+`deploy/systemd/install.sh`'s `install_unit()`):
+
+1. Check `systemctl --user is-enabled <unit>` for a `masked` result -
+   report it (`MASK-CLEARED:<unit>` in convergence output) before touching
+   anything.
+2. Call `systemctl --user unmask <unit>` explicitly.
+3. Write the new unit content to a temp file in the same directory, then
+   `mv` it into place - `mv`/`rename(2)` **replaces the directory entry
+   itself** rather than following a symlink, so this is both atomic and
+   mask-safe even if step 2 were somehow skipped.
+4. `systemctl --user daemon-reload`.
+5. Only then `systemctl --user enable --now <unit>` - never before
+   confirming the unit is unmasked and freshly written.
+
+Verified empirically against a real `systemctl --user` session: masking a
+test unit, confirming plain `>` redirection leaves it masked (exit 0,
+silently), then confirming the convergence script above correctly
+detects, reports, clears the mask, and reaches `active`/`enabled`.
+
+If you ever see `Failed to enable unit: Unit ... is masked` from
+`plantlab node attach` or `plantlab doctor --fix` on a build older than
+this fix, update to a current build and re-run - it resolves
+automatically.
+
+## Database migration policy
+
+- **Coordinator / standalone** (own the canonical domain database): must
+  have a current schema before `plantlab-web.service`/`plantlab-camera.service`
+  start. `plantlab install` and `plantlab update` apply this automatically;
+  `plantlab service start`/`restart` additionally refuse outright (before
+  touching systemd at all) if the schema is stale when either of those
+  units is being started - see `refuseIfSchemaStale()` in
+  `src/cli/commands/service.ts`.
+- **Camera node**: never touches the canonical domain database and never
+  requires it to be migrated - the agent runtime
+  (`scripts/agent-service.ts`) only ever opens its own separate spool
+  `state.sqlite`, never `src/lib/prisma.ts`. `plantlab update` skips the
+  migration step entirely for this role.
+
+**Never uses `prisma db push` as the default way to update an existing
+database** - only `prisma migrate deploy`, applied via
+`src/lib/operations/migrations.ts`'s `applyMigrations()`:
+
+1. `checkMigrationStatus()` runs `prisma migrate status` and classifies the
+   result: current / pending migrations / **legacy** (no
+   `_prisma_migrations` history table at all).
+2. If the database already exists, `createBackup()` runs first (see
+   "Backups" below) - always, before any schema change.
+3. A **legacy** database (see below) is baselined first.
+4. `prisma migrate deploy` applies any remaining pending migrations.
+5. Status is re-checked; a service is refused to start if this didn't
+   result in "current".
+
+### Legacy (`db push`-managed) databases
+
+Every database created by `./install.sh` before this task **was** created
+this way - `ensure_database_schema()` used `pnpm db:push` for a brand-new
+database, which never creates `_prisma_migrations`. Once untracked, a
+plain `prisma migrate deploy` refuses outright with error P3005
+("database schema is not empty") rather than corrupting anything - verified
+empirically. The one-time, officially-documented recovery
+(<https://pris.ly/d/migrate-baseline>), automated here:
+
+1. `prisma migrate diff --from-url <db> --to-schema-datamodel prisma/schema.prisma --script`
+   compares the datamodel directly against the database's **real** current
+   schema (not its untracked history).
+2. An empty diff proves the database already matches HEAD - safe to
+   baseline with zero SQL executed.
+3. A non-empty diff (e.g. a genuinely missing column, exactly the
+   `Project.lifecycleState` failure this task's bokchoy scenario hit) is
+   applied via `prisma db execute` - the exact reconciling SQL Prisma
+   itself computed, never hand-written.
+4. Every migration is then marked applied via
+   `prisma migrate resolve --applied <name>` (bookkeeping only - no SQL
+   re-executed).
+
+Verified empirically against real copies of this project's database in
+both states (already-current-but-untracked, and genuinely missing the
+`lifecycleState` column) - both converge correctly to "up to date".
+
+**Fresh installs no longer hit this at all**: `./install.sh`'s first-run
+database setup now uses `pnpm db:migrate` (`prisma migrate deploy`), not
+`db:push`, so a new database has real migration history from day one.
 
 ## Diagnosis of the original failure
 
@@ -368,19 +507,24 @@ systemctl --user enable --now plantlab-web.service plantlab-camera.service
 
 `plantlab install` is the preferred entry point (see "PlantLab CLI" above
 and `ARCHITECTURE.md`): it validates dependencies, prepares every data/
-backup/lock/ingest directory, records the chosen role in
-`plantlab.config.json`, and then shells out to the exact same
-`deploy/systemd/install.sh` described below (no unit-generation logic is
-duplicated between them) - pass `--skip-systemd` to do everything except
-that last step, e.g. in a dev sandbox with no systemd user session.
+backup/lock/ingest directory, applies pending migrations for a
+domain-database role, records the chosen role in `plantlab.config.json`,
+and installs/unmasks/enables/starts exactly the units the role expects -
+all through the shared `convergeNodeRole()` operation (see "Canonical
+role-convergence design" in this session's task report), not by shelling
+out to `deploy/systemd/install.sh`. Pass `--skip-systemd` to write
+`plantlab.config.json` only, without touching systemd at all (not even
+`daemon-reload`) - e.g. in a dev sandbox with no systemd user session.
 Afterward, use `plantlab service status|start|stop|restart` as the
 preferred way to drive `systemctl` for both units together.
 
-Running `./deploy/systemd/install.sh` directly still works unchanged and
-does exactly what it always did - it writes (but does not enable/start)
+Running `./deploy/systemd/install.sh` directly still works as a manual,
+lower-level fallback - it writes (but does not enable/start)
 `~/.config/systemd/user/plantlab-web.service` and
 `~/.config/systemd/user/plantlab-camera.service` from the reviewed
-templates in `deploy/systemd/`. Both:
+templates in `deploy/systemd/`, and (like `convergeNodeRole()`) detects
+and clears a stale mask before writing. It is no longer invoked by
+`plantlab install`. Both generated units:
 
 - run as your normal login user via a systemd **user** unit (no root, no
   hardcoded username - the pre-existing pattern this task follows),
@@ -521,6 +665,19 @@ canonical project data during validation - `pnpm data:doctor` (without
 
 ## Known limitations
 
+- `plantlab node attach` only ever converts a remote machine to
+  `camera-node` - there is no remote "attach as coordinator" or "attach as
+  standalone" flow, so `convergeNodeRole()`'s remote target path never
+  needs to run migrations (a remote target in this codebase never owns the
+  canonical domain database). Setting up a remote machine as a
+  coordinator/standalone still means running `plantlab install` locally on
+  that machine.
+- `plantlab doctor --node <host> --fix`'s guided checklist runs the full
+  convergence as one operation rather than truly cherry-picking individual
+  repair steps (e.g. "only unmask, don't touch config") - the prompts give
+  visibility/control over *whether* to repair, not over which of the
+  interdependent steps run, since installing/starting the agent unit
+  inherently requires it to already be unmasked and configured.
 - Validated with the mocked `/dev/video-test` device (the existing
   convention for every camera test in this repo) plus, on this development
   sandbox, real `/dev/video0`-`/dev/video7` hardware (an integrated webcam

@@ -43,4 +43,11 @@ journalctl --user -u plantlab-camera.service -f
 journalctl --user -u plantlab-agent.service -f
 ```
 
-The generated unit templates live in `deploy/systemd/`.
+The generated unit templates live in `deploy/systemd/`. `plantlab install`
+and `plantlab update` are the canonical way to install/refresh these units
+now - they detect and clear a stale mask, write units atomically, and
+enable/start only the units the configured role expects. Running
+`deploy/systemd/install.sh` directly still works as a manual, lower-level
+fallback that only (re)writes unit files, without touching role
+configuration or service state - see [Troubleshooting](TROUBLESHOOTING.md)
+for masked-unit recovery.

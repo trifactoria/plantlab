@@ -1,12 +1,17 @@
-import { execFile, spawn } from "node:child_process";
+// Remote host inspection and diagnostics only - see roleConvergence.ts for
+// the actual convergence/repair operation (unit installation, mask
+// recovery, config/credential writes, service enable/disable). Kept
+// deliberately read-only/diagnostic so it never needs to duplicate any of
+// roleConvergence.ts's rules.
 import os from "node:os";
 import packageJson from "../../../package.json";
-import type { NodeRole } from "./config";
-import { SERVICE_UNITS, type PlantLabServiceName } from "./serviceRoles";
+import { resolveSshHost, runLocalCommand, runRemoteShell, validateSshHost, type CommandResult } from "./shellExec";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/remoteNode.ts shells out to ssh and must not run in a browser.");
 }
+
+export { runLocalCommand, runRemoteShell, validateSshHost, resolveSshHost, type CommandResult } from "./shellExec";
 
 export type RemoteCheckStatus = "pass" | "warn" | "fail" | "not-installed" | "not-configured";
 
@@ -61,77 +66,6 @@ export type RemoteInspection = {
   checks: RemoteCheck[];
   raw?: unknown;
 };
-
-const HOST_PATTERN = /^[A-Za-z0-9._@:+-]+$/;
-
-export function validateSshHost(host: string): void {
-  if (!HOST_PATTERN.test(host) || host.startsWith("-")) {
-    throw new Error(`Unsafe SSH host "${host}". Use an alias from ~/.ssh/config without whitespace or shell metacharacters.`);
-  }
-}
-
-export type CommandResult = { stdout: string; stderr: string; status: number | null };
-
-function runLocal(command: string, args: string[], options: { input?: string; timeoutMs?: number } = {}): Promise<CommandResult> {
-  return new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(command, args, { shell: false, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`${command} timed out after ${options.timeoutMs ?? 15000}ms.`));
-    }, options.timeoutMs ?? 15_000);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (status) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, status });
-    });
-    if (options.input) child.stdin.end(options.input);
-    else child.stdin.end();
-  });
-}
-
-export async function runRemoteShell(
-  sshHost: string,
-  script: string,
-  args: string[] = [],
-  options: { input?: string; timeoutMs?: number } = {},
-): Promise<CommandResult> {
-  validateSshHost(sshHost);
-  return runLocal("ssh", [sshHost, "sh", "-s", "--", ...args], {
-    input: `${script}\n${options.input ?? ""}`,
-    timeoutMs: options.timeoutMs ?? 20_000,
-  });
-}
-
-export async function resolveSshHost(host: string): Promise<string | null> {
-  validateSshHost(host);
-  return new Promise((resolve) => {
-    execFile("ssh", ["-G", host], { timeout: 5000 }, (error, stdout) => {
-      if (error) {
-        resolve(null);
-        return;
-      }
-      const hostName = stdout
-        .toString()
-        .split("\n")
-        .find((line) => line.toLowerCase().startsWith("hostname "))
-        ?.split(/\s+/)
-        .slice(1)
-        .join(" ");
-      resolve(hostName || null);
-    });
-  });
-}
 
 const INSPECT_SCRIPT = String.raw`
 set -eu
@@ -229,12 +163,12 @@ printf '}'
 export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspection> {
   validateSshHost(sshHost);
   const resolvedHost = await resolveSshHost(sshHost);
-  const result = await runLocal("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", sshHost, "sh", "-s"], {
+  const result = await runLocalCommand("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", sshHost, "sh", "-s"], {
     input: INSPECT_SCRIPT,
     timeoutMs: 20_000,
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    return { stdout: "", stderr: message, status: 255 };
+    return { stdout: "", stderr: message, status: 255 } as CommandResult;
   });
 
   if (result.status !== 0) {
@@ -351,134 +285,29 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
   };
 }
 
-export function buildAgentServiceUnit(input: { repoPath: string; runBin: string; envPath: string }) {
-  return `[Unit]
-Description=PlantLab camera-node agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${input.repoPath}
-Environment=NODE_ENV=production
-Environment=PLANTLAB_ROOT_DIR=${input.repoPath}
-EnvironmentFile=${input.envPath}
-ExecStart=${input.runBin} run agent:service
-SyslogIdentifier=plantlab-agent
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`;
-}
-
-export function buildConfigureRemoteAgentScript(): string {
-  return String.raw`
-set -eu
-repo="$1"
-home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"
-if [ -z "$home_dir" ]; then home_dir="$HOME"; fi
-env_dir="$home_dir/.config/plantlab"
-unit_dir="$home_dir/.config/systemd/user"
-env_path="$env_dir/agent.env"
-unit_path="$unit_dir/plantlab-agent.service"
-spool="$2"
-has_credential="$4"
-mkdir -p "$repo" "$env_dir" "$unit_dir" "$spool"
-chmod 700 "$env_dir"
-umask 077
-tmp="$(mktemp)"
-config_tmp="$(mktemp "$repo/plantlab.config.json.tmp.XXXXXX")"
-env_tmp="$(mktemp "$env_dir/agent.env.tmp.XXXXXX")"
-unit_tmp="$(mktemp "$unit_dir/plantlab-agent.service.tmp.XXXXXX")"
-trap 'rm -f "$tmp" "$config_tmp" "$env_tmp" "$unit_tmp"' EXIT
-cat > "$tmp"
-awk '
-  /^__PLANTLAB_CONFIG__$/ { section="config"; next }
-  /^__PLANTLAB_ENV__$/ { section="env"; next }
-  /^__PLANTLAB_UNIT__$/ { section="unit"; next }
-  /^__PLANTLAB_END__$/ { section=""; next }
-  section=="config" { print > config_path; next }
-  section=="env" { print > env_path; next }
-  section=="unit" { print > unit_path; next }
-' config_path="$config_tmp" env_path="$env_tmp" unit_path="$unit_tmp" "$tmp"
-run_bin="$(command -v pnpm || command -v npm || true)"
-if [ -z "$run_bin" ]; then
-  echo "Neither pnpm nor npm found on remote PATH." >&2
-  exit 12
-fi
-mv "$config_tmp" "$repo/plantlab.config.json"
-if [ "$has_credential" = "1" ]; then
-  chmod 600 "$env_tmp"
-  mv "$env_tmp" "$env_path"
-else
-  rm -f "$env_tmp"
-fi
-sed "s#__REPO_PATH__#$repo#g; s#__RUN_BIN__#$run_bin#g; s#__ENV_PATH__#$env_path#g" "$unit_tmp" > "$unit_path"
-if [ ! -f "$env_path" ]; then
-  echo "Agent credential file was not created at $env_path" >&2
-  exit 20
-fi
-chmod 600 "$env_path"
-env_mode="$(stat -c '%a' "$env_path")"
-env_owner="$(stat -c '%U' "$env_path")"
-dir_mode="$(stat -c '%a' "$env_dir")"
-if [ "$env_mode" != "600" ]; then echo "Credential file mode is $env_mode, expected 600" >&2; exit 21; fi
-if [ "$dir_mode" != "700" ]; then echo "Credential directory mode is $dir_mode, expected 700" >&2; exit 22; fi
-systemctl --user daemon-reload
-if [ "$3" = "1" ]; then
-  systemctl --user disable --now plantlab-web.service plantlab-camera.service >/dev/null 2>&1 || true
-  systemctl --user enable --now plantlab-agent.service
-fi
-printf '{"envPath":"%s","envMode":"%s","envOwner":"%s","envDirMode":"%s","unitPath":"%s"}\n' "$env_path" "$env_mode" "$env_owner" "$dir_mode" "$unit_path"
-`;
-}
-
-export async function configureRemoteAgent(input: {
-  sshHost: string;
-  repoPath: string;
-  nodeName: string;
-  coordinatorUrl: string;
-  credential: string | null;
-  spoolRoot: string;
-  startService: boolean;
-}) {
-  validateSshHost(input.sshHost);
-  const config = {
-    formatVersion: 1,
-    role: "camera-node" satisfies NodeRole,
-    configuredAt: new Date().toISOString(),
-    hostname: input.nodeName,
-    coordinatorUrl: input.coordinatorUrl,
-    nodeName: input.nodeName,
-    spoolRoot: input.spoolRoot,
-  };
-  const env = input.credential ? `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n` : "";
-  const remoteScript = buildConfigureRemoteAgentScript();
-  const unitTemplate = buildAgentServiceUnit({ repoPath: "__REPO_PATH__", runBin: "__RUN_BIN__", envPath: "__ENV_PATH__" });
-  const payload = [
-    "__PLANTLAB_CONFIG__",
-    JSON.stringify(config, null, 2),
-    "__PLANTLAB_ENV__",
-    env.trimEnd(),
-    "__PLANTLAB_UNIT__",
-    unitTemplate.trimEnd(),
-    "__PLANTLAB_END__",
-    "",
-  ].join("\n");
-  return runLocal("ssh", [input.sshHost, "sh", "-s", "--", input.repoPath, input.spoolRoot, input.startService ? "1" : "0", input.credential ? "1" : "0"], {
-    input: `${remoteScript}\n${payload}`,
-    timeoutMs: 20_000,
-  });
-}
-
 export function defaultCoordinatorUrl(): string {
   return `http://${os.hostname()}:3000`;
 }
 
 export function expectedRemoteVersion() {
   return packageJson.version;
+}
+
+/** Step 2 of the attach sequence (see roleConvergence.ts) - checked BEFORE any writes, from the remote node's own network vantage point, since that's what actually matters for the agent's heartbeat later. */
+export async function checkCoordinatorReachableFromRemote(
+  sshHost: string,
+  coordinatorUrl: string,
+): Promise<{ reachable: boolean; detail: string }> {
+  const script = `if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 '${coordinatorUrl.replace(/'/g, "'\\''")}/api/node-info' >/dev/null 2>&1 && echo REACHABLE || echo UNREACHABLE; else echo NOCURL; fi`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 10_000 });
+  const output = result.stdout.trim();
+  if (output === "REACHABLE") {
+    return { reachable: true, detail: `${sshHost} can reach ${coordinatorUrl}.` };
+  }
+  if (output === "NOCURL") {
+    return { reachable: true, detail: `curl is not installed on ${sshHost} - reachability could not be verified, proceeding anyway.` };
+  }
+  return { reachable: false, detail: `${sshHost} could not reach ${coordinatorUrl}/api/node-info.` };
 }
 
 export type RemoteAgentDiagnostics = {
@@ -577,19 +406,6 @@ printf '}\n'
     agentStatus: stringOrNull(parsed.agentStatus),
     agentJournal: stringArray(parsed.agentJournal),
   };
-}
-
-export async function applyRemoteServiceRole(sshHost: string, role: NodeRole | string): Promise<CommandResult> {
-  const expected: PlantLabServiceName[] = role === "camera-node" ? ["agent"] : role === "coordinator" ? ["web"] : ["web", "camera"];
-  const stop = (Object.keys(SERVICE_UNITS) as PlantLabServiceName[]).filter((service) => !expected.includes(service));
-  const startUnits = expected.map((service) => SERVICE_UNITS[service]);
-  const stopUnits = stop.map((service) => SERVICE_UNITS[service]);
-  const script = [
-    "set -eu",
-    stopUnits.length > 0 ? `systemctl --user disable --now ${stopUnits.map((unit) => `'${unit}'`).join(" ")} >/dev/null 2>&1 || true` : ":",
-    startUnits.length > 0 ? `systemctl --user enable --now ${startUnits.map((unit) => `'${unit}'`).join(" ")}` : ":",
-  ].join("\n");
-  return runRemoteShell(sshHost, script, [], { timeoutMs: 20_000 });
 }
 
 function stringOrNull(value: unknown): string | null {
