@@ -2,6 +2,9 @@
   "name": "plantlab",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "plantlab": "./bin/plantlab"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -13,10 +16,10 @@
     "camera:list": "tsx scripts/camera-list.ts",
     "camera:watch": "tsx scripts/camera-watch.ts",
     "camera:service": "tsx scripts/camera-service.ts",
-    "backup": "tsx scripts/backup.ts",
-    "backup:list": "tsx scripts/backup.ts list",
-    "doctor": "tsx scripts/doctor.ts",
-    "data:doctor": "tsx scripts/dataDoctor.ts",
+    "backup": "bin/plantlab backup create",
+    "backup:list": "bin/plantlab backup list",
+    "doctor": "bin/plantlab doctor",
+    "data:doctor": "bin/plantlab doctor storage",
     "test:e2e": "playwright test tests/e2e.spec.ts",
     "test:unit": "vitest run",
     "screenshots": "playwright test tests/screenshots.spec.ts"
@@ -25,6 +28,7 @@
     "@prisma/client": "6.19.3",
     "@tailwindcss/postcss": "4.3.2",
     "busboy": "^1.6.0",
+    "commander": "^15.0.0",
     "exifr": "^7.1.3",
     "luxon": "^3.7.2",
     "next": "15.5.20",

@@ -13,6 +13,43 @@ directories. This is not a hosted/multi-tenant deployment model - there is
 no separate "production server" the app is pushed to; the machine sitting
 next to the camera *is* production.
 
+## PlantLab CLI
+
+`plantlab` (`bin/plantlab`, run directly or via `npm run <script>` wrappers
+below) is the canonical operational interface - see `ARCHITECTURE.md` for
+the full design rationale. It is a thin launcher (`bin/plantlab`) that runs
+`src/cli/index.ts` under `tsx`, matching how every other operational script
+in this repo already runs (no separate compiled build for tooling).
+
+```bash
+plantlab version                 # print the app version
+plantlab doctor                  # structured health report (see below)
+plantlab doctor --capture        # also exercise real camera hardware
+plantlab doctor storage          # detailed orphan/stale-file audit + cleanup
+plantlab install                 # interactive role setup (see "Node roles")
+plantlab service status|start|stop|restart   # systemctl --user wrapper
+plantlab node list|info|discover             # this node + SSH-config candidates
+plantlab camera list|attach|test [device]    # local hardware camera commands
+plantlab backup create|list|verify|restore   # see "Backups" below
+plantlab project list|show|set-lifecycle     # see "Project lifecycle" below
+```
+
+Every command is a thin wrapper around shared logic in `src/lib/` (mostly
+`src/lib/operations/`) - the CLI never re-implements a check or workflow
+that already exists; the health-check logic in particular is shared
+verbatim with the web dashboard's `GET /api/health` (see "Production
+readiness check" below).
+
+**Compatibility wrappers**: `npm run doctor`, `npm run data:doctor`,
+`npm run backup`, and `npm run backup:list` still work exactly as before -
+they now call `bin/plantlab doctor`, `bin/plantlab doctor storage`,
+`bin/plantlab backup create`, and `bin/plantlab backup list` respectively,
+rather than duplicating any logic. `scripts/doctor.ts`, `scripts/dataDoctor.ts`,
+and `scripts/backup.ts` have been removed - their logic now lives in
+`src/lib/operations/doctor.ts` and `src/lib/backup.ts`, consumed by both the
+CLI and (for doctor) the web API. `scripts/camera-*.ts` and
+`scripts/agent-ingest-upload.sh` are unaffected.
+
 ## Diagnosis of the original failure
 
 Reproduced directly (`npm run build && npm run start`, hitting the running
@@ -52,7 +89,7 @@ server with `curl`) rather than guessed:
    them. Fixed by introducing `src/lib/paths.ts` as the one place every
    data/photo/capture/backup/lock path is resolved from (see "Path
    normalization" below).
-4. **`tsx` (needed to run `scripts/camera-service.ts` and `scripts/backup.ts`)
+4. **`tsx` (needed to run `scripts/camera-service.ts` and the `plantlab` CLI)
    was a devDependency.** A production install that omits dev dependencies
    (`npm ci --omit=dev`) would silently be unable to start the camera
    service. Moved to `dependencies` - see "Why `tsx` and not a compiled
@@ -148,13 +185,27 @@ own.
 ### Production readiness check
 
 ```bash
-npm run doctor
+plantlab doctor
+# or: npm run doctor
 ```
 
-Read-only by default. Add `-- --capture` (optionally `--capture=/dev/videoN`)
+Read-only by default. Add `--capture` (optionally `--capture=/dev/videoN`)
 to also perform one real hardware test capture - the frame is verified and
 then deleted; nothing is written to the database or to any project's photo
-directory. See "Production doctor command" below for what it checks.
+directory.
+
+Output is grouped into: Environment, Database, Storage, Camera, Capture
+Service, Build, Node Status, Backups. `plantlab doctor storage` (or
+`npm run data:doctor`) gives the full orphan-project-directory and
+stale-ingest-file audit with optional `--remove-empty-orphans`/
+`--remove-stale-ingest-files` cleanup flags - `plantlab doctor`'s own
+Storage section only ever summarizes counts, never deletes anything.
+
+The same report is available as JSON at `GET /api/health` (subject to the
+same `PLANTLAB_LOCAL_CAMERA_ENABLED` production gate as every other camera
+route - see "Diagnosis" above) via the shared `runDoctorReport()` function
+in `src/lib/operations/doctor.ts` - the CLI and the web app read one
+implementation, never two.
 
 ## Development-mode regression: `node:fs/promises` in the client graph
 
@@ -232,14 +283,15 @@ solely by code that is about to write a file (a capture, an upload, a
 fan-out derived photo), actually creates a directory. `DELETE
 /api/projects/[id]`'s preserve-on-delete behavior is unchanged.
 
-Run `npm run data:doctor` for a full audit (dry-run, read-only) comparing
-the database against `data/projects/`, and `npm run data:doctor --
---remove-empty-orphans` to clean up qualifying empty orphans (real
-directories only, never symlinks, never non-empty, only immediate children
-of the projects-data root not referenced by any current project ID, and
-only those older than a one-hour safety interval by default - see
-`src/lib/dataDoctor.server.ts`). `npm run doctor` surfaces an orphan-count
-`WARN` pointing at `data:doctor` but never deletes anything itself.
+Run `plantlab doctor storage` (or `npm run data:doctor`) for a full audit
+(dry-run, read-only) comparing the database against `data/projects/`, and
+`plantlab doctor storage --remove-empty-orphans` to clean up qualifying
+empty orphans (real directories only, never symlinks, never non-empty, only
+immediate children of the projects-data root not referenced by any current
+project ID, and only those older than a one-hour safety interval by default
+- see `src/lib/dataDoctor.server.ts`). `plantlab doctor`'s own Storage
+section surfaces an orphan-count `WARN` pointing at `doctor storage` but
+never deletes anything itself.
 
 ## Graceful service behavior
 
@@ -264,13 +316,25 @@ only those older than a one-hour safety interval by default - see
 See `deploy/systemd/README.md` for full detail. Summary:
 
 ```bash
-./deploy/systemd/install.sh
+plantlab install --role standalone   # or: ./deploy/systemd/install.sh directly
 systemctl --user daemon-reload
 systemctl --user enable --now plantlab-web.service plantlab-camera.service
 ```
 
-This writes (but does not enable/start) `~/.config/systemd/user/plantlab-web.service`
-and `~/.config/systemd/user/plantlab-camera.service` from the reviewed
+`plantlab install` is the preferred entry point (see "PlantLab CLI" above
+and `ARCHITECTURE.md`): it validates dependencies, prepares every data/
+backup/lock/ingest directory, records the chosen role in
+`plantlab.config.json`, and then shells out to the exact same
+`deploy/systemd/install.sh` described below (no unit-generation logic is
+duplicated between them) - pass `--skip-systemd` to do everything except
+that last step, e.g. in a dev sandbox with no systemd user session.
+Afterward, use `plantlab service status|start|stop|restart` as the
+preferred way to drive `systemctl` for both units together.
+
+Running `./deploy/systemd/install.sh` directly still works unchanged and
+does exactly what it always did - it writes (but does not enable/start)
+`~/.config/systemd/user/plantlab-web.service` and
+`~/.config/systemd/user/plantlab-camera.service` from the reviewed
 templates in `deploy/systemd/`. Both:
 
 - run as your normal login user via a systemd **user** unit (no root, no
@@ -282,6 +346,44 @@ templates in `deploy/systemd/`. Both:
   status` surfaces it instead of hiding it behind endless quiet retries),
 - wait for `network-online.target`,
 - log to the systemd journal (`journalctl --user -u <unit> -f`).
+
+## Node roles and `plantlab.config.json`
+
+`plantlab install` records this machine's role in
+`<PLANTLAB_ROOT_DIR>/plantlab.config.json` (gitignored, node-local, never
+included in a backup archive - see `src/lib/operations/config.ts`):
+`coordinator`, `camera-node`, `standalone` (today's default single-machine
+shape), `microscope-node`, or `mobile-uploader`. Only `standalone` has any
+real behavioral effect today - **none, identically to before this file
+existed** - the others exist purely so there is a durable, real place to
+record intent ahead of the actual multi-node capture-agent protocol, which
+is explicitly out of scope for this task (see `ARCHITECTURE.md`).
+`plantlab node info` shows this machine's configured role;
+`plantlab node list`/`plantlab node discover` additionally surface
+candidate machines from `~/.ssh/config` - informational only, nothing is
+verified reachable or registered anywhere.
+
+## Project lifecycle
+
+`Project.lifecycleState` (nullable string column, additive migration) is
+purely informational metadata today: `ACTIVE`, `COMPLETE`, `UNANNOTATED`,
+`ANNOTATED`, `ARCHIVED`, `PUBLISHED` (see `src/lib/projectLifecycle.ts`).
+Every project created before this field existed has `lifecycleState: null`,
+which application code always treats identically to `ACTIVE` - **zero
+behavior change** for existing projects; nothing currently reads this field
+to alter scheduling, capture, or visibility. Manage it via:
+
+```bash
+plantlab project list                          # id, name, lifecycle, camera
+plantlab project show <projectId>               # + capture status
+plantlab project set-lifecycle <projectId> ARCHIVED
+```
+
+This is the foundation for future backup/publication workflows (a project
+lifecycle snapshot is already recorded in every new backup's manifest - see
+"Backups" below) - no automatic transitions, no enforced ordering, and no
+file movement happen today; see `ARCHITECTURE.md`'s "Explicitly out of
+scope" for what's deferred.
 
 ## Environment loading
 
@@ -321,12 +423,12 @@ npm run db:push        # creates prisma/dev.db if it doesn't exist yet
 npm run db:generate
 rm -rf .next
 npm run build
-npm run doctor          # fix anything reported FAIL before continuing
-npm run data:doctor     # check for orphan project directories; add --remove-empty-orphans to clean up
+plantlab doctor              # fix anything reported FAIL before continuing
+plantlab doctor storage      # check for orphan project directories; add --remove-empty-orphans to clean up
 sudo usermod -aG video "$USER"   # only if doctor's camera-groups check fails
 # log out and back in if you just changed group membership, then:
-npm run doctor -- --capture     # optional real hardware smoke test
-./deploy/systemd/install.sh
+plantlab doctor --capture    # optional real hardware smoke test
+plantlab install --role camera-node   # or coordinator/standalone - generates systemd units too
 systemctl --user daemon-reload
 systemctl --user enable --now plantlab-web.service plantlab-camera.service
 systemctl --user status plantlab-web.service plantlab-camera.service
@@ -402,6 +504,23 @@ canonical project data during validation - `pnpm data:doctor` (without
   implement the full capture-agent job protocol, PostgreSQL, Supabase, T9
   archiving, schedule leases, mobile applications, or public Vercel export
   - those are explicitly out of scope for this task.
+- `plantlab node`/`camera attach` are intentionally thin in this task: node
+  discovery only reads `~/.ssh/config`, never verifies reachability or
+  registers anything; `camera attach` lists locally discovered hardware but
+  does not itself register a `CaptureSource` (use the web UI or
+  `POST /api/capture-sources`) - see `ARCHITECTURE.md` for why this is
+  deferred to the actual capture-agent protocol rather than half-built now.
+- `plantlab backup restore` is extract-only by design (see "Backups" above)
+  - it never performs a live database/data swap automatically, and no
+  remote backup destination (external SSD, remote coordinator, NAS, cloud)
+  is implemented, only the `BackupDestination` interface.
+- Project lifecycle transitions are not validated against any particular
+  order (`set-lifecycle` accepts any listed state from any other state) -
+  enforcing a real state machine is deferred until an actual workflow (e.g.
+  publication) depends on one.
+- This task does not implement a `packages/` monorepo split - see
+  `ARCHITECTURE.md` "Repository organization" for the reasoning and what
+  would trigger reconsidering it.
 
 ## Test isolation (unit tests never touch real PlantLab data)
 
@@ -641,9 +760,61 @@ application startup never performs destructive cleanup.
 
 ### Backup implications
 
-`npm run backup` already archives the whole configured root (database +
+`plantlab backup create` archives the whole configured root (database +
 `data/`), so ingested `SourceCapture` rows and their canonical files under
 `data/capture-sources/` are included automatically - no change needed to
-the existing backup process. The `.partial` staging directory
-(`PLANTLAB_INGEST_DIR`) is not canonical data and doesn't need to be backed
-up.
+the ingest pipeline. The `.partial` staging directory (`PLANTLAB_INGEST_DIR`)
+is not canonical data and doesn't need to be backed up. See "Backups" below
+for the full backup architecture.
+
+## Backups
+
+`src/lib/backup.ts` is the one implementation behind `plantlab backup
+create|list|verify|restore` (and the `npm run backup`/`backup:list`
+compatibility wrappers) - see `ARCHITECTURE.md` for the full design.
+
+**Archive format is unchanged and every existing backup remains fully
+restorable**: a `.tar.gz` containing `database.sqlite`, `manifest.json`, and
+the project data directory tree, exactly as before this task. What's new is
+strictly additive:
+
+- **Checksums**: `manifest.json` (format `"plantlab-backup/2"`) now records
+  `databaseSha256` and `archiveSha256`. A backup created before this task
+  has neither field - every reader here treats that as "legacy", never as
+  an error.
+- **Sidecar manifest**: a copy of the manifest is also written next to the
+  archive as `<archive>.tar.gz.manifest.json`, so `list`/`verify` can read
+  metadata (including the archive checksum) without extracting the whole
+  tar. A legacy backup simply has no sidecar.
+- **Project lifecycle snapshot**: `manifest.json` records each project's
+  `id`/`name`/lifecycle state (see "Project lifecycle" above) at backup
+  time - informational only, never consulted by restore.
+- **`BackupDestination` abstraction**: `LocalFilesystemDestination` (the
+  only implementation today, wrapping the pre-existing behavior of writing
+  into `resolveBackupDir()`/`PLANTLAB_BACKUP_DIR`) is the first of what will
+  eventually include external-SSD, remote-coordinator, NAS, and cloud
+  destinations - **none of those are implemented in this task**, only the
+  interface, so the CLI surface (`backup create`) doesn't need to change
+  shape when one is added later.
+
+```bash
+plantlab backup create              # create + checksum + sidecar manifest
+plantlab backup list                # newest last; shows metadata when available
+plantlab backup verify <archive>     # structural check + checksum if available
+plantlab backup restore <archive> --to <staging-dir>
+```
+
+**`backup restore` is intentionally extract-only** - it never overwrites
+the live database or `data/` directory automatically, and refuses outright
+if `--to` resolves to the live `PLANTLAB_ROOT_DIR`. This follows directly
+from this task's safety requirements (no destructive migration, no
+automatic cleanup of user data): swapping a restored database/data tree
+into place live is exactly the kind of operation that must stay a
+deliberate manual step. `restore` verifies the archive first (checksum, if
+available) and refuses on failure unless `--force` is passed; either way it
+prints the exact manual steps to complete a real restore (stop services,
+back up current live data first, copy files, restart).
+
+`plantlab doctor`'s Backups section warns if no backup exists yet or the
+most recent one is more than 7 days old - the same `listBackups()` this
+section's commands use, not a separate check.

@@ -17,7 +17,7 @@ see "run as the normal PlantLab user rather than root" in the top-level
 
 ## Prerequisites
 
-Run `npm run doctor` first (see `DEPLOYMENT.md`) - it checks everything
+Run `plantlab doctor` first (see `DEPLOYMENT.md`) - it checks everything
 below in one pass. Summarized:
 
 - `npm` (or `pnpm`) on `PATH` for the user that will run the services.
@@ -41,7 +41,10 @@ below in one pass. Summarized:
 
 ## Install
 
-From the repository root:
+From the repository root, either run `plantlab install` (preferred - also
+validates dependencies, prepares data directories, and records this
+machine's role; see `DEPLOYMENT.md` "PlantLab CLI"/"Node roles") or run
+this script directly for just the unit-generation step:
 
 ```
 ./deploy/systemd/install.sh

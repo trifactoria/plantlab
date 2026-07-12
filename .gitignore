@@ -11,5 +11,6 @@ test-results/
 backups/
 prisma/dev.db
 prisma/dev.db-journal
+/plantlab.config.json
 zips
 *.zip

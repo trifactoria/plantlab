@@ -27,6 +27,13 @@ model Project {
   cameraName                String?
   cameraStableId            String?
   cameraProfileId           String?
+  // Project lifecycle metadata only (see src/lib/projectLifecycle.ts for
+  // the allowed values and validation) - purely informational today, the
+  // foundation for future backup/publication workflows. Nullable so every
+  // existing project migrates safely with zero behavior change: null is
+  // treated identically to "ACTIVE" by application code, never enforced
+  // or auto-transitioned by this task.
+  lifecycleState            String?
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
 
