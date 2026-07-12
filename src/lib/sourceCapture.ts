@@ -1,10 +1,11 @@
-import { mkdir, readFile, rename, unlink } from "node:fs/promises";
+import { readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { CameraProfile, CaptureSource, SourceCapture } from "@prisma/client";
 import { applyProfileSettings, nextCapturePath, runFfmpeg, type CameraSettings } from "./camera";
 import { withCameraLock } from "./cameraLock";
 import { verifyCapturedDimensions } from "./captureVerify";
 import { parseRotation, transformedDimensions, type Rotation } from "./orientation";
+import { ensureDirectoryExists } from "./projectPaths.server";
 import { prisma } from "./prisma";
 import { isUniqueConstraintError } from "./prismaErrors";
 
@@ -85,7 +86,7 @@ export async function captureSourcePhoto(
   }
 
   const settings = getCaptureSourceSettings(source);
-  await mkdir(source.captureDirectory, { recursive: true });
+  await ensureDirectoryExists(source.captureDirectory);
 
   const temporaryPath = path.join(
     source.captureDirectory,

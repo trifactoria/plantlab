@@ -1,7 +1,7 @@
 import { captureProjectPhoto } from "../src/lib/camera";
 import { CaptureScheduler, consoleLogger } from "../src/lib/captureService";
 import { CaptureSourceScheduler } from "../src/lib/captureSourceService";
-import { logResolvedPaths, resolveDataDir, resolveRuntimeLocksDir } from "../src/lib/paths";
+import { logResolvedPaths, resolveDataDir, resolveRuntimeLocksDir } from "../src/lib/paths.server";
 import { prisma } from "../src/lib/prisma";
 import { writeHeartbeat } from "../src/lib/serviceStatus";
 import { captureSourcePhoto } from "../src/lib/sourceCapture";

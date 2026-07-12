@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import {
   badRequest,
@@ -9,7 +8,7 @@ import {
   requiredPositiveInt,
   requiredString,
 } from "@/lib/http";
-import { defaultCaptureSourceDirectory } from "@/lib/projectPaths";
+import { defaultCaptureSourceDirectory, isDirectoryUsable } from "@/lib/projectPaths.server";
 import { prisma } from "@/lib/prisma";
 import { isValidRotation } from "@/lib/orientation";
 import { requireValidTimeZone, systemTimeZone } from "@/lib/timezone";
@@ -42,6 +41,13 @@ export async function POST(request: Request) {
         ? defaultCaptureSourceDirectory(id)
         : requiredString(body.captureDirectory, "captureDirectory");
 
+    // Validate without creating - see ensureDirectoryExists() in
+    // projectPaths.server.ts. The directory is created lazily by the
+    // first real source capture.
+    if (!(await isDirectoryUsable(captureDirectory))) {
+      return badRequest(`Capture directory is not usable: ${captureDirectory}`);
+    }
+
     const source = await prisma.captureSource.create({
       data: {
         id,
@@ -71,14 +77,6 @@ export async function POST(request: Request) {
             : Number(body.captureWindowEndMinutes),
       },
     });
-
-    try {
-      await mkdir(captureDirectory, { recursive: true });
-    } catch (error) {
-      console.error(error);
-      await prisma.captureSource.delete({ where: { id: source.id } }).catch(() => undefined);
-      return badRequest(`Could not create capture directory: ${captureDirectory}`);
-    }
 
     return NextResponse.json(source, { status: 201 });
   } catch (error) {

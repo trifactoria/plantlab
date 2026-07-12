@@ -16,6 +16,7 @@
     "backup": "tsx scripts/backup.ts",
     "backup:list": "tsx scripts/backup.ts list",
     "doctor": "tsx scripts/doctor.ts",
+    "data:doctor": "tsx scripts/dataDoctor.ts",
     "test:e2e": "playwright test tests/e2e.spec.ts",
     "test:unit": "vitest run",
     "screenshots": "playwright test tests/screenshots.spec.ts"

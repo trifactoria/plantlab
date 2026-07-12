@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { validateCaptureConfig } from "@/lib/captureEligibility";
 import { DEFAULT_PROJECT_MILESTONES } from "@/lib/experiment";
@@ -15,7 +14,7 @@ import {
   requiredString,
   serverError,
 } from "@/lib/http";
-import { defaultProjectPhotoDirectory } from "@/lib/projectPaths";
+import { defaultProjectPhotoDirectory, isDirectoryUsable } from "@/lib/projectPaths.server";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
@@ -35,6 +34,17 @@ export async function POST(request: Request) {
     const localPhotoDirectory = useDefaultPhotoDirectory
       ? defaultProjectPhotoDirectory(projectId)
       : requiredString(body?.localPhotoDirectory, "localPhotoDirectory");
+
+    // Validate without creating - the directory itself is created lazily
+    // by the first real capture/upload (see ensureDirectoryExists in
+    // projectPaths.server.ts). Creating it here unconditionally, for every
+    // project ever created (including throwaway/test ones that get
+    // deleted immediately after), is what caused data/projects/ to
+    // accumulate empty orphan directories.
+    if (!(await isDirectoryUsable(localPhotoDirectory))) {
+      return badRequest(`Local photo directory is not usable: ${localPhotoDirectory}`);
+    }
+
     const captureStartAt = optionalDate(body?.captureStartAt);
     const photoIntervalMinutes = requiredPositiveInt(
       body?.photoIntervalMinutes,
@@ -114,14 +124,6 @@ export async function POST(request: Request) {
         },
       },
     });
-
-    try {
-      await mkdir(localPhotoDirectory, { recursive: true });
-    } catch (error) {
-      console.error(error);
-      await prisma.project.delete({ where: { id: project.id } }).catch(() => undefined);
-      return badRequest(`Could not create photo directory: ${localPhotoDirectory}`);
-    }
 
     return NextResponse.json(project, { status: 201 });
   } catch (error) {

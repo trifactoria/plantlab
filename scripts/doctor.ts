@@ -17,7 +17,8 @@ import { unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { resolveAllPaths, resolveRootDir, resolveSqliteDatabasePath } from "../src/lib/paths";
+import { auditProjectDirectories } from "../src/lib/dataDoctor.server";
+import { resolveAllPaths, resolveRootDir, resolveSqliteDatabasePath } from "../src/lib/paths.server";
 import { prisma } from "../src/lib/prisma";
 import {
   checkCameraGroupMembership,
@@ -117,6 +118,35 @@ async function checkCameraStableIdResolution(): Promise<CheckResult> {
   }
 }
 
+/**
+ * Read-only summary only - this never deletes anything, even a very old
+ * empty orphan. Run "npm run data:doctor" for the full report and
+ * "npm run data:doctor -- --remove-empty-orphans" to actually clean up.
+ */
+async function checkOrphanProjectDirectories(): Promise<CheckResult> {
+  try {
+    const report = await auditProjectDirectories(prisma);
+
+    if (report.nonEmptyOrphans.length > 0) {
+      return warn(
+        "orphan-project-directories",
+        `${report.emptyOrphans.length} empty and ${report.nonEmptyOrphans.length} NON-EMPTY orphan project director${report.nonEmptyOrphans.length === 1 ? "y" : "ies"} found - run "npm run data:doctor" for details (non-empty orphans are never auto-deleted).`,
+      );
+    }
+
+    if (report.emptyOrphans.length > 0) {
+      return warn(
+        "orphan-project-directories",
+        `${report.emptyOrphans.length} empty orphan project director${report.emptyOrphans.length === 1 ? "y" : "ies"} detected. Run "npm run data:doctor" for details.`,
+      );
+    }
+
+    return pass("orphan-project-directories", "No orphan project directories found.");
+  } catch (error) {
+    return warn("orphan-project-directories", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function parseCaptureFlag(argv: string[]): { requested: boolean; device: string | null } {
   const flag = argv.find((arg) => arg === "--capture" || arg.startsWith("--capture="));
   if (!flag) {
@@ -207,6 +237,7 @@ async function main() {
   results.push(await checkCameraStableIdResolution());
 
   results.push(checkNextBuildPresent());
+  results.push(await checkOrphanProjectDirectories());
 
   if (captureRequested) {
     console.log("--capture requested: performing one real hardware test capture (not saved as a project photo).\n");

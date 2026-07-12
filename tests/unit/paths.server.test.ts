@@ -11,7 +11,7 @@ import {
   resolveRootDir,
   resolveRuntimeLocksDir,
   resolveSqliteDatabasePath,
-} from "../../src/lib/paths";
+} from "../../src/lib/paths.server";
 
 const ORIGINAL_ROOT = process.env.PLANTLAB_ROOT_DIR;
 const ORIGINAL_BACKUP_DIR = process.env.PLANTLAB_BACKUP_DIR;

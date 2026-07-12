@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, unlink } from "node:fs/promises";
+import { readFile, rename, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -7,6 +7,7 @@ import type { CameraProfile, Photo, Project } from "@prisma/client";
 import { withCameraLock } from "./cameraLock";
 import { createPhotoRecord } from "./photoIngest";
 import { formatLocalTimestamp } from "./photos";
+import { ensureDirectoryExists } from "./projectPaths.server";
 import { prisma } from "./prisma";
 import { testCameraMockModeEnabled, testCaptureMockModeEnabled } from "./testProjectSafety";
 import { applyCameraControls } from "./v4l2";
@@ -212,7 +213,7 @@ export async function captureProjectPhoto(projectId: string, options: CaptureOpt
   }
 
   const settings = getCameraSettings(project);
-  await mkdir(project.localPhotoDirectory, { recursive: true });
+  await ensureDirectoryExists(project.localPhotoDirectory);
 
   const temporaryPath = path.join(
     project.localPhotoDirectory,

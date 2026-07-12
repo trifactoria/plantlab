@@ -156,6 +156,91 @@ to also perform one real hardware test capture - the frame is verified and
 then deleted; nothing is written to the database or to any project's photo
 directory. See "Production doctor command" below for what it checks.
 
+## Development-mode regression: `node:fs/promises` in the client graph
+
+A later commit that added `src/instrumentation.ts` (startup path logging)
+broke `npm run dev`/`pnpm dev` entirely - every route returned 500 with:
+
+```
+⨯ node:fs/promises
+Module build failed: UnhandledSchemeError: Reading from "node:fs/promises"
+is not handled by plugins.
+Import trace for requested module:
+node:fs/promises
+./src/lib/paths.ts
+```
+
+**Root cause, confirmed by bisection (not guessed):** Next.js compiles
+`src/instrumentation.ts` for an edge-compatible webpack target in addition
+to the Node target, and that edge-target compile has **no Node builtin
+resolution at all**. `instrumentation.ts` dynamically imported
+`./lib/paths` (guarded by `if (process.env.NEXT_RUNTIME !== "nodejs")
+return;`), and that module has a top-level `import path from "node:path"`
+and a dynamic `import("node:fs/promises")`. The runtime guard doesn't help:
+webpack still has to produce a valid bundle for both compilation targets
+regardless of which branch actually executes. Verified empirically that
+**any** Node builtin import reachable from `instrumentation.ts` reproduces
+the failure - static or dynamic, `node:`-prefixed or bare, and even with
+zero other imports in the file (a lone `import path from "node:path"` at
+the top of `instrumentation.ts` itself was enough).
+
+**Fix:**
+- `src/instrumentation.ts` now inlines the ~10 lines of logic it needs
+  (`process.cwd()`/`process.env` only - no imports of any kind) instead of
+  importing the shared resolver. This is documented at the top of the file
+  itself so a future "helpfully" re-added shared import doesn't reintroduce
+  the bug.
+- `src/lib/paths.ts` and `src/lib/projectPaths.ts` were renamed to
+  `paths.server.ts`/`projectPaths.server.ts` and given a runtime guard
+  (`if (typeof window !== "undefined") throw ...`) establishing an explicit
+  server-only boundary, in case a Client Component ever imports them
+  directly (confirmed via a full static reverse-dependency-graph walk that
+  none currently does). The `server-only` npm package was deliberately
+  **not** used - its poison-pill only no-ops under Next's "react-server"
+  bundler condition, which plain Vitest and `tsx` don't set, so it broke
+  the entire unit test suite and would have equally broken `npm run
+  doctor`/`npm run camera:service`.
+- `tests/unit/importBoundaries.test.ts` statically walks the real import
+  graph (not a hand-maintained allowlist) from `instrumentation.ts` and
+  every `"use client"` component, and fails if either can reach a module
+  with a top-level Node builtin import - verified to catch the exact
+  regression above by temporarily reverting the fix and confirming the
+  test fails.
+
+## Orphan project directories
+
+`data/projects/` was accumulating empty, never-cleaned-up directories for
+projects that no longer exist. **Root cause:** two code paths eagerly
+created a project's photo directory before any photo was ever written to
+it: (1) `POST /api/projects` created it unconditionally at project-creation
+time, and (2) `GET /api/service-status` - polled every 10 seconds by the
+home page's `ServiceStatusPanel` - called `checkCaptureEligibility()` for
+*every* project in the database on every poll, which called
+`mkdir(..., {recursive:true})` as an "eligibility" probe regardless of
+whether the project was even capture-enabled. Combined with
+`DELETE /api/projects/[id]`'s intentional, unchanged policy of preserving
+a project's photo directory after deletion (so real photos are never
+silently lost), every project that was created and then deleted before its
+first real capture - overwhelmingly e2e test throwaway projects - left a
+permanent empty directory behind.
+
+**Fix:** path resolution and eligibility checks are now strictly read-only
+(`isDirectoryUsable()` in `src/lib/projectPaths.server.ts` probes
+writability via `fs.access`/`fs.stat`, walking up to the nearest existing
+ancestor - it never calls `mkdir`). Only `ensureDirectoryExists()`, called
+solely by code that is about to write a file (a capture, an upload, a
+fan-out derived photo), actually creates a directory. `DELETE
+/api/projects/[id]`'s preserve-on-delete behavior is unchanged.
+
+Run `npm run data:doctor` for a full audit (dry-run, read-only) comparing
+the database against `data/projects/`, and `npm run data:doctor --
+--remove-empty-orphans` to clean up qualifying empty orphans (real
+directories only, never symlinks, never non-empty, only immediate children
+of the projects-data root not referenced by any current project ID, and
+only those older than a one-hour safety interval by default - see
+`src/lib/dataDoctor.server.ts`). `npm run doctor` surfaces an orphan-count
+`WARN` pointing at `data:doctor` but never deletes anything itself.
+
 ## Graceful service behavior
 
 - `scripts/camera-service.ts` already handled `SIGINT`/`SIGTERM` before this
@@ -234,8 +319,10 @@ npm install
 cp .env.example .env   # if present; otherwise create .env with DATABASE_URL="file:./dev.db"
 npm run db:push        # creates prisma/dev.db if it doesn't exist yet
 npm run db:generate
+rm -rf .next
 npm run build
 npm run doctor          # fix anything reported FAIL before continuing
+npm run data:doctor     # check for orphan project directories; add --remove-empty-orphans to clean up
 sudo usermod -aG video "$USER"   # only if doctor's camera-groups check fails
 # log out and back in if you just changed group membership, then:
 npm run doctor -- --capture     # optional real hardware smoke test
@@ -245,6 +332,45 @@ systemctl --user enable --now plantlab-web.service plantlab-camera.service
 systemctl --user status plantlab-web.service plantlab-camera.service
 curl -s http://localhost:3000/api/service-status
 ```
+
+## Cross-machine validation commands
+
+### XPS (development sandbox)
+
+```bash
+git switch dev
+git pull
+pnpm install
+rm -rf .next
+pnpm typecheck
+pnpm test:unit
+pnpm dev
+```
+
+Then verify `/`, a project dashboard, project settings, camera setup, and
+`/capture-sources` all load (see "Development-mode regression" above for
+exactly what this now catches).
+
+### bokchoy (production target)
+
+Before changing any service configuration:
+
+```bash
+git switch dev
+git pull
+pnpm install
+rm -rf .next
+pnpm build
+pnpm doctor
+pnpm doctor -- --capture
+```
+
+Then verify both production processes manually (`pnpm start` in one
+terminal, `pnpm camera:service` in another - see "Production commands"
+above) before enabling either systemd unit. Do not touch or delete
+canonical project data during validation - `pnpm data:doctor` (without
+`--remove-empty-orphans`) is safe to run any time; only pass
+`--remove-empty-orphans` once you've reviewed its dry-run output.
 
 ## Known limitations
 
@@ -265,3 +391,13 @@ curl -s http://localhost:3000/api/service-status
 - This task intentionally does not touch PostgreSQL, remote/Tailscale
   capture agents, mobile uploads, or storage archiving - SQLite and the
   existing photo-directory layout are unchanged.
+- `tests/unit/photoIngestRoutes.test.ts`'s before/after `Photo` count
+  assertion is occasionally flaky **only** when the full suite runs (all
+  test files concurrently against one shared real SQLite database) - it
+  passes reliably in isolation every time it was tried. This is pre-existing
+  test-infrastructure behavior (confirmed unrelated to any change in this
+  task by running it standalone repeatedly), not a product bug: Vitest runs
+  test files in parallel by default, and any other file's concurrent
+  `Photo` row creation/cleanup can shift the count between this one test's
+  two snapshots. Not fixed here - out of scope (would need either
+  sequential test execution or a per-worker isolated database).

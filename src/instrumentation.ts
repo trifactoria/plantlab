@@ -4,25 +4,48 @@
  * deployment (wrong working directory, missing PLANTLAB_ROOT_DIR) is
  * visible in the process's own logs immediately, rather than only
  * surfacing later as a confusing 404/permission error on first camera use.
- * Never throws - a path-logging failure must not prevent the web app
- * (which also serves everything unrelated to cameras) from starting.
+ *
+ * IMPORTANT - do not import src/lib/paths.server.ts (or any other module
+ * that touches node:fs/node:path) from this file, even behind the
+ * `NEXT_RUNTIME === "nodejs"` guard below. Next.js compiles
+ * instrumentation.ts for an edge-compatible webpack target in addition to
+ * the nodejs target, and that edge-target compile has no Node builtin
+ * resolution at all - it fails on ANY Node builtin import reachable from
+ * this file (node:path, bare "path", node:fs/promises), whether static or
+ * dynamic, top-level or inside a runtime-guarded dynamic import, and
+ * whether the import lives directly in this file or in a module this file
+ * imports. That failure blocks the entire dev server (every route 500s),
+ * not just instrumentation itself - this exact bug shipped in commit
+ * 7096b115. Verified empirically: a plain `import path from "node:path"`
+ * with zero other imports in this file reproduces the same
+ * UnhandledSchemeError.
+ *
+ * This file therefore duplicates the tiny amount of root-directory
+ * resolution logic it needs (below) rather than sharing
+ * resolveRootDir()/logResolvedPaths() from paths.server.ts. Everywhere
+ * else in the app (API routes, scripts/camera-service.ts, scripts/*.ts)
+ * should keep importing the shared, canonical paths.server.ts - only this
+ * one file is restricted this way.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") {
     return;
   }
 
-  const { logResolvedPaths } = await import("./lib/paths");
-  const { localCameraHardwareEnabled } = await import("./lib/localOnly");
-
   try {
-    logResolvedPaths();
+    const override = process.env.PLANTLAB_ROOT_DIR;
+    const rootDir = override && override.trim().length > 0 ? override.trim() : process.cwd();
+
     console.log(
       JSON.stringify({
         level: "info",
         message: "PlantLab web process starting",
+        rootDir,
         nodeEnv: process.env.NODE_ENV,
-        localCameraHardwareEnabled: localCameraHardwareEnabled(),
+        localCameraHardwareEnabled:
+          process.env.NODE_ENV !== "production" ||
+          process.env.PLANTLAB_LOCAL_CAMERA_ENABLED === "1" ||
+          process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1",
         pid: process.pid,
         time: new Date().toISOString(),
       }),

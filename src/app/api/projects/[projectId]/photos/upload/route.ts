@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import * as exifr from "exifr";
 import { badRequest, notFound } from "@/lib/http";
 import { createPhotoRecord } from "@/lib/photoIngest";
+import { ensureDirectoryExists } from "@/lib/projectPaths.server";
 import { prisma } from "@/lib/prisma";
 
 type Context = {
@@ -82,7 +83,7 @@ export async function POST(request: Request, context: Context) {
     return badRequest("Select at least one image file.");
   }
 
-  await mkdir(project.localPhotoDirectory, { recursive: true });
+  await ensureDirectoryExists(project.localPhotoDirectory);
 
   const results = [];
   for (const [index, file] of files.entries()) {

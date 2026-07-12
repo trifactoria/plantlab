@@ -1,6 +1,25 @@
 import path from "node:path";
 
 /**
+ * Guards against this module ever running in a real browser (a Client
+ * Component that got bundled with it), without breaking its other
+ * legitimate consumers: Vitest unit tests and scripts/*.ts run directly
+ * via tsx, neither of which define `window`. The `server-only` npm
+ * package was deliberately not used here - its poison-pill only becomes a
+ * no-op under Next.js's "react-server" bundler condition, which plain
+ * Vitest and tsx do not set, so it throws for every legitimate consumer of
+ * this file (confirmed: it broke the entire unit test suite and would
+ * equally break `pnpm doctor`/`pnpm camera:service`). The `.server.ts`
+ * filename plus this runtime guard is this codebase's server-only
+ * boundary instead.
+ */
+if (typeof window !== "undefined") {
+  throw new Error(
+    "src/lib/paths.server.ts touches the filesystem and process environment - it must never be imported from a Client Component or run in a browser.",
+  );
+}
+
+/**
  * The PlantLab repository/install root. Every data, photo, capture,
  * backup, and cross-process lock path in this codebase is resolved from
  * this single value rather than from `process.cwd()` ad hoc in each file,

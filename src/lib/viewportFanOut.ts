@@ -1,10 +1,11 @@
-import { mkdir, readFile, unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { CaptureSource, Prisma, PrismaClient, ProjectViewport, SourceCapture } from "@prisma/client";
 import sharp from "sharp";
 import { nextCapturePath } from "./camera";
 import { applyOrientation, parseRotation } from "./orientation";
 import { createPhotoRecord } from "./photoIngest";
+import { ensureDirectoryExists } from "./projectPaths.server";
 import { prisma } from "./prisma";
 
 type TxClient = Prisma.TransactionClient;
@@ -126,7 +127,7 @@ export async function runViewportFanOut(sourceCaptureId: string): Promise<Viewpo
       projectName = project.name;
 
       const derived = await cropDerivedImage(sourceCapture, viewport);
-      await mkdir(project.localPhotoDirectory, { recursive: true });
+      await ensureDirectoryExists(project.localPhotoDirectory);
       const savedPath = await nextCapturePath(project.localPhotoDirectory, sourceCapture.timestamp);
       await sharp(derived.buffer).toFile(savedPath);
 

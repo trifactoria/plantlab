@@ -1,4 +1,3 @@
-import { mkdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { checkCaptureEligibility } from "@/lib/captureEligibility";
 import {
@@ -12,6 +11,7 @@ import {
   requiredString,
   serverError,
 } from "@/lib/http";
+import { isDirectoryUsable } from "@/lib/projectPaths.server";
 import { prisma } from "@/lib/prisma";
 import { validateCaptureWindowConfig } from "@/lib/schedule";
 import { requireValidTimeZone } from "@/lib/timezone";
@@ -85,11 +85,11 @@ export async function PATCH(request: Request, context: Context) {
       nextPhotoDirectory !== undefined &&
       nextPhotoDirectory !== existingProject.localPhotoDirectory
     ) {
-      try {
-        await mkdir(nextPhotoDirectory, { recursive: true });
-      } catch (error) {
-        console.error(error);
-        return badRequest(`Could not create photo directory: ${nextPhotoDirectory}`);
+      // Validate without creating - see ensureDirectoryExists() in
+      // projectPaths.server.ts. The new directory is created lazily by
+      // the next real capture/upload.
+      if (!(await isDirectoryUsable(nextPhotoDirectory))) {
+        return badRequest(`Photo directory is not usable: ${nextPhotoDirectory}`);
       }
     }
 
