@@ -66,6 +66,8 @@ export type ConvergeNodeRoleInput = {
   runBin?: string | null;
   /** Remote-only: the user whose home directory the default spool root is derived from, when spoolRoot is not given explicitly. */
   remoteUser?: string | null;
+  /** Force a restart of the expected units even if already active. Automatically implied whenever a credential is written (see systemdUnits.ts buildUnitConvergenceScript - `enable --now` alone does not restart an already-running unit, so a rotated credential would otherwise never take effect). Set explicitly for any other case that needs a guaranteed restart. */
+  forceRestart?: boolean;
 };
 
 export type ConvergenceStepStatus = "completed" | "skipped" | "failed";
@@ -111,6 +113,18 @@ async function resolveRunBin(target: ConvergenceTarget, override: string | null 
   return runBin;
 }
 
+/**
+ * The remote user's actual $HOME, queried directly rather than guessed as
+ * `/home/<user>` - a real but narrow fragility that assumption had (not
+ * every Linux setup puts home directories under /home/), and asking is a
+ * single cheap round trip alongside the existing resolveRunBin() one.
+ */
+async function resolveRemoteHome(sshHost: string, remoteUser: string | null | undefined): Promise<string> {
+  const result = await runRemoteShell(sshHost, 'echo "$HOME"');
+  const home = result.stdout.trim().split("\n")[0]?.trim();
+  return home || `/home/${remoteUser || sshHost}`;
+}
+
 function buildRetryCommand(input: ConvergeNodeRoleInput): string {
   if (input.target.kind === "local") {
     return `plantlab install --role ${input.role}${input.coordinatorUrl ? ` --coordinator-url ${input.coordinatorUrl}` : ""}`;
@@ -142,15 +156,17 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
 
   const repoPath = input.target.kind === "local" ? resolveRootDir() : input.target.repoPath;
   const { expected, inappropriate } = unitsForRole(input.role);
-  const isCameraNode = input.role === "camera-node";
-  const spoolRoot = isCameraNode ? (input.spoolRoot || defaultSpoolRoot(input.target, input.remoteUser)) : null;
+  // camera-node and greenhouse-node both run plantlab-agent.service and
+  // need the same credential/spool - see serviceRoles.ts.
+  const isAgentRole = input.role === "camera-node" || input.role === "greenhouse-node";
+  const spoolRoot = isAgentRole ? (input.spoolRoot || defaultSpoolRoot(input.target, input.remoteUser)) : null;
 
   // Spool directories: created via AgentSpool locally (reuses the real
   // implementation the agent runtime itself uses - see agentSpool.ts) or
   // via plain `mkdir -p` remotely (state.sqlite is created by the agent's
   // own first startup, which this convergence enables+starts below).
   let spoolPrepared = false;
-  if (isCameraNode && spoolRoot) {
+  if (isAgentRole && spoolRoot) {
     try {
       if (input.target.kind === "local") {
         const spool = new AgentSpool(spoolRoot);
@@ -191,7 +207,7 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
     steps.push({ name: "config-write", status: "completed", detail: `role=${input.role} written to ${repoPath}/plantlab.config.json.` });
 
     let credentialWritten = false;
-    if (isCameraNode && input.credential) {
+    if (isAgentRole && input.credential) {
       const { mkdir, writeFile } = await import("node:fs/promises");
       const envDir = path.dirname(path.join(process.env.HOME ?? "/root", ".config", "plantlab", "agent.env"));
       const envPath = path.join(envDir, "agent.env");
@@ -225,18 +241,20 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
 
   // Resolved to a concrete absolute path (not systemd's "%h" specifier) for
   // both targets, matching the existing agent unit convention - see
-  // buildAgentServiceUnit() in systemdUnits.ts.
+  // buildAgentServiceUnit() in systemdUnits.ts. For a remote target this is
+  // the remote user's *actual* $HOME (queried directly - see
+  // resolveRemoteHome()), not a guessed `/home/<user>` path.
   const agentEnvPath =
     input.target.kind === "local"
       ? path.join(process.env.HOME ?? "/root", ".config", "plantlab", "agent.env")
-      : `/home/${input.remoteUser || input.target.sshHost}/.config/plantlab/agent.env`;
+      : path.posix.join(await resolveRemoteHome(input.target.sshHost, input.remoteUser), ".config", "plantlab", "agent.env");
 
   const install = expected.map((unitName) => ({
     unitName,
     content: buildUnitContent(unitName, { repoPath, runBin, envPath: agentEnvPath }),
   }));
 
-  const credentialEnv = isCameraNode && input.credential ? { path: agentEnvPath, content: `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n` } : null;
+  const credentialEnv = isAgentRole && input.credential ? { path: agentEnvPath, content: `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n` } : null;
 
   const script = buildUnitConvergenceScript(
     {
@@ -245,6 +263,7 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
       startInstalled: input.startServices,
       configJson: `${JSON.stringify(config, null, 2)}\n`,
       credentialEnv,
+      restartInstalled: input.startServices && (Boolean(input.forceRestart) || Boolean(credentialEnv)),
     },
     repoPath,
   );
@@ -280,7 +299,7 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
   steps.push({ name: "config-write", status: "completed", detail: `role=${input.role} written to ${repoPath}/plantlab.config.json.` });
   if (credentialEnv) {
     steps.push({ name: "credential-write", status: "completed", detail: `Credential written to ${credentialEnv.path} (0600).` });
-  } else if (isCameraNode) {
+  } else if (isAgentRole) {
     steps.push({ name: "credential-write", status: "skipped", detail: "No new credential provided - existing credential file left untouched." });
   }
   for (const unit of install) {

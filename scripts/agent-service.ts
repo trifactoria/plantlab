@@ -8,6 +8,7 @@ import { runFfmpeg } from "../src/lib/camera";
 import { readNodeConfig } from "../src/lib/operations/config";
 import { AgentSpool, type SpoolRecord } from "../src/lib/operations/agentSpool";
 import { discoverLocalCameras, listCameraFormats } from "../src/lib/v4l2";
+import { AGENT_PROTOCOL_VERSION } from "../src/lib/protocolVersion";
 
 const POLL_MS = Number(process.env.PLANTLAB_AGENT_POLL_MS ?? 5000);
 const ACK_RETAIN_MS = Number(process.env.PLANTLAB_AGENT_ACK_RETAIN_MS ?? 7 * 24 * 60 * 60 * 1000);
@@ -48,6 +49,11 @@ async function postHeartbeat(coordinatorUrl: string, token: string, configRole: 
       operatingSystem: `${os.type()} ${os.release()}`,
       architecture: os.arch(),
       softwareVersion: packageJson.version,
+      runtime: "node",
+      protocolVersion: AGENT_PROTOCOL_VERSION,
+      // This agent only ever runs the USB/V4L2 camera capture path today -
+      // see capabilities.ts "do not implement sensor or relay control yet."
+      capabilities: ["camera"],
     }),
   });
 }

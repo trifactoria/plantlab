@@ -44,6 +44,40 @@ describe("agent protocol", () => {
     expect(node.cameras[0].devicePath).toBe("/dev/video8");
   });
 
+  it("records runtime, protocol version, and reported capabilities from a heartbeat (Part 6/8/13)", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero", role: "greenhouse-node", rotateCredential: true });
+    await recordHeartbeat(prisma, registered.node.id, {
+      hostname: "greenhouse-zero",
+      role: "greenhouse-node",
+      operatingSystem: "Raspberry Pi OS Lite",
+      architecture: "armv6l",
+      softwareVersion: "0.1.0",
+      runtime: "python-edge",
+      protocolVersion: "1",
+      capabilities: ["camera"],
+    });
+
+    const node = await prisma.plantLabNode.findUniqueOrThrow({ where: { id: registered.node.id } });
+    expect(node.runtime).toBe("python-edge");
+    expect(node.protocolVersion).toBe("1");
+    expect(JSON.parse(node.capabilitiesJson)).toEqual(["camera"]);
+  });
+
+  it("a heartbeat's reported capabilities replace, not merge with, whatever was seeded at registration", async () => {
+    const registered = await registerOrRotateNode(prisma, {
+      name: "capability-node",
+      role: "greenhouse-node",
+      rotateCredential: true,
+      capabilities: ["camera", "temperature"],
+    });
+    let node = await prisma.plantLabNode.findUniqueOrThrow({ where: { id: registered.node.id } });
+    expect(JSON.parse(node.capabilitiesJson).sort()).toEqual(["camera", "temperature"]);
+
+    await recordHeartbeat(prisma, registered.node.id, { capabilities: ["camera"] });
+    node = await prisma.plantLabNode.findUniqueOrThrow({ where: { id: registered.node.id } });
+    expect(JSON.parse(node.capabilitiesJson)).toEqual(["camera"]);
+  });
+
   it("claims, fails, and completes manual jobs with duplicate claim protection", async () => {
     const { registered, attached } = await makeNodeWithAssignment();
     const failed = await prisma.agentCaptureJob.create({

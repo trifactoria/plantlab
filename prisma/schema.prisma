@@ -441,6 +441,12 @@ model PlantLabNode {
   softwareVersion String?
   coordinatorUrl  String?
   lastHeartbeatAt DateTime?
+  /// JSON array of capability strings - see src/lib/operations/capabilities.ts. Additive; never role-exclusive.
+  capabilitiesJson String   @default("[]")
+  /// "node" (full TypeScript agent) or "python-edge" (lightweight edge agent) - see edge-agent/. Null until the first heartbeat reports it.
+  runtime         String?
+  /// The agent protocol version this node last reported - see docs/AGENT_PROTOCOL.md.
+  protocolVersion String?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import type { NodeRole } from "./config";
+import { defaultCapabilitiesForRole, serializeCapabilities } from "./capabilities";
 
 if (typeof window !== "undefined") {
   throw new Error(
@@ -17,6 +18,10 @@ export type RegisterNodeInput = {
   softwareVersion?: string | null;
   coordinatorUrl?: string | null;
   rotateCredential?: boolean;
+  /** Only used to seed capabilitiesJson at registration time - a real heartbeat's reported capabilities always take precedence afterward (see agentProtocol.ts). Defaults per role (capabilities.ts) when omitted. */
+  capabilities?: string[];
+  /** "node" or "python-edge" - see edge-agent/. Left untouched on re-registration when omitted, so a heartbeat-reported runtime never gets clobbered by a plain re-attach. */
+  runtime?: "node" | "python-edge";
 };
 
 export type RegisterNodeResult = {
@@ -122,6 +127,8 @@ export async function registerOrRotateNode(prisma: PrismaClient, input: Register
       architecture: input.architecture ?? null,
       softwareVersion: input.softwareVersion ?? null,
       coordinatorUrl: input.coordinatorUrl ?? null,
+      capabilitiesJson: serializeCapabilities(input.capabilities ?? defaultCapabilitiesForRole(input.role)),
+      runtime: input.runtime ?? null,
     },
     update: {
       hostname: input.hostname ?? name,
@@ -136,6 +143,12 @@ export async function registerOrRotateNode(prisma: PrismaClient, input: Register
       architecture: input.architecture ?? null,
       softwareVersion: input.softwareVersion ?? null,
       coordinatorUrl: input.coordinatorUrl ?? null,
+      // capabilitiesJson/runtime are intentionally NOT overwritten here
+      // when omitted - a plain re-attach must not erase what the node's
+      // own heartbeats have already reported (see recordHeartbeat in
+      // agentProtocol.ts, which IS allowed to update them from live data).
+      ...(input.capabilities ? { capabilitiesJson: serializeCapabilities(input.capabilities) } : {}),
+      ...(input.runtime ? { runtime: input.runtime } : {}),
     },
     select: { id: true, name: true, role: true, hostname: true, status: true, lastHeartbeatAt: true },
   });

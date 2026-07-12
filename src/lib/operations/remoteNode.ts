@@ -64,6 +64,17 @@ export type RemoteInspection = {
   };
   coordinatorUrl: string | null;
   checks: RemoteCheck[];
+  // Pi Zero feasibility fields (Part 5) - "architecture" above already
+  // carries `uname -m` (e.g. "armv6l"); these are the additional facts
+  // needed to decide whether the full Node.js agent is realistic on this
+  // machine, plus the derived recommendation itself.
+  armVersion: string | null;
+  memoryTotalMb: number | null;
+  memoryAvailableMb: number | null;
+  pythonVersion: string | null;
+  /** Whether the full TypeScript/Next.js-adjacent agent stack is supported/recommended on this hardware - see computeFullAgentSupport(). */
+  fullAgentSupported: boolean;
+  recommendedRuntime: "node" | "python-edge";
   raw?: unknown;
 };
 
@@ -97,6 +108,10 @@ fi
 os_pretty="$(. /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME" || uname -s)"
 arch="$(uname -m 2>/dev/null || true)"
 node_version="$(node --version 2>/dev/null || true)"
+python_version="$(python3 --version 2>&1 | awk '{print $2}' || true)"
+if [ -z "$python_version" ]; then python_version="$(python --version 2>&1 | awk '{print $2}' || true)"; fi
+mem_total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+mem_avail_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
 pnpm="false"; cmd pnpm && pnpm="true"
 ffmpeg="false"; cmd ffmpeg && ffmpeg="true"
 v4l2="false"; cmd v4l2-ctl && v4l2="true"
@@ -143,6 +158,9 @@ printf '"gitCommit":"%s",' "$(json_escape "$commit")"
 printf '"role":"%s",' "$(json_escape "$role")"
 printf '"coordinatorUrl":"%s",' "$(json_escape "$coordinator")"
 printf '"nodeVersion":"%s",' "$(json_escape "$node_version")"
+printf '"pythonVersion":"%s",' "$(json_escape "$python_version")"
+printf '"memoryTotalKb":"%s",' "$(json_escape "$mem_total_kb")"
+printf '"memoryAvailableKb":"%s",' "$(json_escape "$mem_avail_kb")"
 printf '"pnpmAvailable":%s,' "$pnpm"
 printf '"ffmpegAvailable":%s,' "$ffmpeg"
 printf '"v4l2CtlAvailable":%s,' "$v4l2"
@@ -201,6 +219,12 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
       cameras: [],
       services: { web: null, camera: null, agent: null },
       coordinatorUrl: null,
+      armVersion: null,
+      memoryTotalMb: null,
+      memoryAvailableMb: null,
+      pythonVersion: null,
+      fullAgentSupported: false,
+      recommendedRuntime: "node",
       checks: [
         {
           name: "ssh",
@@ -221,6 +245,11 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
 
   const repoPath = stringOrNull(parsed.repoPath);
   const role = stringOrNull(parsed.role);
+  const architecture = stringOrNull(parsed.architecture);
+  const armVersion = parseArmVersion(architecture);
+  const memoryTotalMb = kbToMb(stringOrNull(parsed.memoryTotalKb));
+  const memoryAvailableMb = kbToMb(stringOrNull(parsed.memoryAvailableKb));
+  const feasibility = computeFullAgentSupport({ armVersion, memoryTotalMb });
   const checks: RemoteCheck[] = [
     { name: "ssh", status: "pass", detail: `Connected to ${sshHost}.` },
     repoPath
@@ -253,7 +282,7 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
     remoteHostname: stringOrNull(parsed.remoteHostname),
     remoteUser: stringOrNull(parsed.remoteUser),
     operatingSystem: stringOrNull(parsed.operatingSystem),
-    architecture: stringOrNull(parsed.architecture),
+    architecture,
     plantLabInstalled: Boolean(repoPath),
     plantLabVersion: stringOrNull(parsed.plantLabVersion),
     repoPath,
@@ -280,6 +309,12 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
       agent: stringOrNull((parsed.services as Record<string, unknown> | undefined)?.agent),
     },
     coordinatorUrl: stringOrNull(parsed.coordinatorUrl),
+    armVersion,
+    memoryTotalMb,
+    memoryAvailableMb,
+    pythonVersion: stringOrNull(parsed.pythonVersion),
+    fullAgentSupported: feasibility.fullAgentSupported,
+    recommendedRuntime: feasibility.recommendedRuntime,
     checks,
     raw: parsed,
   };
@@ -418,4 +453,38 @@ function boolean(value: unknown): boolean {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+/** Extracts the ARM ISA version from `uname -m` (e.g. "armv6l" -> "v6", "aarch64"/"armv8l" -> "v8"). Null for non-ARM architectures. */
+function parseArmVersion(architecture: string | null): string | null {
+  if (!architecture) return null;
+  if (architecture === "aarch64" || architecture === "arm64") return "v8";
+  const match = /^armv(\d+)/.exec(architecture);
+  return match ? `v${match[1]}` : null;
+}
+
+function kbToMb(kb: string | null): number | null {
+  if (!kb) return null;
+  const parsed = Number(kb);
+  return Number.isFinite(parsed) ? Math.round(parsed / 1024) : null;
+}
+
+/**
+ * Pi Zero feasibility rule (Part 5): the full agent needs a JS engine
+ * capable of running Next.js's toolchain comfortably and enough RAM to not
+ * thrash - armv6 (the original Pi Zero/1/Zero W's ISA) never shipped a
+ * modern V8/Node build people realistically run in production, and
+ * anything under 768MB total memory makes a full Node.js + systemd stack a
+ * poor fit regardless of ISA. Conservative on purpose: when in doubt,
+ * recommend the lightweight edge agent - it works fine on capable hardware
+ * too, just with less functionality than the full agent.
+ */
+export function computeFullAgentSupport(input: {
+  armVersion: string | null;
+  memoryTotalMb: number | null;
+}): { fullAgentSupported: boolean; recommendedRuntime: "node" | "python-edge" } {
+  const isArmv6OrOlder = input.armVersion !== null && Number(input.armVersion.replace(/^v/, "")) <= 6;
+  const tooLittleMemory = input.memoryTotalMb !== null && input.memoryTotalMb < 768;
+  const fullAgentSupported = !isArmv6OrOlder && !tooLittleMemory;
+  return { fullAgentSupported, recommendedRuntime: fullAgentSupported ? "node" : "python-edge" };
 }

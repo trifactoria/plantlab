@@ -165,6 +165,8 @@ export type UnitConvergenceScriptInput = {
   configJson?: string;
   /** Optional secret env file (e.g. the agent credential) to write atomically with 0600/0700 permissions. */
   credentialEnv?: { path: string; content: string } | null;
+  /** Force `systemctl restart` on the install units after enable --now, even if they were already active - required whenever a credential/env file changed, since `enable --now` alone is a no-op on an already-running unit and would leave it running with the stale environment. */
+  restartInstalled?: boolean;
 };
 
 /**
@@ -246,6 +248,14 @@ export function buildUnitConvergenceScript(input: UnitConvergenceScriptInput, re
   if (input.startInstalled && input.install.length > 0) {
     const units = input.install.map((spec) => shellQuote(spec.unitName)).join(" ");
     lines.push(`systemctl --user enable --now ${units}`);
+    // `enable --now` only *starts* a unit that isn't already running - on
+    // an already-active unit it is a no-op, so it will NOT pick up a
+    // rewritten EnvironmentFile (e.g. a rotated credential). restartInstalled
+    // forces an explicit restart so a new credential always takes effect
+    // immediately, whether the unit was previously active or not.
+    if (input.restartInstalled) {
+      lines.push(`systemctl --user restart ${units}`);
+    }
   }
 
   if (input.install.length > 0 || input.stopAndDisable.length > 0) {
@@ -256,7 +266,7 @@ export function buildUnitConvergenceScript(input: UnitConvergenceScriptInput, re
   return lines.join("\n");
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

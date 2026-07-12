@@ -20,7 +20,7 @@ if (typeof window !== "undefined") {
  * durable place to record intent ahead of the actual capture-agent
  * protocol, which is explicitly out of scope for this task.
  */
-export const NODE_ROLES = ["coordinator", "camera-node", "standalone", "microscope-node", "mobile-uploader"] as const;
+export const NODE_ROLES = ["coordinator", "camera-node", "standalone", "microscope-node", "mobile-uploader", "greenhouse-node"] as const;
 export type NodeRole = (typeof NODE_ROLES)[number];
 
 export function isValidNodeRole(value: unknown): value is NodeRole {
@@ -45,6 +45,10 @@ export type NodeConfig = {
   nodeName?: string | null;
   /** Durable camera-node spool root. Defaults are role/runtime dependent. */
   spoolRoot?: string | null;
+  /** Capabilities this node advertises - see capabilities.ts. Not authoritative on its own; the coordinator's PlantLabNode.capabilitiesJson (set from real heartbeats) is. */
+  capabilities?: string[];
+  /** Which agent implementation this node runs: the full TypeScript agent, or the lightweight Python edge agent (see edge-agent/). Written by roleConvergence.ts / the edge-agent installer, never inferred. */
+  runtime?: "node" | "python-edge";
 };
 
 /** `<PLANTLAB_ROOT_DIR>/plantlab.config.json` - node-local, never synced, never part of a project backup archive. */

@@ -99,6 +99,44 @@ baselines it first - see `DEPLOYMENT.md` "Database migration policy").
 crashing later) if the schema is not current when starting
 `plantlab-web.service` or `plantlab-camera.service`.
 
+## "PLANTLAB_NODE_CREDENTIAL is not set" after a successful-looking attach
+
+`node attach` reported "Existing credential retained" but the agent still
+won't authenticate. This should now self-heal automatically:
+
+```bash
+plantlab doctor --node <host> --fix
+```
+
+or simply re-run attach - both now probe the credential with a real
+authenticated request against the coordinator (not just file
+existence/permissions) and rotate automatically when it's demonstrably
+invalid. You should see:
+
+```
+Existing node credential is missing.
+Rotating credential automatically...
+
+✓ Previous credential revoked
+✓ New credential installed securely
+✓ Agent restarted
+✓ Authenticated heartbeat received
+```
+
+The raw credential is never printed or logged at any point - only a
+pass/fail status. See `DEPLOYMENT.md` "Automatic credential recovery" for
+the full root-cause writeup.
+
+## A Raspberry Pi Zero (or similar low-resource device) is slow or fails to build
+
+Run `plantlab node inspect <host>` first - if it reports "Full PlantLab
+Node agent: Unsupported or not recommended", the device should run the
+lightweight Python edge agent instead, not the full Node.js stack. Either
+`./install.sh` (run locally on the device) or `plantlab node attach <host>`
+(run from the coordinator) will detect this automatically and offer the
+edge agent path. See `edge-agent/README.md` and `DEPLOYMENT.md`
+"Lightweight edge agent" for details.
+
 ## Logs
 
 See [Systemd Services](SYSTEMD.md) for `journalctl` commands.

@@ -103,6 +103,46 @@ version_major() {
   printf '%s' "$1" | sed -E 's/^v?([0-9]+).*/\1/'
 }
 
+# Pi Zero / low-resource feasibility check (Part 11 of the Pi Zero
+# edge-agent task) - mirrors src/lib/operations/remoteNode.ts
+# computeFullAgentSupport()'s rule (armv6-or-older, or under 768MB total
+# memory) so a local `./install.sh` run on unsuitable hardware gets the
+# same guidance a remote `plantlab node attach` would give, instead of
+# thrashing through a pnpm/Next.js build it was never going to finish
+# comfortably.
+check_hardware_feasibility() {
+  local arch mem_total_kb mem_total_mb arm_version too_old too_little
+
+  arch="$(uname -m 2>/dev/null || true)"
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+  mem_total_mb=0
+  [[ -n "$mem_total_kb" ]] && mem_total_mb=$((mem_total_kb / 1024))
+
+  arm_version=""
+  if [[ "$arch" == armv* ]]; then
+    arm_version="${arch#armv}"
+    arm_version="${arm_version%%[a-z]*}"
+  fi
+
+  too_old=0
+  [[ -n "$arm_version" && "$arm_version" -le 6 ]] && too_old=1
+  too_little=0
+  [[ "$mem_total_mb" -gt 0 && "$mem_total_mb" -lt 768 ]] && too_little=1
+
+  if [[ "$too_old" -eq 1 || "$too_little" -eq 1 ]]; then
+    printf '\nThis device (%s, %sMB RAM) is better suited to the lightweight PlantLab Edge Agent.\n' "$arch" "$mem_total_mb"
+    printf 'The full PlantLab Node agent is unsupported or not recommended here.\n\n'
+    if [[ -x "$REPO_ROOT/edge-agent/install.sh" ]]; then
+      if confirm "Install the lightweight edge agent instead?"; then
+        exec "$REPO_ROOT/edge-agent/install.sh"
+      fi
+      warn "Continuing with the full Node.js agent (not recommended for this hardware)."
+    else
+      warn "edge-agent/install.sh was not found in this checkout - continuing with the full agent."
+    fi
+  fi
+}
+
 ensure_node() {
   if ! command -v node >/dev/null 2>&1; then
     fail "Node.js was not found. Install Node.js 22 or newer, then re-run ./install.sh."
@@ -333,6 +373,7 @@ if [[ -f /etc/os-release ]]; then
 fi
 
 step "Checking requirements..."
+check_hardware_feasibility
 ensure_node
 ensure_pnpm
 ensure_env_file

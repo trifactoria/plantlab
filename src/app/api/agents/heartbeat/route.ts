@@ -13,6 +13,9 @@ export async function POST(request: Request) {
     operatingSystem: typeof body.operatingSystem === "string" ? body.operatingSystem : null,
     architecture: typeof body.architecture === "string" ? body.architecture : null,
     softwareVersion: typeof body.softwareVersion === "string" ? body.softwareVersion : null,
+    runtime: typeof body.runtime === "string" ? body.runtime : null,
+    protocolVersion: typeof body.protocolVersion === "string" ? body.protocolVersion : null,
+    capabilities: Array.isArray(body.capabilities) ? body.capabilities.filter((c): c is string => typeof c === "string") : null,
   });
 
   return NextResponse.json({ status: "ok", node: { name: node.name, role: node.role, lastHeartbeatAt: node.lastHeartbeatAt } });

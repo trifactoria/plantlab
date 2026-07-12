@@ -4,7 +4,9 @@ import type { Command } from "commander";
 import { updateCameraInventory } from "../../lib/operations/agentProtocol";
 import { readNodeConfig } from "../../lib/operations/config";
 import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operations/manualCapture";
-import { markNodeStatus, registerOrRotateNode } from "../../lib/operations/nodeCredentials";
+import { markNodeStatus } from "../../lib/operations/nodeCredentials";
+import { ensureValidNodeCredential, rotateAndInstallCredential, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
+import { copyEdgeAgentDirectory, runEdgeAgentInstall } from "../../lib/operations/edgeAgentInstall";
 import {
   checkCoordinatorReachableFromRemote,
   defaultCoordinatorUrl,
@@ -13,7 +15,6 @@ import {
   type RemoteAgentDiagnostics,
   type RemoteCameraInfo,
 } from "../../lib/operations/remoteNode";
-import { convergeNodeRole, type ConvergenceResult } from "../../lib/operations/roleConvergence";
 import { resolveAllPaths } from "../../lib/paths.server";
 import { prisma } from "../../lib/prisma";
 import type { CameraFormat } from "../../lib/v4l2";
@@ -154,6 +155,28 @@ Examples:
           return;
         }
         steps.complete("Inspection", `Connected to ${sshHost}`);
+
+        // Pi Zero / low-resource feasibility (Parts 5, 11): offer the
+        // lightweight edge agent instead of requiring the full repo +
+        // Node.js stack. Checked before the "PlantLab is not installed"
+        // abort below, since the whole point of the edge agent is that it
+        // does NOT need a full repository clone.
+        if (!inspection.fullAgentSupported) {
+          console.log("");
+          console.log("This device is better suited to the lightweight PlantLab Edge Agent.");
+          console.log("");
+          if (options.dryRun) {
+            printInspection(inspection);
+            console.log("\nDry run - would offer to install the PlantLab Edge Agent (lightweight, Python-based) instead of the full Node.js agent.");
+            return;
+          }
+          if (await confirmOrYes("Install the edge agent? [Y/n] ", options.yes, true)) {
+            await runEdgeAgentAttach({ sshHost, inspection, options, steps });
+            return;
+          }
+          console.log("Continuing with the full Node.js agent (not recommended for this hardware).");
+        }
+
         if (!inspection.plantLabInstalled || !inspection.repoPath) {
           printInspection(inspection);
           console.error(`\nCannot attach ${sshHost}: PlantLab is not installed on the remote host.`);
@@ -229,85 +252,89 @@ Examples:
           return;
         }
 
-        // Credential reuse (Part 12): only rotate if the caller explicitly
-        // asked, or if the remote target's actual credential file is
-        // missing/has wrong permissions - a coordinator-side record alone
-        // is not "valid" if the remote file it's supposed to match isn't
-        // really there.
-        let diagnostics: RemoteAgentDiagnostics | null = null;
-        try {
-          diagnostics = await diagnoseRemoteAgent(sshHost, repoPath);
-        } catch {
-          diagnostics = null;
-        }
-        const needsCredentialRepair =
-          !diagnostics?.credentialExists || diagnostics.credentialMode !== "600" || diagnostics.credentialDirMode !== "700";
-        const rotateCredential = Boolean(options.rotateCredential || needsCredentialRepair);
+        // Credential validity (Parts 1-2 of the credential-recovery task):
+        // a real authenticated probe against the coordinator, not just
+        // file existence/permissions - see credentialRepair.ts for why
+        // (the real bokchoy failure: a credential file existed with
+        // correct permissions but unusable content, and the old
+        // file-existence check never caught that). This single call also
+        // covers what registerOrRotateNode + convergeNodeRole + wait-for-
+        // heartbeat used to do inline here (Part 4: shared, not
+        // duplicated, between attach and doctor --fix).
+        const registerInput = {
+          name: sshHost,
+          hostname: inspection.remoteHostname ?? sshHost,
+          role: "camera-node" as const,
+          operatingSystem: inspection.operatingSystem,
+          architecture: inspection.architecture,
+          softwareVersion: inspection.plantLabVersion,
+          coordinatorUrl: options.coordinatorUrl,
+        };
+        const credentialInput = {
+          sshHost,
+          repoPath,
+          coordinatorUrl: options.coordinatorUrl,
+          role: "camera-node" as const,
+          runtime: "node" as const,
+          nodeName: sshHost,
+          spoolRoot,
+          remoteUser: inspection.remoteUser,
+          registerInput,
+          heartbeatTimeoutMs: options.timeoutMs,
+        };
 
-        // Coordinator registration happens before remote convergence
-        // completes (see DEPLOYMENT.md "Coordinator enrollment state") -
-        // registerOrRotateNode() now creates a brand new node with status
-        // "pending", never "active", so a partially-attached node is never
-        // displayed as healthy even though this step already succeeded.
-        let registered: Awaited<ReturnType<typeof registerOrRotateNode>>;
-        try {
-          registered = await registerOrRotateNode(prisma, {
-            name: sshHost,
-            hostname: inspection.remoteHostname ?? sshHost,
-            role: "camera-node",
-            operatingSystem: inspection.operatingSystem,
-            architecture: inspection.architecture,
-            softwareVersion: inspection.plantLabVersion,
-            coordinatorUrl: options.coordinatorUrl,
-            rotateCredential,
-          });
-          steps.complete("Coordinator registration", rotateCredential ? "Credential created or rotated" : "Existing credential retained");
-        } catch (error) {
-          steps.fail("Coordinator registration", sanitizeError(error));
+        // Captured before the repair call so the camera-inventory wait
+        // below only matches inventory reported during (or after) this
+        // same attach run - not stale rows from a previous attempt.
+        const heartbeatSince = new Date();
+
+        let probeStatus: CredentialProbeStatus | null = null;
+        const repair = options.rotateCredential
+          ? await rotateAndInstallCredential(prisma, { ...credentialInput, rotate: true })
+          : await (async () => {
+              const ensured = await ensureValidNodeCredential(prisma, credentialInput);
+              probeStatus = ensured.probe.status;
+              return ensured;
+            })();
+
+        if (probeStatus && probeStatus !== "valid" && probeStatus !== "unknown") {
+          console.log("");
+          console.log(`Existing node credential is ${describeCredentialProbeStatus(probeStatus)}.`);
+          console.log("Rotating credential automatically...");
+          console.log("");
+        }
+
+        for (const step of repair.steps) {
+          if (step.status === "failed") steps.fail(step.name, sanitizeText(step.detail));
+          else steps.complete(step.name, step.detail);
+        }
+        // A coarse "Credential" milestone for printAttachIncomplete()'s
+        // ATTACH_STEP_ORDER pending-list - the granular credential-revoke/
+        // credential-create/credential-reuse step names above are still
+        // shown individually in the Completed/Failed sections.
+        if (repair.steps.some((step) => step.name.startsWith("credential-") && step.status === "completed")) {
+          steps.complete("Credential", repair.rotated ? "Rotated and verified." : "Existing credential verified valid.");
+        }
+
+        if (!repair.node) {
           printAttachIncomplete(steps, sshHost);
           process.exitCode = 1;
           return;
         }
+        const registered = { node: repair.node };
 
-        // Steps 6-14: the canonical convergence operation. Handles
-        // directory/spool prep, mask-safe unit install, atomic config +
-        // credential writes, stopping inappropriate services, enabling and
-        // starting the agent, and verifying the resulting systemd state -
-        // see roleConvergence.ts. Safe to re-run: every write here is
-        // either atomic or naturally idempotent.
-        const heartbeatSince = new Date();
-        const convergence: ConvergenceResult = await convergeNodeRole({
-          target: { kind: "remote", sshHost, repoPath },
-          role: "camera-node",
-          coordinatorUrl: options.coordinatorUrl,
-          nodeName: sshHost,
-          spoolRoot,
-          credential: registered.credential || null,
-          startServices: true,
-          remoteUser: inspection.remoteUser,
-        });
-        for (const step of convergence.steps) {
-          if (step.status === "failed") steps.fail(step.name, sanitizeText(step.detail));
-          else steps.complete(step.name, step.detail);
-        }
-        if (!convergence.ok) {
-          await markNodeStatus(prisma, registered.node.id, "repair-required");
+        if (!repair.ok) {
           await printAgentDiagnosis(sshHost, repoPath);
-          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
           process.exitCode = 1;
           return;
         }
 
-        // Step 15: wait for heartbeat/inventory.
-        console.log("Waiting for heartbeat...");
-        const heartbeat = await waitForNodeHeartbeat(registered.node.id, heartbeatSince, options.timeoutMs);
-        if (!heartbeat) {
-          steps.fail("Heartbeat", `No heartbeat received within ${Math.round(options.timeoutMs / 1000)} seconds`);
-          await markNodeStatus(prisma, registered.node.id, "repair-required");
-          await printAgentDiagnosis(sshHost, repoPath);
-          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
-          process.exitCode = 1;
-          return;
+        if (repair.rotated) {
+          console.log("✓ Previous credential revoked");
+          console.log("✓ New credential installed securely");
+          console.log("✓ Agent restarted");
+          console.log("✓ Authenticated heartbeat received");
         }
         steps.complete("Heartbeat", "Agent heartbeat received");
 
@@ -322,7 +349,7 @@ Examples:
         }
         if (inventory.length === 0) {
           steps.fail("Camera report", "No camera inventory was reported or discovered by SSH probe");
-          printAttachIncomplete(steps, sshHost, convergence.retryCommand);
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
           process.exitCode = 1;
           return;
         }
@@ -338,7 +365,7 @@ Examples:
           inspection,
           node: registered.node,
           configured: true,
-          credentialRotated: registered.rotated,
+          credentialRotated: repair.rotated,
           inventorySource,
           cameras: inventory.length,
         };
@@ -394,6 +421,157 @@ Examples:
     );
 }
 
+async function promptEdgeAgentRole(yes?: boolean): Promise<"camera-node" | "greenhouse-node"> {
+  console.log("");
+  console.log("Select role:");
+  console.log("");
+  console.log("1) Camera node");
+  console.log("2) Greenhouse node");
+  if (yes || !process.stdin.isTTY) return "camera-node";
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question("\nRole [1-2, default 1]: ")).trim();
+    return answer === "2" ? "greenhouse-node" : "camera-node";
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * The lightweight-agent counterpart of the main attach action's
+ * register+converge+wait-heartbeat sequence (Parts 11-12) - installs Only
+ * the edge-agent/ directory (never the full repo/Node.js/build), then uses
+ * the exact same credential lifecycle (ensureValidNodeCredential /
+ * rotateAndInstallCredential with runtime: "python-edge") as every other
+ * node type, so credential recovery behaves identically regardless of
+ * runtime - see credentialRepair.ts.
+ */
+async function runEdgeAgentAttach(input: {
+  sshHost: string;
+  inspection: Awaited<ReturnType<typeof inspectRemoteHost>>;
+  options: { coordinatorUrl: string; rotateCredential?: boolean; timeoutMs: number; yes?: boolean; json?: boolean };
+  steps: AttachSteps;
+}): Promise<void> {
+  const { sshHost, inspection, options, steps } = input;
+
+  const role = await promptEdgeAgentRole(options.yes);
+  steps.complete("Role selection", role);
+
+  console.log(`\nCopying edge agent to ${sshHost}...`);
+  const copyResult = await copyEdgeAgentDirectory(sshHost);
+  if (copyResult.status !== 0) {
+    steps.fail("Copy edge agent", (copyResult.stderr.trim() || "scp failed.").slice(0, 2000));
+    printAttachIncomplete(steps, sshHost);
+    process.exitCode = 1;
+    return;
+  }
+  steps.complete("Copy edge agent", `edge-agent/ copied to ~/plantlab-edge-agent on ${sshHost}.`);
+
+  console.log("Running install.sh...");
+  const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName: sshHost, coordinatorUrl: options.coordinatorUrl });
+  if (installResult.status !== 0) {
+    steps.fail("Install edge agent", (installResult.stderr.trim() || installResult.stdout.trim() || "install.sh failed.").slice(0, 2000));
+    printAttachIncomplete(steps, sshHost);
+    process.exitCode = 1;
+    return;
+  }
+  steps.complete("Install edge agent", "Dependencies verified, spool prepared, systemd unit installed.");
+
+  const registerInput = {
+    name: sshHost,
+    hostname: inspection.remoteHostname ?? sshHost,
+    role,
+    operatingSystem: inspection.operatingSystem,
+    architecture: inspection.architecture,
+    softwareVersion: null,
+    coordinatorUrl: options.coordinatorUrl,
+  };
+  const credentialInput = {
+    sshHost,
+    // Unused for runtime: "python-edge" (only the "node" runtime branch of
+    // rotateAndInstallCredential() reads repoPath, to run convergeNodeRole)
+    // - kept non-empty only for readable diagnostics if it were ever logged.
+    repoPath: "~/plantlab-edge-agent",
+    coordinatorUrl: options.coordinatorUrl,
+    role,
+    runtime: "python-edge" as const,
+    nodeName: sshHost,
+    remoteUser: inspection.remoteUser,
+    registerInput,
+    heartbeatTimeoutMs: options.timeoutMs,
+  };
+
+  const heartbeatSince = new Date();
+  let probeStatus: CredentialProbeStatus | null = null;
+  const repair = options.rotateCredential
+    ? await rotateAndInstallCredential(prisma, { ...credentialInput, rotate: true })
+    : await (async () => {
+        const ensured = await ensureValidNodeCredential(prisma, credentialInput);
+        probeStatus = ensured.probe.status;
+        return ensured;
+      })();
+
+  if (probeStatus && probeStatus !== "valid" && probeStatus !== "unknown") {
+    console.log("");
+    console.log(`Existing node credential is ${describeCredentialProbeStatus(probeStatus)}.`);
+    console.log("Rotating credential automatically...");
+    console.log("");
+  }
+
+  for (const step of repair.steps) {
+    if (step.status === "failed") steps.fail(step.name, sanitizeText(step.detail));
+    else steps.complete(step.name, step.detail);
+  }
+  if (repair.steps.some((step) => step.name.startsWith("credential-") && step.status === "completed")) {
+    steps.complete("Credential", repair.rotated ? "Rotated and verified." : "Existing credential verified valid.");
+  }
+
+  if (!repair.node) {
+    printAttachIncomplete(steps, sshHost);
+    process.exitCode = 1;
+    return;
+  }
+  if (!repair.ok) {
+    printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (repair.rotated) {
+    console.log("✓ Previous credential revoked");
+    console.log("✓ New credential installed securely");
+    console.log("✓ Agent restarted");
+    console.log("✓ Authenticated heartbeat received");
+  }
+  steps.complete("Heartbeat", "Agent heartbeat received");
+
+  console.log("Waiting for camera inventory...");
+  const inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, options.timeoutMs);
+  if (inventory.length === 0) {
+    steps.fail("Camera report", "No camera inventory was reported by the edge agent.");
+    printAttachIncomplete(steps, sshHost);
+    process.exitCode = 1;
+    return;
+  }
+  steps.complete("Camera report", `${inventory.length} camera(s) detected from active agent heartbeat`);
+  await markNodeStatus(prisma, repair.node.id, "pending");
+
+  const result = { inspection, node: repair.node, configured: true, credentialRotated: repair.rotated, runtime: "python-edge", cameras: inventory.length };
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log("");
+  console.log("Node attached successfully.");
+  console.log("");
+  console.log(`Name: ${repair.node.name}`);
+  console.log(`Role: ${repair.node.role}`);
+  console.log("Runtime: python-edge (PlantLab Edge Agent)");
+  console.log(`Coordinator: ${options.coordinatorUrl}`);
+  console.log(`Cameras detected: ${inventory.length}`);
+  console.log("Remote agent: healthy");
+}
+
 function printInspection(inspection: Awaited<ReturnType<typeof inspectRemoteHost>>) {
   console.log(`SSH host: ${inspection.sshHost}`);
   console.log(`Resolved host: ${inspection.resolvedHost ?? "(unknown)"}`);
@@ -405,7 +583,15 @@ function printInspection(inspection: Awaited<ReturnType<typeof inspectRemoteHost
   console.log(`Remote hostname: ${inspection.remoteHostname ?? "(unknown)"}`);
   console.log(`Remote user: ${inspection.remoteUser ?? "(unknown)"}`);
   console.log(`Operating system: ${inspection.operatingSystem ?? "(unknown)"}`);
-  console.log(`Architecture: ${inspection.architecture ?? "(unknown)"}`);
+  console.log(`Architecture: ${inspection.architecture ?? "(unknown)"}${inspection.armVersion ? ` (ARM${inspection.armVersion})` : ""}`);
+  console.log(`Memory: ${inspection.memoryTotalMb !== null ? `${inspection.memoryTotalMb} MB` : "(unknown)"}${inspection.memoryAvailableMb !== null ? ` (${inspection.memoryAvailableMb} MB available)` : ""}`);
+  console.log(`Python: ${inspection.pythonVersion ?? "(missing)"}`);
+  console.log("");
+  console.log("Full PlantLab Node agent:");
+  console.log(`  ${inspection.fullAgentSupported ? "Supported" : "Unsupported or not recommended"}`);
+  console.log("");
+  console.log("Recommended:");
+  console.log(`  ${inspection.recommendedRuntime === "node" ? "PlantLab Node agent" : "PlantLab Edge Agent"}`);
   console.log(`PlantLab version: ${inspection.plantLabVersion ?? "(not installed)"}`);
   console.log(`Git repository: ${inspection.repoPath ?? "(not found)"}`);
   console.log(`Git branch: ${inspection.gitBranch ?? "(unknown)"}`);
@@ -477,7 +663,7 @@ const ATTACH_STEP_ORDER = [
   "Inspection",
   "Coordinator reachability",
   "Role confirmation",
-  "Coordinator registration",
+  "Credential",
   "Heartbeat",
   "Camera report",
 ] as const;
@@ -507,7 +693,7 @@ function printAttachIncomplete(steps: AttachSteps, sshHost: string, retryCommand
   }
   console.error("");
   console.error(
-    steps.items.some((step) => step.name === "Coordinator registration" && step.status === "completed")
+    steps.items.some((step) => step.name === "Credential" && step.status === "completed")
       ? "A coordinator credential was created or reused for this node - it is retained (not deleted) so a retry can reuse it. See DEPLOYMENT.md \"Coordinator enrollment state\"."
       : "No coordinator registration was written.",
   );
@@ -552,14 +738,21 @@ async function printAgentDiagnosis(sshHost: string, repoPath: string): Promise<v
   }
 }
 
-async function waitForNodeHeartbeat(nodeId: string, since: Date, timeoutMs: number): Promise<boolean> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const node = await prisma.plantLabNode.findUnique({ where: { id: nodeId }, select: { lastHeartbeatAt: true } });
-    if (node?.lastHeartbeatAt && node.lastHeartbeatAt >= since) return true;
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+function describeCredentialProbeStatus(status: CredentialProbeStatus): string {
+  switch (status) {
+    case "missing":
+      return "missing";
+    case "empty":
+      return "empty";
+    case "var-missing":
+      return "present but does not set PLANTLAB_NODE_CREDENTIAL";
+    case "malformed":
+      return "malformed";
+    case "rejected":
+      return "rejected by the coordinator";
+    default:
+      return "not valid";
   }
-  return false;
 }
 
 async function waitForNodeInventory(nodeId: string, since: Date, timeoutMs: number) {

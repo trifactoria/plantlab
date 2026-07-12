@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plantlab-edge-agent"
+version = "0.1.0"
+description = "Lightweight PlantLab capture agent for low-resource devices (Raspberry Pi Zero and similar)."
+requires-python = ">=3.7"
+# Deliberately zero third-party dependencies (Part 7: "prefer Python
+# standard-library modules where practical") - urllib for HTTP, sqlite3 for
+# the durable spool, subprocess for ffmpeg/v4l2-ctl. This is what makes
+# install.sh able to skip pip entirely on a fresh Raspberry Pi OS Lite
+# image; see requirements.txt.
+dependencies = []
+
+[project.scripts]
+plantlab-edge-agent = "plantlab_edge_agent.__main__:main"
+
+[tool.setuptools]
+packages = ["plantlab_edge_agent"]

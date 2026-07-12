@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { CameraFormat } from "../v4l2";
 import { authenticateNodeCredential, type AuthenticatedNode } from "./nodeCredentials";
+import { serializeCapabilities } from "./capabilities";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/agentProtocol.ts is server-only operational code.");
@@ -31,6 +32,12 @@ export async function recordHeartbeat(
     operatingSystem?: string | null;
     architecture?: string | null;
     softwareVersion?: string | null;
+    /** "node" or "python-edge" - which agent implementation sent this heartbeat. See edge-agent/ and capabilities.ts. */
+    runtime?: string | null;
+    /** The agent protocol version this agent implements - see docs/AGENT_PROTOCOL.md. */
+    protocolVersion?: string | null;
+    /** What this node can actually do right now - a live heartbeat always wins over whatever registerOrRotateNode() seeded at enrollment time. */
+    capabilities?: string[] | null;
   },
 ) {
   // Unconditionally overwrites `status` - this is also how a
@@ -49,6 +56,9 @@ export async function recordHeartbeat(
       operatingSystem: input.operatingSystem ?? undefined,
       architecture: input.architecture ?? undefined,
       softwareVersion: input.softwareVersion ?? undefined,
+      runtime: input.runtime ?? undefined,
+      protocolVersion: input.protocolVersion ?? undefined,
+      capabilitiesJson: input.capabilities ? serializeCapabilities(input.capabilities) : undefined,
       lastHeartbeatAt: new Date(),
     },
   });

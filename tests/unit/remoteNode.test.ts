@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateSshHost } from "../../src/lib/operations/remoteNode";
+import { computeFullAgentSupport, validateSshHost } from "../../src/lib/operations/remoteNode";
 import { buildAgentServiceUnit } from "../../src/lib/operations/systemdUnits";
 import { serviceUnitsForSelection } from "../../src/lib/operations/serviceRoles";
 
@@ -34,5 +34,36 @@ describe("remote node helpers", () => {
       "plantlab-camera.service",
       "plantlab-agent.service",
     ]);
+  });
+
+  describe("computeFullAgentSupport (Part 5 - Pi Zero feasibility)", () => {
+    it("recommends the edge agent for a real Pi Zero v1.2 (armv6l, 512MB)", () => {
+      const result = computeFullAgentSupport({ armVersion: "v6", memoryTotalMb: 512 });
+      expect(result.fullAgentSupported).toBe(false);
+      expect(result.recommendedRuntime).toBe("python-edge");
+    });
+
+    it("recommends the full agent for a capable ARM64 machine with plenty of memory", () => {
+      const result = computeFullAgentSupport({ armVersion: "v8", memoryTotalMb: 4096 });
+      expect(result.fullAgentSupported).toBe(true);
+      expect(result.recommendedRuntime).toBe("node");
+    });
+
+    it("recommends the full agent for a capable x86_64 machine (armVersion null)", () => {
+      const result = computeFullAgentSupport({ armVersion: null, memoryTotalMb: 8192 });
+      expect(result.fullAgentSupported).toBe(true);
+      expect(result.recommendedRuntime).toBe("node");
+    });
+
+    it("recommends the edge agent purely on low memory, even on a newer ARM ISA", () => {
+      const result = computeFullAgentSupport({ armVersion: "v7", memoryTotalMb: 256 });
+      expect(result.fullAgentSupported).toBe(false);
+      expect(result.recommendedRuntime).toBe("python-edge");
+    });
+
+    it("does not penalize an unknown memory reading (null) on capable-ISA hardware", () => {
+      const result = computeFullAgentSupport({ armVersion: "v8", memoryTotalMb: null });
+      expect(result.fullAgentSupported).toBe(true);
+    });
   });
 });

@@ -1,0 +1,6 @@
+# No third-party dependencies by design - see pyproject.toml and Part 7 of
+# the Pi Zero edge-agent task ("prefer Python standard-library modules
+# where practical"). This file exists so install.sh has something
+# conventional to point at / a place to add a dependency if one ever
+# becomes genuinely necessary; today `pip install -r requirements.txt` is a
+# no-op.

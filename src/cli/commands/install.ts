@@ -9,6 +9,7 @@ const ROLE_DESCRIPTIONS: Record<NodeRole, string> = {
   standalone: "A single machine running the full app with no other nodes (today's default deployment shape).",
   "microscope-node": "A future specialized capture node for microscope imaging.",
   "mobile-uploader": "A future mobile client that uploads captures via the HTTP ingest endpoint.",
+  "greenhouse-node": "A camera-capable node that will later advertise sensor/relay capabilities as they are implemented - camera-only for now.",
 };
 
 async function promptForRole(): Promise<NodeRole> {

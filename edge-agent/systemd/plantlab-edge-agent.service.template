@@ -1,0 +1,20 @@
+[Unit]
+Description=PlantLab Edge Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__PYTHON_BIN__ -m plantlab_edge_agent run
+Restart=on-failure
+RestartSec=5
+# Conservative resource ceiling for a Pi Zero (512MB total RAM) - the edge
+# agent itself should use a few MB; this is a safety net, not a target.
+MemoryMax=128M
+# The credential file is read directly by config.py (not sourced via
+# EnvironmentFile) so `python3 -m plantlab_edge_agent` behaves identically
+# whether launched by systemd or by hand - see config.py's module
+# docstring.
+
+[Install]
+WantedBy=default.target

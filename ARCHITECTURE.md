@@ -143,14 +143,15 @@ existing data, which this task's safety requirements forbid.
 ## Roles
 
 `plantlab install` records one of `coordinator` / `camera-node` /
-`standalone` / `microscope-node` / `mobile-uploader` in
-`plantlab.config.json`. Today, **the role has no behavioral effect** -
-every role runs identically, exactly as before this file existed. It exists
-so `plantlab node info`, `plantlab doctor`'s Node Status section, and
-future capture-agent work have a real, durable place to read/write role
-information instead of inventing one later. Coordinator registration (a
-camera node "joining" a coordinator) is intentionally still manual - see
-"Explicitly out of scope" below.
+`standalone` / `microscope-node` / `mobile-uploader` / `greenhouse-node` in
+`plantlab.config.json`. Role now determines which systemd services are
+expected to run (`src/lib/operations/serviceRoles.ts`) and which agent
+runtime a node uses - see `DEPLOYMENT.md` "Canonical role-convergence
+design" and "Lightweight edge agent". `greenhouse-node` exists as a
+capability-agnostic role (see `src/lib/operations/capabilities.ts`): a
+greenhouse-node behaves identically to a camera-node today
+(camera-capability only) and will grow sensor/relay behavior by reading
+reported capabilities rather than by branching on this role name.
 
 ## Explicitly out of scope (deferred, not forgotten)
 

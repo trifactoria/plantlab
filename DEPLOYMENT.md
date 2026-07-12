@@ -115,6 +115,7 @@ the canonical mapping (see `ARCHITECTURE.md` for the full rationale):
 | `plantlab doctor --fix` / `--node <host> --fix` | Guided repair/convergence for an already-attempted (possibly partial) install or attach. |
 | `plantlab service ...` | Explicit, low-level systemctl control - a thin wrapper, never a substitute for install/update/attach/fix. |
 | `deploy/systemd/install.sh` | Low-level unit-file (re)generation only - a manual fallback, not invoked by any of the above. |
+| `edge-agent/install.sh` | The lightweight Python agent's own installer (Pi Zero and similar) - see "Lightweight edge agent" below. `./install.sh` and `plantlab node attach` both hand off to it automatically when a device isn't a good fit for the full stack. |
 
 `plantlab install`, `plantlab update`, `plantlab node attach`, and
 `plantlab doctor --fix` all share one implementation for the actual
@@ -173,6 +174,112 @@ If you ever see `Failed to enable unit: Unit ... is masked` from
 `plantlab node attach` or `plantlab doctor --fix` on a build older than
 this fix, update to a current build and re-run - it resolves
 automatically.
+
+## Automatic credential recovery
+
+**The bug this fixes:** `registerOrRotateNode()` correctly returns an empty
+string (never the raw secret) when an active credential already exists and
+rotation wasn't requested - the coordinator only ever stores a SHA-256
+hash. Older `node attach` logic decided whether to rotate purely from
+`credential file exists / mode is 0600 / directory mode is 0700`. A file
+can pass all three checks while its *content* is wrong - missing the
+`PLANTLAB_NODE_CREDENTIAL=` line, empty, malformed, or simply stale/
+revoked. That is exactly what happened on `bokchoy`: attach reported
+"Existing credential retained" and completed successfully, but the agent
+then failed with `PLANTLAB_NODE_CREDENTIAL is not set` - the file existed
+with correct permissions, but nothing in it authenticated.
+
+**The fix** (`src/lib/operations/credentialRepair.ts`):
+
+- `probeRemoteCredential(sshHost, coordinatorUrl)` - a real authenticated
+  round trip. The remote node reads its own credential file, validates it
+  looks like a PlantLab token, and POSTs it to
+  `/api/agents/credential-check` (a narrow, side-effect-free authenticated
+  endpoint - never a real heartbeat) **from the remote shell itself**. The
+  raw credential is used for exactly one `curl` call on the remote machine
+  and is never printed or returned to the calling CLI process - only one
+  of `missing | empty | var-missing | malformed | rejected | valid |
+  unknown` comes back.
+- `rotateAndInstallCredential()` - revoke the old credential, create a new
+  one, install it (mktemp+mv, 0600/0700, verified - same pattern as the
+  mask-recovery fix above), **force a restart** of the agent (see below),
+  wait for a real authenticated heartbeat, and only then report success.
+  Runtime-aware: for `runtime: "node"` this is the existing
+  `convergeNodeRole()` path; for `runtime: "python-edge"` (see "Lightweight
+  edge agent" below) it writes the same credential file format to the same
+  path and restarts `plantlab-edge-agent.service` instead - one lifecycle,
+  two installers.
+- `ensureValidNodeCredential()` - probes first, only rotates when the probe
+  demonstrates the credential is actually unusable. This is what `node
+  attach` and `doctor --fix` call instead of the old file-existence
+  heuristic.
+
+**A second, related bug this surfaced and fixed:** `systemctl --user
+enable --now <unit>` is a no-op on a unit that's already active - it does
+**not** restart it. A credential rotation that only calls `enable --now`
+would leave an already-running agent process serving the *old* environment
+variables it read at its original startup, silently ignoring the freshly
+written credential. `roleConvergence.ts` / `credentialRepair.ts` now track
+`forceRestart` explicitly and always issue a real `systemctl --user
+restart` whenever a credential changes (or whenever a repair explicitly
+asks for a restart, independent of rotation).
+
+**Node status** (`src/lib/operations/nodeCredentials.ts`) stays
+`pending | active | repair-required | revoked | offline` as before - a
+credential repair marks the node `repair-required` on any failure and
+clears it back to `pending` only after a fresh authenticated heartbeat
+actually lands.
+
+## Lightweight edge agent (Pi Zero and similar)
+
+For low-resource devices where the full Node.js/Next.js-adjacent agent
+stack doesn't make sense - originally a Raspberry Pi Zero v1.2 (ARMv6,
+single-core, 512MB RAM) - `edge-agent/` is a small, dependency-free Python
+3 agent speaking the exact same coordinator protocol as
+`scripts/agent-service.ts`. See `edge-agent/README.md` and
+`docs/AGENT_PROTOCOL.md` for the full picture; this section covers how it
+plugs into the deployment paths above.
+
+**Feasibility detection** - `src/lib/operations/remoteNode.ts`'s
+`computeFullAgentSupport()` looks at ARM ISA version and total memory
+(ARMv6-or-older, or under 768MB, recommends the edge agent) and is exposed
+as `armVersion` / `memoryTotalMb` / `fullAgentSupported` /
+`recommendedRuntime` on every `plantlab node inspect` result. `./install.sh`
+(top-level) runs the same check locally before doing any Node.js/pnpm work
+and offers to hand off to `edge-agent/install.sh` instead.
+
+**Attach** - `plantlab node attach <host>` runs the same feasibility check;
+when it recommends the edge agent, it offers to install it instead of
+requiring a full repository clone on the remote host at all (Part 12 -
+`edge-agent/` is copied wholesale over `scp`, never the full repo, never
+Docker), prompts for `camera-node` or `greenhouse-node`, then uses the
+exact same `ensureValidNodeCredential()`/`rotateAndInstallCredential()`
+lifecycle as any other node (`runtime: "python-edge"`).
+
+**Capabilities** (`src/lib/operations/capabilities.ts`,
+`PlantLabNode.capabilitiesJson`) - a node advertises what it can actually
+do (`camera`, `temperature`, `humidity`, `soil-moisture`, `relay`, `fan`,
+`light`, `pump`, `microscope`), additively and independent of role. Today
+every camera-capable node (any runtime) only ever reports `["camera"]` -
+sensor/relay control is modeled but **not implemented** (explicitly out of
+scope for this task). `greenhouse-node` is a real role
+(`src/lib/operations/config.ts` `NODE_ROLES`) that behaves identically to
+`camera-node` today; future sensor/relay work should read capabilities,
+not hard-code against this role name.
+
+**Doctor** - `plantlab doctor --node <host>` / `--fix` detects runtime
+(`python-edge` vs `node`, from the coordinator's own last-heartbeat record,
+falling back to the hardware feasibility check for a node that's never
+attached) and branches into a parallel, edge-agent-specific diagnostic path
+(`src/lib/operations/edgeAgentDiagnostics.ts`) reporting Python version,
+disk/memory, spool health, and unit status - with the same automatic
+credential repair as the full-agent path.
+
+**Known limitations**: the edge agent has no independent `plantlab update`
+equivalent yet (re-copy `edge-agent/` and re-run `install.sh`); upload is a
+single in-memory multipart body rather than a true streaming encoder
+(size-capped, adequate for the bounded JPEG frames this agent captures);
+sensor/relay capabilities are modeled but not implemented.
 
 ## Database migration policy
 

@@ -14,3 +14,7 @@ prisma/dev.db-journal
 /plantlab.config.json
 zips
 *.zip
+__pycache__/
+*.pyc
+.pytest_cache/
+edge-agent/*.egg-info/

@@ -25,7 +25,12 @@ export function isPlantLabServiceName(value: string): value is PlantLabServiceNa
  * explicitly - see requireExpectedServicesForRole() for mutating commands.
  */
 export function expectedServicesForRole(role: string | null | undefined): PlantLabServiceName[] {
-  if (role === "camera-node") {
+  // greenhouse-node shares plantlab-agent.service with camera-node (a
+  // greenhouse-node with a Pi-Zero-class runtime never reaches this path at
+  // all - it uses the separate lightweight edge agent instead, see
+  // edge-agent/ and node.ts's attach flow). Only a full-power
+  // greenhouse-node machine converges through here.
+  if (role === "camera-node" || role === "greenhouse-node") {
     return ["agent"];
   }
   if (role === "coordinator") {
