@@ -13,7 +13,7 @@ import {
   verifyStagedUploadMatchesExpectations,
   type ParsedIngestMetadata,
 } from "@/lib/ingest.server";
-import { authenticateIngestRequest, unauthorizedIngestResponse } from "@/lib/ingestAuth.server";
+import { authenticateIngestRequestAsync, unauthorizedIngestResponse } from "@/lib/ingestAuth.server";
 import { prisma } from "@/lib/prisma";
 import { isUniqueConstraintError } from "@/lib/prismaErrors";
 import { runViewportFanOut } from "@/lib/viewportFanOut";
@@ -63,7 +63,7 @@ function respondToExistingCapture(existing: SourceCapture, metadata: ParsedInges
  * intended coordinator workflow of "ingest and publish in one step").
  */
 export async function POST(request: Request) {
-  const auth = authenticateIngestRequest(request);
+  const auth = await authenticateIngestRequestAsync(prisma, request);
   if (!auth.authorized) {
     return unauthorizedIngestResponse(auth.reason);
   }

@@ -1,0 +1,19 @@
+[Unit]
+Description=PlantLab camera-node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_PATH__
+Environment=NODE_ENV=production
+Environment=PLANTLAB_ROOT_DIR=__REPO_PATH__
+EnvironmentFile=-__REPO_PATH__/.env.local
+EnvironmentFile=-%h/.config/plantlab/agent.env
+ExecStart=__RUN_BIN__ run agent:service
+SyslogIdentifier=plantlab-agent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

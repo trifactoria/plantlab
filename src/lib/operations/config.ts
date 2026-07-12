@@ -40,6 +40,10 @@ export type NodeConfig = {
    * config-format migration.
    */
   coordinatorUrl?: string | null;
+  /** Human-facing coordinator-side node name, e.g. "xps". */
+  nodeName?: string | null;
+  /** Durable camera-node spool root. Defaults are role/runtime dependent. */
+  spoolRoot?: string | null;
 };
 
 /** `<PLANTLAB_ROOT_DIR>/plantlab.config.json` - node-local, never synced, never part of a project backup archive. */
@@ -61,13 +65,18 @@ export async function readNodeConfig(): Promise<NodeConfig | null> {
   }
 }
 
-export async function writeNodeConfig(role: NodeRole, overrides: Partial<Pick<NodeConfig, "coordinatorUrl">> = {}): Promise<NodeConfig> {
+export async function writeNodeConfig(
+  role: NodeRole,
+  overrides: Partial<Pick<NodeConfig, "coordinatorUrl" | "nodeName" | "spoolRoot">> = {},
+): Promise<NodeConfig> {
   const config: NodeConfig = {
     formatVersion: 1,
     role,
     configuredAt: new Date().toISOString(),
     hostname: os.hostname(),
     coordinatorUrl: overrides.coordinatorUrl ?? null,
+    nodeName: overrides.nodeName ?? null,
+    spoolRoot: overrides.spoolRoot ?? null,
   };
 
   await writeFile(resolveNodeConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8");

@@ -1,5 +1,7 @@
 import type { Command } from "commander";
+import { spawnSync } from "node:child_process";
 import { formatBytes, runDoctorReport, runStorageAudit, applyStorageRemediation } from "../../lib/operations/doctor";
+import { validateSshHost } from "../../lib/operations/remoteNode";
 import { prisma } from "../../lib/prisma";
 import { printDoctorReport } from "../format";
 
@@ -8,8 +10,20 @@ export function registerDoctorCommand(program: Command): void {
     .command("doctor")
     .description("Structured health report: database, storage, camera, capture service, node status, backups")
     .option("--capture [device]", "Also capture one real temporary frame to verify the hardware path (not saved)")
-    .action(async (options: { capture?: string | boolean }) => {
+    .option("--node <ssh-host>", "Run doctor on a remote node through SSH")
+    .action(async (options: { capture?: string | boolean; node?: string }) => {
       try {
+        if (options.node) {
+          validateSshHost(options.node);
+          const remoteArgs = ["plantlab", "doctor"];
+          if (options.capture) {
+            remoteArgs.push("--capture");
+            if (typeof options.capture === "string") remoteArgs.push(options.capture);
+          }
+          const result = spawnSync("ssh", [options.node, ...remoteArgs], { stdio: "inherit" });
+          process.exitCode = result.status ?? 1;
+          return;
+        }
         const captureRequested = options.capture !== undefined;
         const captureDevice = typeof options.capture === "string" ? options.capture : null;
 

@@ -82,6 +82,9 @@ model CaptureSource {
   cameraProfile  CameraProfile?    @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
   sourceCaptures SourceCapture[]
   viewports      ProjectViewport[]
+  nodeCameras    NodeCamera[]
+  assignments    NodeCameraAssignment[]
+  agentJobs      AgentCaptureJob[]
 
   @@index([cameraDevice])
 }
@@ -422,4 +425,114 @@ model ServiceStatus {
   version       String?
   lastError     String?
   updatedAt     DateTime @updatedAt
+}
+
+// A coordinator-side record for another PlantLab machine. This is additive
+// deployment metadata only; it never stores the canonical project database
+// path, raw credentials, or local photo paths from the node.
+model PlantLabNode {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  hostname        String?
+  role            String
+  status          String    @default("enrolled")
+  operatingSystem String?
+  architecture    String?
+  softwareVersion String?
+  coordinatorUrl  String?
+  lastHeartbeatAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  credentials NodeCredential[]
+  cameras     NodeCamera[]
+  assignments NodeCameraAssignment[]
+  jobs        AgentCaptureJob[]
+
+  @@index([role])
+  @@index([lastHeartbeatAt])
+}
+
+model NodeCredential {
+  id             String    @id @default(cuid())
+  nodeId         String
+  credentialHash String    @unique
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+
+  node PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId])
+  @@index([revokedAt])
+}
+
+model NodeCamera {
+  id              String   @id @default(cuid())
+  nodeId          String
+  stableId        String
+  devicePath      String
+  name            String?
+  formatsJson     String?
+  available       Boolean  @default(true)
+  lastSeenAt      DateTime @default(now())
+  captureSourceId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  node          PlantLabNode            @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource?          @relation(fields: [captureSourceId], references: [id], onDelete: SetNull)
+  assignments   NodeCameraAssignment[]
+
+  @@unique([nodeId, stableId])
+  @@index([nodeId])
+  @@index([captureSourceId])
+}
+
+model NodeCameraAssignment {
+  id              String   @id @default(cuid())
+  nodeId          String
+  nodeCameraId    String
+  captureSourceId String
+  name            String
+  width           Int
+  height          Int
+  inputFormat     String   @default("mjpeg")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  node          PlantLabNode      @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  nodeCamera    NodeCamera        @relation(fields: [nodeCameraId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource     @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  jobs          AgentCaptureJob[]
+
+  @@unique([nodeId, nodeCameraId, captureSourceId])
+  @@index([nodeId])
+  @@index([captureSourceId])
+  @@index([active])
+}
+
+model AgentCaptureJob {
+  id              String    @id @default(cuid())
+  nodeId          String
+  assignmentId    String
+  captureSourceId String
+  status          String    @default("queued")
+  requestedAt     DateTime  @default(now())
+  claimedAt       DateTime?
+  completedAt     DateTime?
+  captureId       String?   @unique
+  sourceCaptureId String?
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  node          PlantLabNode         @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  assignment    NodeCameraAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource        @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, status, requestedAt])
+  @@index([assignmentId])
+  @@index([captureSourceId])
 }

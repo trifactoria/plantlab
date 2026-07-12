@@ -33,6 +33,7 @@ install_unit() {
 
 install_unit "plantlab-web"
 install_unit "plantlab-camera"
+install_unit "plantlab-agent"
 
 echo ""
 echo "  repo path: $REPO_PATH"
@@ -41,6 +42,8 @@ echo ""
 echo "Next steps (see DEPLOYMENT.md for the full sequence, including build):"
 echo "  systemctl --user daemon-reload"
 echo "  systemctl --user enable --now plantlab-web.service plantlab-camera.service"
+echo "  # camera nodes only:"
+echo "  systemctl --user enable --now plantlab-agent.service"
 echo ""
 echo "If this machine has no active login session when the services should run,"
 echo "also enable lingering once: loginctl enable-linger \"\$USER\""

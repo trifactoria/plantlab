@@ -1,5 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
+import type { PrismaClient } from "@prisma/client";
+import { authenticateNodeCredential } from "./operations/nodeCredentials";
 
 // See src/lib/paths.server.ts for why this is a plain runtime guard rather
 // than the `server-only` package.
@@ -94,6 +96,20 @@ export function authenticateIngestRequest(request: Request): IngestAuthResult {
 
   // Single shared-token scheme for now - see the doc comment above.
   return { authorized: true, agentId: "shared-coordinator-token" };
+}
+
+export async function authenticateIngestRequestAsync(prisma: PrismaClient, request: Request): Promise<IngestAuthResult> {
+  const configured = authenticateIngestRequest(request);
+  if (configured.authorized) {
+    return configured;
+  }
+
+  const node = await authenticateNodeCredential(prisma, request.headers.get("authorization"));
+  if (!node) {
+    return configured;
+  }
+
+  return { authorized: true, agentId: node.node.id };
 }
 
 export function unauthorizedIngestResponse(reason: string) {

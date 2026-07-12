@@ -2,6 +2,7 @@ import { Command } from "commander";
 import packageJson from "../../package.json";
 import { registerBackupCommand } from "./commands/backup";
 import { registerCameraCommand } from "./commands/camera";
+import { registerCaptureCommand } from "./commands/capture";
 import { registerDoctorCommand } from "./commands/doctor";
 import { registerInstallCommand } from "./commands/install";
 import { registerNodeCommand } from "./commands/node";
@@ -30,6 +31,7 @@ export function buildProgram(): Command {
   registerServiceCommand(program);
   registerNodeCommand(program);
   registerCameraCommand(program);
+  registerCaptureCommand(program);
   registerBackupCommand(program);
   registerProjectCommand(program);
 

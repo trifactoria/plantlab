@@ -30,6 +30,8 @@ plantlab install                 # interactive role setup (see "Node roles")
 plantlab service status|start|stop|restart   # systemctl --user wrapper
 plantlab node list|info|discover             # this node + SSH-config candidates
 plantlab camera list|attach|test [device]    # local hardware camera commands
+plantlab camera list --node xps              # coordinator view of node cameras
+plantlab capture test --node xps             # remote manual capture test
 plantlab backup create|list|verify|restore   # see "Backups" below
 plantlab project list|show|set-lifecycle     # see "Project lifecycle" below
 ```
@@ -49,6 +51,49 @@ and `scripts/backup.ts` have been removed - their logic now lives in
 `src/lib/operations/doctor.ts` and `src/lib/backup.ts`, consumed by both the
 CLI and (for doctor) the web API. `scripts/camera-*.ts` and
 `scripts/agent-ingest-upload.sh` are unaffected.
+
+## Remote camera-node workflow
+
+The first supported multi-machine workflow is a coordinator with a canonical
+SQLite database and image storage, plus a camera node that captures locally
+and uploads frames back over ordinary HTTP. SSH is used only for inspection,
+enrollment, configuration, and systemd management.
+
+Before attaching nodes, apply the additive coordinator migration:
+
+```bash
+pnpm db:generate
+pnpm db:push
+```
+
+No existing project, photo, backup, capture source, or source capture is
+modified by that migration. The new tables store deployment metadata only:
+nodes, hashed node credentials, node camera inventory, node-to-capture-source
+assignments, and manual capture jobs.
+
+From the coordinator, the intended G70/XPS validation flow is:
+
+```bash
+plantlab node inspect xps
+plantlab node attach xps --coordinator-url http://plantlab:3000
+plantlab camera list --node xps
+plantlab camera attach --node xps
+plantlab capture test --node xps
+```
+
+`plantlab node attach` rotates a per-node credential, writes
+`plantlab.config.json` in the remote repository, writes the raw credential to
+the remote user's `~/.config/plantlab/agent.env` with `0600` permissions, and
+installs/starts `plantlab-agent.service` as a user-level systemd service. The
+default spool root is the remote user's
+`~/.local/state/plantlab-agent`; pass `--spool-root /var/lib/plantlab-agent`
+only if that directory already belongs to the non-root PlantLab service user.
+
+The agent runtime (`pnpm agent:service`) keeps its own local
+`state.sqlite` under the spool root. It captures a frame to local spool first,
+then uploads it to `/api/agent-ingest` using the node credential. The
+coordinator acknowledges the job only after the canonical `SourceCapture` is
+created; failed uploads remain in the local spool for retry.
 
 ## Diagnosis of the original failure
 

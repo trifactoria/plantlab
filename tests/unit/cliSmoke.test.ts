@@ -25,9 +25,20 @@ describe("plantlab CLI (subprocess smoke test)", () => {
   it("plantlab --help lists every top-level command", () => {
     const result = runCli(["--help"]);
     expect(result.status).toBe(0);
-    for (const command of ["doctor", "install", "service", "node", "camera", "backup", "project"]) {
+    for (const command of ["doctor", "install", "service", "node", "camera", "capture", "backup", "project"]) {
       expect(result.stdout).toContain(command);
     }
+  });
+
+  it.each([
+    ["node", "inspect", "--help"],
+    ["node", "attach", "--help"],
+    ["camera", "attach", "--help"],
+    ["capture", "test", "--help"],
+  ])("plantlab %s %s %s prints help", (...args) => {
+    const result = runCli(args);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Usage:");
   });
 
   it("plantlab project list runs against the isolated test database (empty, not real data)", () => {

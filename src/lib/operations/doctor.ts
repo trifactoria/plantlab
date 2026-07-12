@@ -240,6 +240,51 @@ async function checkNodeStatus(): Promise<DoctorCheck> {
   }
 }
 
+async function coordinatorTableExists(tableName: string): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+    tableName,
+  );
+  return rows.length > 0;
+}
+
+async function checkRegisteredNodes(): Promise<DoctorCheck> {
+  try {
+    if (!(await coordinatorTableExists("PlantLabNode"))) {
+      return warn("nodeStatus", "registered-nodes", 'Coordinator node tables are not migrated yet. Run "pnpm db:push" or apply migrations before attaching nodes.');
+    }
+    const count = await prisma.plantLabNode.count();
+    if (count === 0) {
+      return warn("nodeStatus", "registered-nodes", 'No remote nodes registered yet. Run "plantlab node attach <ssh-host>" from the coordinator.');
+    }
+    const staleCutoff = new Date(Date.now() - 5 * 60_000);
+    const stale = await prisma.plantLabNode.count({
+      where: { OR: [{ lastHeartbeatAt: null }, { lastHeartbeatAt: { lt: staleCutoff } }] },
+    });
+    return stale > 0
+      ? warn("nodeStatus", "registered-nodes", `${count} node(s) registered; ${stale} have no recent heartbeat.`)
+      : pass("nodeStatus", "registered-nodes", `${count} node(s) registered with recent heartbeats.`);
+  } catch (error) {
+    return warn("nodeStatus", "registered-nodes", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function checkAgentJobs(): Promise<DoctorCheck> {
+  try {
+    if (!(await coordinatorTableExists("AgentCaptureJob"))) {
+      return warn("captureService", "agent-capture-jobs", 'Agent job tables are not migrated yet. Run "pnpm db:push" or apply migrations before testing remote captures.');
+    }
+    const failed = await prisma.agentCaptureJob.count({ where: { status: "failed" } });
+    const active = await prisma.agentCaptureJob.count({ where: { status: { in: ["queued", "claimed"] } } });
+    if (failed > 0) {
+      return warn("captureService", "agent-capture-jobs", `${failed} failed agent capture job(s), ${active} queued/claimed.`);
+    }
+    return pass("captureService", "agent-capture-jobs", `${active} queued/claimed agent capture job(s), no failures.`);
+  } catch (error) {
+    return warn("captureService", "agent-capture-jobs", error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function checkBackupsHealth(): Promise<DoctorCheck> {
   try {
     const backups = await listBackups();
@@ -353,7 +398,9 @@ export async function runDoctorReport(options: DoctorReportOptions = {}): Promis
 
   checks.push(checkNextBuildPresent());
   checks.push(await checkCaptureServiceHealth());
+  checks.push(await checkAgentJobs());
   checks.push(await checkNodeStatus());
+  checks.push(await checkRegisteredNodes());
   checks.push(await checkBackupsHealth());
 
   const byCategory = Object.fromEntries(DOCTOR_CATEGORIES.map((category) => [category, [] as DoctorCheck[]])) as Record<

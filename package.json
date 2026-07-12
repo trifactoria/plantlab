@@ -16,6 +16,7 @@
     "camera:list": "tsx scripts/camera-list.ts",
     "camera:watch": "tsx scripts/camera-watch.ts",
     "camera:service": "tsx scripts/camera-service.ts",
+    "agent:service": "tsx scripts/agent-service.ts",
     "backup": "bin/plantlab backup create",
     "backup:list": "bin/plantlab backup list",
     "doctor": "bin/plantlab doctor",
