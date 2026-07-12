@@ -17,7 +17,7 @@ import { unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { auditProjectDirectories } from "../src/lib/dataDoctor.server";
+import { auditProjectDirectories, auditStaleIngestFiles, formatBytes } from "../src/lib/dataDoctor.server";
 import { resolveAllPaths, resolveRootDir, resolveSqliteDatabasePath } from "../src/lib/paths.server";
 import { prisma } from "../src/lib/prisma";
 import {
@@ -147,6 +147,28 @@ async function checkOrphanProjectDirectories(): Promise<CheckResult> {
   }
 }
 
+/**
+ * Read-only summary only - this never deletes anything, even a very stale
+ * .partial file. Run "npm run data:doctor" for the full report and
+ * "npm run data:doctor -- --remove-stale-ingest-files" to actually clean up.
+ */
+async function checkStaleIngestFiles(): Promise<CheckResult> {
+  try {
+    const report = await auditStaleIngestFiles();
+
+    if (report.staleFiles.length > 0) {
+      return warn(
+        "stale-ingest-files",
+        `${report.staleFiles.length} stale .partial ingest file(s) found (${formatBytes(report.totalStaleBytes)}) - run "npm run data:doctor" for details.`,
+      );
+    }
+
+    return pass("stale-ingest-files", "No stale ingest staging files found.");
+  } catch (error) {
+    return warn("stale-ingest-files", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function parseCaptureFlag(argv: string[]): { requested: boolean; device: string | null } {
   const flag = argv.find((arg) => arg === "--capture" || arg.startsWith("--capture="));
   if (!flag) {
@@ -238,6 +260,7 @@ async function main() {
 
   results.push(checkNextBuildPresent());
   results.push(await checkOrphanProjectDirectories());
+  results.push(await checkStaleIngestFiles());
 
   if (captureRequested) {
     console.log("--capture requested: performing one real hardware test capture (not saved as a project photo).\n");

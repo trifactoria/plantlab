@@ -3,12 +3,21 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { acquireFileLock, CameraBusyError, releaseFileLock } from "../../src/lib/fileLock";
+import { resolveRuntimeLocksDir } from "../../src/lib/paths.server";
 
 // Mirrors fileLock.ts's internal (unexported) path scheme so tests can
 // pre-write lock files to exercise stale-recovery without real hardware.
-const RUNTIME_DIR = path.join(process.cwd(), "data", "runtime", "locks");
+// Resolved fresh per call (not hoisted to a module-level constant) so it
+// always reflects the current PLANTLAB_ROOT_DIR - this must never resolve
+// to the real repository's data/runtime/locks directory. It previously
+// used `path.join(process.cwd(), ...)` directly, which - before the test
+// isolation work in this task - silently wrote real lock files into the
+// actual repository's data/runtime/locks/ directory.
+function runtimeDir() {
+  return resolveRuntimeLocksDir();
+}
 function lockPathFor(key: string) {
-  return path.join(RUNTIME_DIR, `camera-${key}.lock`);
+  return path.join(runtimeDir(), `camera-${key}.lock`);
 }
 
 function testKey() {
@@ -67,7 +76,7 @@ describe("acquireFileLock / releaseFileLock", () => {
     const lockPath = lockPathFor(key);
     cleanupPaths.push(lockPath);
 
-    await mkdir(RUNTIME_DIR, { recursive: true });
+    await mkdir(runtimeDir(), { recursive: true });
     await writeFile(
       lockPath,
       JSON.stringify({
@@ -88,7 +97,7 @@ describe("acquireFileLock / releaseFileLock", () => {
     const lockPath = lockPathFor(key);
     cleanupPaths.push(lockPath);
 
-    await mkdir(RUNTIME_DIR, { recursive: true });
+    await mkdir(runtimeDir(), { recursive: true });
     await writeFile(
       lockPath,
       JSON.stringify({

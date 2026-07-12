@@ -391,13 +391,259 @@ canonical project data during validation - `pnpm data:doctor` (without
 - This task intentionally does not touch PostgreSQL, remote/Tailscale
   capture agents, mobile uploads, or storage archiving - SQLite and the
   existing photo-directory layout are unchanged.
-- `tests/unit/photoIngestRoutes.test.ts`'s before/after `Photo` count
-  assertion is occasionally flaky **only** when the full suite runs (all
-  test files concurrently against one shared real SQLite database) - it
-  passes reliably in isolation every time it was tried. This is pre-existing
-  test-infrastructure behavior (confirmed unrelated to any change in this
-  task by running it standalone repeatedly), not a product bug: Vitest runs
-  test files in parallel by default, and any other file's concurrent
-  `Photo` row creation/cleanup can shift the count between this one test's
-  two snapshots. Not fixed here - out of scope (would need either
-  sequential test execution or a per-worker isolated database).
+- ~~`tests/unit/photoIngestRoutes.test.ts`'s before/after `Photo` count
+  assertion is occasionally flaky only when the full suite runs~~ - fixed by
+  the test-isolation work below (every test file now runs against its own
+  private SQLite database copy, so no test file's `Photo` row can shift
+  another's count).
+- The remote HTTP ingest endpoint (below) currently supports a single
+  shared coordinator-wide token (`PLANTLAB_INGEST_TOKEN`/`_HASH`), not
+  per-agent credentials, and only JPEG/PNG images. It does not yet
+  implement the full capture-agent job protocol, PostgreSQL, Supabase, T9
+  archiving, schedule leases, mobile applications, or public Vercel export
+  - those are explicitly out of scope for this task.
+
+## Test isolation (unit tests never touch real PlantLab data)
+
+Automated unit/route tests (`npm run test:unit`, i.e. everything under
+`tests/unit/**` per `vitest.config.ts`) must never read or write the real
+development SQLite database, canonical project photos, real capture-source
+files, `data/projects/`, or live camera-service state.
+
+**Architecture** (`tests/unit/setup/globalSetup.ts` + `tests/unit/setup/testEnvironment.ts`):
+
+1. **`globalSetup`** runs once for the whole `vitest run` invocation, in the
+   main orchestrating process, before any test file starts. It builds one
+   template SQLite database (`prisma db push` against the current
+   `prisma/schema.prisma`, so schema changes are picked up automatically -
+   no separate test-side migration step) under a temp directory and writes
+   its path to a marker file.
+2. **`testEnvironment.ts`** (a Vitest `setupFiles` entry) runs before *each
+   test file's own imports* - using top-level `await`, not a
+   `beforeAll`/hook, because hooks fire too late to influence
+   `DATABASE_URL` before `PrismaClient` is constructed at module load time.
+   For every test file, it creates a fresh, uniquely-named temp root
+   (`database/`, `data/projects/`, `data/capture-sources/`, `data/ingest/`,
+   `data/runtime/locks/`, `backups/`), copies the template database into
+   it, and points `PLANTLAB_ROOT_DIR`/`DATABASE_URL`/`PLANTLAB_INGEST_DIR`/`PLANTLAB_BACKUP_DIR`
+   at that root. An `afterAll` in the same file removes the temp root after
+   the file's tests finish.
+3. **Defense in depth**: `resolveRootDir()` (`src/lib/paths.server.ts`) and
+   the `PrismaClient` constructor (`src/lib/prisma.ts`) both hard-fail with
+   a clear, actionable error if `process.env.VITEST` is set (automatically,
+   by the Vitest runner itself) but `PLANTLAB_ROOT_DIR`/`DATABASE_URL`
+   don't point at an isolated test location - so a future misconfiguration
+   of the setup above fails loudly instead of silently touching real data.
+
+Isolation is **per test file**, not per worker: Vitest's default
+`isolate: true` re-executes each file's own module graph (including
+`setupFiles`) per file, so a "reuse across files" scheme would either not
+survive that or risk one file's cleanup racing another file's still-active
+temp directory. Per-file isolation costs a handful of `mkdir` calls plus one
+`copyFile` per file (not a full `prisma db push` - only `globalSetup` does
+that, once) and is strictly simpler and safer.
+
+This is deliberately **not** "make every test run serially" - test files
+still run concurrently (Vitest's default), each against its own private
+database and filesystem copy, so true cross-test races stay caught rather
+than hidden.
+
+Run `npm run test:unit` repeatedly (or in a loop) to confirm determinism;
+the real dev database and `data/projects/` are provably untouched by any
+test run (verified during this task: identical `Project`/`Photo` row counts
+and `data/projects/` directory count before and after 15+ consecutive full
+suite runs, and zero leftover `/tmp/plantlab-test-*` directories after every
+run completes).
+
+## Remote HTTP ingest
+
+`POST /api/agent-ingest` lets a capture agent (bokchoy, a future Raspberry
+Pi capture node, a future mobile uploader, or manual `curl` testing) upload
+one image + metadata for an existing `CaptureSource` over **ordinary HTTP**
+- LAN or a Tailscale network route. **Taildrop, Tailscale file-transfer
+APIs, SMB, NFS, mounted remote databases, and Git are never used for image
+transfer.**
+
+### Environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `PLANTLAB_INGEST_TOKEN` | one of this or `_HASH` | Raw bearer token the coordinator accepts. Simple to set up; the raw value briefly lives in the coordinator's own environment. |
+| `PLANTLAB_INGEST_TOKEN_HASH` | one of this or the raw token | A pre-computed SHA-256 hex digest of the token (`sha256sum` or `printf '%s' "$TOKEN" \| sha256sum`) - preferred once set up, since the raw token never needs to sit in the coordinator's environment. |
+| `PLANTLAB_INGEST_DIR` | no | Overrides the default staging directory (`<PLANTLAB_ROOT_DIR>/data/ingest`) where incoming uploads are streamed as `.partial` files before atomic placement. |
+| `PLANTLAB_INGEST_MAX_BYTES` | no | Overrides the default 50 MiB per-upload size limit. |
+
+This is a **single shared coordinator-wide token**, documented here as a
+temporary scheme for a private home network - every agent currently
+presents the same token. Authentication is isolated in
+`src/lib/ingestAuth.server.ts` specifically so it can later be replaced
+with per-agent credentials without touching the route or the ingest
+pipeline. Raw tokens are never logged; only SHA-256 digests are compared
+(constant-time), and malformed/missing/invalid credentials all return
+`401`.
+
+### Request format
+
+`multipart/form-data` with two parts:
+
+- **`metadata`** (JSON): `captureId` (agent-generated idempotency key,
+  globally unique), `capturedAt` (ISO date), `captureSourceId` **or**
+  `cameraStableId` (at least one required - `captureSourceId` is the
+  canonical DB id and is preferred; `cameraStableId` is resolved via a
+  `CaptureSource` lookup and must match exactly one row), `originalFilename`,
+  `expectedSha256` (64-char hex), `expectedByteSize`, `mimeType`
+  (`image/jpeg` or `image/png`).
+- **`image`**: the raw image bytes.
+
+### Streaming, validation, and atomic placement
+
+Handled by `src/lib/ingest.server.ts` (`receiveIngestMultipart`,
+`validateStagedImage`, `placeStagedFileAtCanonicalPath`):
+
+1. The image streams directly from the request body to a `.partial` file
+   under `PLANTLAB_INGEST_DIR` - the complete image is never buffered in
+   memory.
+2. SHA-256 is computed incrementally as bytes stream through.
+3. The configured max size (`PLANTLAB_INGEST_MAX_BYTES`) is enforced
+   **during** streaming (`413` as soon as the limit is crossed, not after
+   the whole file has landed).
+4. Once fully staged, actual byte size and checksum are compared against
+   the declared `expectedByteSize`/`expectedSha256` (`400` on mismatch).
+5. The staged file is opened with Sharp to confirm it's a real, decodable
+   image whose actual format matches the declared `mimeType` (`400` if
+   not).
+6. Only after every check passes is the file atomically renamed
+   (`fs.rename`) into its canonical location - never acknowledged before
+   that rename and the database transaction below both succeed.
+7. Any failure at any step removes the `.partial` staging file; nothing is
+   ever left in the staging directory after a failed or interrupted
+   request.
+
+### Storage layout
+
+Canonical files live under `resolveCaptureSourcesDataDir()`
+(`<PLANTLAB_ROOT_DIR>/data/capture-sources/`) at:
+
+```
+<captureSourceId>/<year>/<month>/<captureId>.jpg
+```
+
+(the `<captureId>` is sanitized to strip path-unsafe characters). This is
+**not** a new top-level directory - remotely-ingested and locally-driven
+capture-source files share the same canonical location. `SourceCapture`
+rows created this way store this path in the new `storageKey` column (a
+canonical relative path) in addition to the existing absolute `originalPath`
+column, plus `sha256`, `byteSize`, `mimeType`, `originalFilename`, and
+`ingestSource: "http-agent-ingest"`. All of these columns are nullable -
+existing rows and locally-driven camera-service captures leave them `null`;
+a separate backfill (not part of this task) could populate them later.
+Existing rows are never moved or rewritten by this task.
+
+### Idempotency and status codes
+
+`captureId` is globally unique (`SourceCapture.captureId`, a unique
+database column):
+
+| Scenario | Status |
+| --- | --- |
+| First valid upload | `201 Created` |
+| Identical retry (same `captureId`, matching checksum+size) | `200 OK` - returns the original result, creates nothing new |
+| Same `captureId`, different checksum/size | `409 Conflict` - original upload is preserved untouched |
+| Missing/invalid/malformed auth | `401 Unauthorized` |
+| Malformed metadata / invalid or unsupported image | `400 Bad Request` |
+| Unknown `captureSourceId`/`cameraStableId` | `404 Not Found` |
+| Upload exceeds `PLANTLAB_INGEST_MAX_BYTES` | `413 Payload Too Large` |
+| Unexpected coordinator-side failure | `500` (database failure after successful file placement is cleaned up - the canonical file is deleted rather than left untracked) |
+
+A database failure after the file has already been durably placed deletes
+the just-placed canonical file rather than leaving an untracked file behind
+(`sourceCapture.create` failure path in
+`src/app/api/agent-ingest/route.ts`). An interrupted/disconnected upload
+never reaches the database step at all, and its `.partial` staging file is
+removed as part of the same failure handling.
+
+By default, a successful ingest immediately runs viewport fan-out (the
+existing shared `runViewportFanOut()` workflow - one derived, cropped
+`Photo` per project with an active `ProjectViewport` on this
+`CaptureSource`), matching the intended coordinator workflow. Pass
+`?mode=store-only` to store the `SourceCapture` without triggering fan-out.
+A retried upload (idempotent 200) never triggers fan-out again, so
+duplicate/retried uploads cannot produce duplicate project photos.
+
+### curl verification
+
+`scripts/agent-ingest-upload.sh` is a ready-to-run example client - copy it
+(or `curl` directly) to another Ubuntu machine on the same LAN/Tailscale
+network as the coordinator:
+
+```bash
+PLANTLAB_INGEST_TOKEN=<token> \
+CAPTURE_SOURCE_ID=<existing-capture-source-id> \
+PLANTLAB_HOST=http://<coordinator-lan-ip>:3000 \
+  ./scripts/agent-ingest-upload.sh /path/to/frame.jpg my-capture-001
+```
+
+Equivalent raw `curl`:
+
+```bash
+EXPECTED_SHA256=$(sha256sum frame.jpg | cut -d' ' -f1)
+EXPECTED_BYTE_SIZE=$(stat -c%s frame.jpg)
+
+curl -i -X POST http://<coordinator-lan-ip>:3000/api/agent-ingest \
+  -H "Authorization: Bearer $PLANTLAB_INGEST_TOKEN" \
+  -F 'metadata={
+        "captureId": "my-capture-001",
+        "capturedAt": "2026-07-11T12:00:00.000Z",
+        "captureSourceId": "<existing-capture-source-id>",
+        "originalFilename": "frame.jpg",
+        "expectedSha256": "'"$EXPECTED_SHA256"'",
+        "expectedByteSize": '"$EXPECTED_BYTE_SIZE"',
+        "mimeType": "image/jpeg"
+      };type=application/json' \
+  -F "image=@frame.jpg;type=image/jpeg"
+```
+
+Re-running the exact same command confirms idempotent success (`200 OK`,
+same `sourceCaptureId`, no new file/row). Re-running with the same
+`captureId` but a different image confirms the conflict path (`409
+Conflict`, original preserved).
+
+**Verified during this task** (against a real local server, a real
+`CaptureSource`, and two distinct real JPEGs; all verification data - the
+`CaptureSource`, its `SourceCapture` row, and its file - was deleted
+afterward and confirmed to leave the real database's row counts unchanged):
+
+```
+First upload:        HTTP/1.1 201 Created
+                      {"status":"created","sourceCaptureId":"...","captureId":"verify-capture-001",
+                       "storageKey":"<id>/2026/07/verify-capture-001.jpg","fanOutTriggered":true}
+Identical retry:      HTTP/1.1 200 OK
+                      {"status":"already-exists","sourceCaptureId":"...","captureId":"verify-capture-001"}
+Conflicting retry:    HTTP/1.1 409 Conflict
+                      {"error":"captureId \"verify-capture-001\" was already ingested with different
+                       content (checksum/size mismatch). The original upload was preserved."}
+No Authorization header:  401
+Wrong token:               401
+```
+
+### Stale ingest file cleanup
+
+A `.partial` staging file should only outlive one request if the process
+crashed or was killed mid-upload (an ordinary rejected/failed upload
+already cleans up its own `.partial` file). `npm run data:doctor` reports
+(dry-run by default) any `.partial` file older than one hour, with
+`--remove-stale-ingest-files` to actually delete them - never recently
+modified files (a real in-flight upload), never anything outside the
+configured ingest directory, and never anything that isn't a plain
+`<uuid>.partial` file. `npm run doctor` surfaces a read-only `WARN` with the
+count and total bytes, pointing at `data:doctor` for details; ordinary
+application startup never performs destructive cleanup.
+
+### Backup implications
+
+`npm run backup` already archives the whole configured root (database +
+`data/`), so ingested `SourceCapture` rows and their canonical files under
+`data/capture-sources/` are included automatically - no change needed to
+the existing backup process. The `.partial` staging directory
+(`PLANTLAB_INGEST_DIR`) is not canonical data and doesn't need to be backed
+up.

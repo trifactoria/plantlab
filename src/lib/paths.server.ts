@@ -39,10 +39,31 @@ if (typeof window !== "undefined") {
  *
  * Deliberately not memoized, so tests can exercise both branches by
  * changing `process.env.PLANTLAB_ROOT_DIR` between calls.
+ *
+ * Under Vitest (`process.env.VITEST` is set automatically by the test
+ * runner) a missing `PLANTLAB_ROOT_DIR` is treated as a hard failure
+ * instead of silently falling back to `process.cwd()` - which, under
+ * `vitest run`, IS the real repository root. Automated tests must never
+ * read or write the real development database or `data/projects/`; see
+ * tests/unit/setup/testEnvironment.ts (registered as a Vitest setupFile),
+ * which sets this before any test file's own imports run. If this throws,
+ * that setup file isn't wired up correctly for the code path that hit it.
  */
 export function resolveRootDir(): string {
   const override = process.env.PLANTLAB_ROOT_DIR;
-  return path.resolve(override && override.trim().length > 0 ? override.trim() : process.cwd());
+  if (override && override.trim().length > 0) {
+    return path.resolve(override.trim());
+  }
+
+  if (process.env.VITEST) {
+    throw new Error(
+      "PLANTLAB_ROOT_DIR is not set while running under Vitest - refusing to fall back to " +
+        "process.cwd() (the real repository root). Tests must not touch real PlantLab data. " +
+        "See tests/unit/setup/testEnvironment.ts.",
+    );
+  }
+
+  return path.resolve(process.cwd());
 }
 
 export function resolveDataDir(): string {
@@ -60,6 +81,21 @@ export function resolveCaptureSourcesDataDir(): string {
 /** Cross-process camera lock directory - see fileLock.ts. */
 export function resolveRuntimeLocksDir(): string {
   return path.join(resolveDataDir(), "runtime", "locks");
+}
+
+/**
+ * Staging directory for remote HTTP ingest uploads (see src/lib/ingest.server.ts)
+ * - incoming files are streamed here as `.partial` before being verified
+ * and atomically renamed into their canonical storage location under
+ * resolveProjectsDataDir()/resolveCaptureSourcesDataDir(). Never treated as
+ * canonical storage itself.
+ */
+export function resolveIngestDir(): string {
+  const override = process.env.PLANTLAB_INGEST_DIR;
+  if (override && override.trim().length > 0) {
+    return path.resolve(override.trim());
+  }
+  return path.join(resolveDataDir(), "ingest");
 }
 
 export function resolveBackupDir(): string {
@@ -108,6 +144,7 @@ export type ResolvedPlantLabPaths = {
   dataDir: string;
   projectsDataDir: string;
   captureSourcesDataDir: string;
+  ingestDir: string;
   runtimeLocksDir: string;
   backupDir: string;
 };
@@ -118,6 +155,7 @@ export function resolveAllPaths(): ResolvedPlantLabPaths {
     dataDir: resolveDataDir(),
     projectsDataDir: resolveProjectsDataDir(),
     captureSourcesDataDir: resolveCaptureSourcesDataDir(),
+    ingestDir: resolveIngestDir(),
     runtimeLocksDir: resolveRuntimeLocksDir(),
     backupDir: resolveBackupDir(),
   };

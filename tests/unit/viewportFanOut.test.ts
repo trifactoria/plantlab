@@ -219,7 +219,13 @@ describe("viewportFanOut", () => {
 
     await runViewportFanOut(sourceCapture.id);
 
-    const photo = await prisma.photo.findFirst({ where: { projectId: project.id } });
+    // This project now has two photos - the seed photo used to establish
+    // the crop version, and the one just derived by fan-out. findFirst()
+    // with no orderBy has no guaranteed row order (SQLite/Prisma make no
+    // ordering promise without one), so explicitly pick the fan-out's
+    // derived photo by its known timestamp rather than relying on
+    // whichever row the query planner happens to return first.
+    const photo = await prisma.photo.findFirst({ where: { projectId: project.id, timestamp } });
     const crop = await prisma.plantPhotoCrop.findUnique({
       where: { plantId_photoId: { plantId: plant.id, photoId: photo!.id } },
     });

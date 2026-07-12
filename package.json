@@ -24,6 +24,7 @@
   "dependencies": {
     "@prisma/client": "6.19.3",
     "@tailwindcss/postcss": "4.3.2",
+    "busboy": "^1.6.0",
     "exifr": "^7.1.3",
     "luxon": "^3.7.2",
     "next": "15.5.20",
@@ -36,6 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
+    "@types/busboy": "^1.5.4",
     "@types/luxon": "^3.7.2",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",

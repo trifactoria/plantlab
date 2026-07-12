@@ -96,6 +96,33 @@ model SourceCapture {
   pixelFormat     String
   createdAt       DateTime  @default(now())
 
+  // Canonical file metadata (nullable - existing rows and locally-driven
+  // camera-service captures don't populate these; a separate backfill can
+  // fill them in later). Required for anything ingested through the
+  // remote HTTP agent-ingest endpoint - see src/lib/ingest.server.ts.
+  //
+  // captureId is the caller-supplied idempotency key (a UUID the agent
+  // generates once per frame and retries with unchanged) - globally
+  // unique, not scoped per captureSourceId, since agent-generated UUIDs
+  // are already effectively global. Null for locally-driven captures,
+  // which have no external caller to supply one.
+  captureId        String? @unique
+  sha256           String?
+  byteSize         Int?
+  mimeType         String?
+  originalFilename String?
+  // Canonical relative path from the capture-sources data root (see
+  // resolveCaptureSourcesDataDir() in paths.server.ts), not an absolute
+  // host-specific path - e.g. "<captureSourceId>/2026/07/<captureId>.jpg".
+  // Locally-driven captures currently keep using originalPath (an absolute
+  // path) instead; storageKey is populated going forward for anything
+  // ingested remotely so storage can be relocated without a DB migration.
+  storageKey       String?
+  // Provenance: "local-camera-service" | "http-agent-ingest" | future
+  // values (a Raspberry Pi node, a mobile uploader). Null for existing
+  // rows predating this column.
+  ingestSource     String?
+
   captureSource CaptureSource     @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
   viewports     ProjectViewport[] @relation("ViewportSourceCapture")
   photos        Photo[]

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { auditProjectDirectories, removeEmptyOrphans } from "../../src/lib/dataDoctor.server";
+import { auditProjectDirectories, auditStaleIngestFiles, removeEmptyOrphans, removeStaleIngestFiles } from "../../src/lib/dataDoctor.server";
 import { prisma } from "../../src/lib/prisma";
 import { cleanupTestProject, createTestProject } from "./helpers/testProject";
 
@@ -212,6 +212,107 @@ describe("dataDoctor.server", () => {
       // Symlink target must be untouched regardless.
       const { readdir } = await import("node:fs/promises");
       await expect(readdir(realDir)).resolves.toEqual([]);
+    });
+  });
+
+  describe("auditStaleIngestFiles / removeStaleIngestFiles", () => {
+    async function isolatedIngestDir() {
+      const { root } = await isolatedRoot();
+      const ingestDir = path.join(root, "data", "ingest");
+      await mkdir(ingestDir, { recursive: true });
+      vi.stubEnv("PLANTLAB_INGEST_DIR", ingestDir);
+      return ingestDir;
+    }
+
+    it("reports zero stale files when the ingest directory doesn't exist yet", async () => {
+      const { root } = await isolatedRoot();
+      vi.stubEnv("PLANTLAB_INGEST_DIR", path.join(root, "data", "ingest-never-created"));
+
+      const report = await auditStaleIngestFiles();
+      expect(report.staleFiles).toEqual([]);
+      expect(report.recentFiles).toEqual([]);
+    });
+
+    it("classifies a .partial file older than the age threshold as stale", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const filePath = path.join(ingestDir, `${randomUUID()}.partial`);
+      await writeFile(filePath, Buffer.from("partial-upload-bytes"));
+
+      const report = await auditStaleIngestFiles({ minAgeMs: 0 });
+      expect(report.staleFiles.map((f) => f.filePath)).toEqual([filePath]);
+      expect(report.totalStaleBytes).toBe(Buffer.from("partial-upload-bytes").length);
+    });
+
+    it("does not classify a recently-modified .partial file as stale", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const filePath = path.join(ingestDir, `${randomUUID()}.partial`);
+      await writeFile(filePath, Buffer.from("still uploading"));
+
+      const report = await auditStaleIngestFiles(); // default one-hour threshold
+      expect(report.staleFiles).toEqual([]);
+      expect(report.recentFiles.map((f) => f.filePath)).toEqual([filePath]);
+    });
+
+    it("reports a non-.partial entry as unexpected and never classifies it as stale/recent", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const strayPath = path.join(ingestDir, "not-a-partial-file.txt");
+      await writeFile(strayPath, "stray");
+
+      const report = await auditStaleIngestFiles({ minAgeMs: 0 });
+      expect(report.unexpectedEntries).toEqual([strayPath]);
+      expect(report.staleFiles).toEqual([]);
+      expect(report.recentFiles).toEqual([]);
+    });
+
+    it("removeStaleIngestFiles deletes only the files in the report, leaving recent ones untouched", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const stalePath = path.join(ingestDir, `${randomUUID()}.partial`);
+      const recentPath = path.join(ingestDir, `${randomUUID()}.partial`);
+      await writeFile(stalePath, "stale");
+      await writeFile(recentPath, "recent");
+
+      const report = await auditStaleIngestFiles({ minAgeMs: 0 });
+      const staleOnly = { ...report, staleFiles: report.staleFiles.filter((f) => f.filePath === stalePath) };
+
+      const result = await removeStaleIngestFiles(staleOnly);
+      expect(result.removed).toEqual([stalePath]);
+
+      const { readdir } = await import("node:fs/promises");
+      const remaining = await readdir(ingestDir);
+      expect(remaining).toEqual([path.basename(recentPath)]);
+    });
+
+    it("skips (does not delete) a stale file that was modified again since the audit", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const filePath = path.join(ingestDir, `${randomUUID()}.partial`);
+      await writeFile(filePath, "v1");
+
+      const report = await auditStaleIngestFiles({ minAgeMs: 0 });
+      // Simulate a fresh write happening between audit and removal. Sets an
+      // explicit, unambiguously-later mtime (rather than relying on two
+      // real-time writeFile calls landing in different filesystem mtime
+      // ticks, which some filesystems' timestamp granularity can't
+      // guarantee for two writes microseconds apart).
+      await writeFile(filePath, "v2-still-uploading");
+      await utimes(filePath, new Date(report.staleFiles[0].mtime.getTime() + 5_000), new Date(report.staleFiles[0].mtime.getTime() + 5_000));
+
+      const result = await removeStaleIngestFiles(report); // re-check compares against the audited mtime
+      expect(result.removed).toEqual([]);
+      expect(result.skipped[0]?.reason).toMatch(/Modified since the audit/);
+
+      const { readdir } = await import("node:fs/promises");
+      await expect(readdir(ingestDir)).resolves.toContain(path.basename(filePath));
+    });
+
+    it("removes a file re-checked-recent file when ignoreAge is explicitly set", async () => {
+      const ingestDir = await isolatedIngestDir();
+      const filePath = path.join(ingestDir, `${randomUUID()}.partial`);
+      await writeFile(filePath, "data");
+
+      const report = await auditStaleIngestFiles({ minAgeMs: 0 });
+      const result = await removeStaleIngestFiles(report, { ignoreAge: true });
+
+      expect(result.removed).toEqual([filePath]);
     });
   });
 });

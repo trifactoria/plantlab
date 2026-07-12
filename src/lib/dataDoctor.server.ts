@@ -1,7 +1,7 @@
-import { lstat, readdir, rmdir, stat } from "node:fs/promises";
+import { lstat, readdir, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { PrismaClient } from "@prisma/client";
-import { resolveProjectsDataDir } from "./paths.server";
+import { resolveIngestDir, resolveProjectsDataDir } from "./paths.server";
 
 // See src/lib/paths.server.ts for why this is a plain runtime guard rather
 // than the `server-only` package.
@@ -260,6 +260,146 @@ export async function removeEmptyOrphans(
     } catch (error) {
       skipped.push({
         directoryPath: orphan.directoryPath,
+        reason: `Could not remove: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  return { removed, skipped };
+}
+
+export const DEFAULT_STALE_INGEST_AGE_MS = 60 * 60 * 1000; // one hour - same default interval as orphan project directories
+
+export type StaleIngestFileAudit = {
+  fileName: string;
+  filePath: string;
+  byteSize: number;
+  mtime: Date;
+};
+
+export type IngestStagingReport = {
+  ingestDir: string;
+  /** .partial files at or past the age threshold - eligible for removal. */
+  staleFiles: StaleIngestFileAudit[];
+  /** .partial files younger than the age threshold - a normal in-flight upload; never touched. */
+  recentFiles: StaleIngestFileAudit[];
+  /** Anything under the ingest directory that isn't a plain "<uuid>.partial" file (a subdirectory, a symlink, an unexpected name) - reported, never touched by cleanup. */
+  unexpectedEntries: string[];
+  totalStaleBytes: number;
+};
+
+/**
+ * Read-only scan of the ingest staging directory (see receiveIngestMultipart
+ * in ingest.server.ts) for leftover `.partial` files - the only way one
+ * should exist past a request's lifetime is a crash or a killed process
+ * partway through an upload (an ordinary failed/rejected upload already
+ * cleans up its own .partial file itself).
+ *
+ * Deliberately flat: never recurses into subdirectories or follows
+ * symlinks. The ingest directory is expected to contain nothing but
+ * "<uuid>.partial" staging files directly.
+ */
+export async function auditStaleIngestFiles(options: { minAgeMs?: number; now?: Date } = {}): Promise<IngestStagingReport> {
+  const ingestDir = resolveIngestDir();
+  const minAgeMs = options.minAgeMs ?? DEFAULT_STALE_INGEST_AGE_MS;
+  const now = options.now ?? new Date();
+
+  let entries: Array<{ name: string; isFile: () => boolean }> = [];
+  try {
+    entries = await readdir(ingestDir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+    return { ingestDir, staleFiles: [], recentFiles: [], unexpectedEntries: [], totalStaleBytes: 0 };
+  }
+
+  const staleFiles: StaleIngestFileAudit[] = [];
+  const recentFiles: StaleIngestFileAudit[] = [];
+  const unexpectedEntries: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".partial")) {
+      unexpectedEntries.push(path.join(ingestDir, entry.name));
+      continue;
+    }
+
+    const filePath = path.join(ingestDir, entry.name);
+    const stats = await stat(filePath);
+    // Clamped at zero: a just-written file's mtime can appear a few
+    // milliseconds ahead of a `now` captured immediately afterwards, due to
+    // filesystem mtime rounding - without this, that would produce a
+    // spurious negative age and misclassify a brand-new file as "stale"
+    // under a zero/near-zero minAgeMs.
+    const ageMs = Math.max(0, now.getTime() - stats.mtime.getTime());
+    const audit: StaleIngestFileAudit = { fileName: entry.name, filePath, byteSize: stats.size, mtime: stats.mtime };
+
+    if (ageMs >= minAgeMs) {
+      staleFiles.push(audit);
+    } else {
+      // Recently modified - very likely a normal in-flight upload, not stale. Never removed.
+      recentFiles.push(audit);
+    }
+  }
+
+  return {
+    ingestDir,
+    staleFiles,
+    recentFiles,
+    unexpectedEntries,
+    totalStaleBytes: staleFiles.reduce((sum, f) => sum + f.byteSize, 0),
+  };
+}
+
+export type RemoveStaleIngestFilesResult = {
+  removed: string[];
+  skipped: Array<{ filePath: string; reason: string }>;
+};
+
+/**
+ * Deletes only the files in report.staleFiles, re-verifying each one's
+ * mtime immediately before deleting (the same defensive re-check pattern
+ * removeEmptyOrphans() uses) - an upload that resumed writing to its
+ * .partial file between the audit and this call is left alone rather than
+ * deleted out from under it.
+ *
+ * The re-check compares the freshly-read mtime against the mtime already
+ * captured in the report (not against wall-clock "now") - the staleness
+ * threshold was already applied once, in auditStaleIngestFiles(). Deriving
+ * a second age from `Date.now() - mtime` here would be vulnerable to
+ * filesystem mtime rounding: on some filesystems a just-written mtime can
+ * appear a few milliseconds ahead of a `now` captured immediately
+ * afterwards, producing a spurious negative age and an incorrect skip.
+ * Comparing mtimes directly has no such clock-skew hazard.
+ */
+export async function removeStaleIngestFiles(
+  report: IngestStagingReport,
+  options: { ignoreAge?: boolean } = {},
+): Promise<RemoveStaleIngestFilesResult> {
+  const removed: string[] = [];
+  const skipped: Array<{ filePath: string; reason: string }> = [];
+
+  for (const file of report.staleFiles) {
+    const currentStats = await stat(file.filePath).catch(() => null);
+    if (!currentStats) {
+      skipped.push({ filePath: file.filePath, reason: "No longer exists" });
+      continue;
+    }
+
+    if (!options.ignoreAge && currentStats.mtime.getTime() !== file.mtime.getTime()) {
+      skipped.push({
+        filePath: file.filePath,
+        reason: "Modified since the audit - an upload may be in progress",
+      });
+      continue;
+    }
+
+    try {
+      await rm(file.filePath, { force: true });
+      removed.push(file.filePath);
+    } catch (error) {
+      skipped.push({
+        filePath: file.filePath,
         reason: `Could not remove: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
