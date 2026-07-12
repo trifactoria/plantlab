@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { captureProjectPhoto } from "@/lib/camera";
 import { CameraBusyError } from "@/lib/cameraLock";
 import { readJson } from "@/lib/http";
+import { productionLocalOnlyResponse } from "@/lib/localOnly";
 
 export const runtime = "nodejs";
 
@@ -10,11 +11,9 @@ type Context = {
 };
 
 export async function POST(request: Request, context: Context) {
-  if (process.env.NODE_ENV === "production") {
-    return NextResponse.json(
-      { error: "Local camera capture is disabled in production." },
-      { status: 403 },
-    );
+  const blocked = productionLocalOnlyResponse();
+  if (blocked) {
+    return blocked;
   }
 
   const { projectId } = await context.params;

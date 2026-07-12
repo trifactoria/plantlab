@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ShelfLayoutEditor } from "@/components/ShelfLayoutEditor";
+import { localCameraHardwareEnabled } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 
 type PageProps = {
@@ -23,8 +24,7 @@ export default async function CaptureSourcePage({ params }: PageProps) {
     select: { id: true, name: true, isTestProject: true },
   });
 
-  const production =
-    process.env.NODE_ENV === "production" && process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI !== "1";
+  const production = !localCameraHardwareEnabled();
 
   return (
     <main className="min-h-screen">

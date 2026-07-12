@@ -15,6 +15,7 @@
     "camera:service": "tsx scripts/camera-service.ts",
     "backup": "tsx scripts/backup.ts",
     "backup:list": "tsx scripts/backup.ts list",
+    "doctor": "tsx scripts/doctor.ts",
     "test:e2e": "playwright test tests/e2e.spec.ts",
     "test:unit": "vitest run",
     "screenshots": "playwright test tests/screenshots.spec.ts"
@@ -29,7 +30,8 @@
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "sharp": "^0.35.3",
-    "tailwindcss": "4.3.2"
+    "tailwindcss": "4.3.2",
+    "tsx": "^4.20.6"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
@@ -37,7 +39,6 @@
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
-    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   }

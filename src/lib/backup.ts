@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { readDatabaseUrlFromEnvFile, resolveBackupDir, resolveProjectsDataDir, resolveSqliteDatabasePath } from "./paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,36 +14,16 @@ export type BackupOptions = {
   version?: string | null;
 };
 
-async function databaseUrlFromEnvFile() {
-  const envPath = path.join(process.cwd(), ".env");
-  const env = await readFile(envPath, "utf8").catch(() => "");
-  const match = env.match(/^DATABASE_URL=(.+)$/m);
-  return match?.[1]?.trim().replace(/^"|"$/g, "") ?? "";
-}
-
-function databasePathFromUrl(databaseUrl: string) {
-  const prefix = "file:";
-  if (!databaseUrl.startsWith(prefix)) {
-    throw new Error("Only file: SQLite DATABASE_URL values can be backed up.");
-  }
-  const raw = databaseUrl.slice(prefix.length).replace(/^"|"$/g, "");
-  if (path.isAbsolute(raw)) {
-    return raw;
-  }
-
-  return path.resolve(process.cwd(), "prisma", raw);
-}
-
 function timestampForPath(date: Date) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
 export async function createBackup(options: BackupOptions = {}) {
   const now = options.now ?? new Date();
-  const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? (await databaseUrlFromEnvFile());
-  const databasePath = databasePathFromUrl(databaseUrl);
-  const dataRoot = path.resolve(options.dataRoot ?? path.join(process.cwd(), "data", "projects"));
-  const backupDir = path.resolve(options.backupDir ?? process.env.PLANTLAB_BACKUP_DIR ?? "backups");
+  const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL ?? (await readDatabaseUrlFromEnvFile());
+  const databasePath = resolveSqliteDatabasePath(databaseUrl);
+  const dataRoot = path.resolve(options.dataRoot ?? resolveProjectsDataDir());
+  const backupDir = path.resolve(options.backupDir ?? resolveBackupDir());
 
   const dbStat = await stat(databasePath).catch(() => null);
   if (!dbStat?.isFile()) {
@@ -78,7 +59,7 @@ export async function createBackup(options: BackupOptions = {}) {
   return { archivePath, sizeBytes: archiveStat.size, manifest };
 }
 
-export async function listBackups(backupDir = process.env.PLANTLAB_BACKUP_DIR ?? "backups") {
+export async function listBackups(backupDir = resolveBackupDir()) {
   const resolved = path.resolve(backupDir);
   const entries = await readdir(resolved).catch(() => []);
   return entries

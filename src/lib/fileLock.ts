@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveRuntimeLocksDir } from "./paths";
 
 export class CameraBusyError extends Error {
   constructor(
@@ -25,7 +26,6 @@ type LockFileContents = {
   acquiredAt: string;
 };
 
-const RUNTIME_DIR = path.join(process.cwd(), "data", "runtime", "locks");
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_STALE_AFTER_MS = 60_000;
 const RETRY_DELAY_MS = 150;
@@ -35,7 +35,7 @@ function sanitizeLockKey(key: string) {
 }
 
 function lockPathFor(key: string) {
-  return path.join(RUNTIME_DIR, `camera-${sanitizeLockKey(key)}.lock`);
+  return path.join(resolveRuntimeLocksDir(), `camera-${sanitizeLockKey(key)}.lock`);
 }
 
 function delay(ms: number) {
@@ -104,7 +104,7 @@ export async function acquireFileLock(
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
 
-  await mkdir(RUNTIME_DIR, { recursive: true });
+  await mkdir(resolveRuntimeLocksDir(), { recursive: true });
 
   for (;;) {
     const contents: LockFileContents = {

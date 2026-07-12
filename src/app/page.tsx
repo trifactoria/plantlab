@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ProjectForm } from "@/components/ProjectForm";
 import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
 import { formatDateTime } from "@/lib/format";
+import { localCameraHardwareEnabled } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -15,8 +16,7 @@ export default async function HomePage() {
       },
     },
   });
-  const canManageLocally =
-    process.env.NODE_ENV !== "production" || process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1";
+  const canManageLocally = localCameraHardwareEnabled();
 
   return (
     <main className="min-h-screen">

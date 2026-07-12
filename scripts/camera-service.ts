@@ -1,9 +1,11 @@
 import { captureProjectPhoto } from "../src/lib/camera";
 import { CaptureScheduler, consoleLogger } from "../src/lib/captureService";
 import { CaptureSourceScheduler } from "../src/lib/captureSourceService";
+import { logResolvedPaths, resolveDataDir, resolveRuntimeLocksDir } from "../src/lib/paths";
 import { prisma } from "../src/lib/prisma";
 import { writeHeartbeat } from "../src/lib/serviceStatus";
 import { captureSourcePhoto } from "../src/lib/sourceCapture";
+import { checkExecutable, checkWritableDirectory, formatCheckLine } from "../src/lib/startupChecks";
 import { runViewportFanOut } from "../src/lib/viewportFanOut";
 
 const REFRESH_INTERVAL_MS = Number(process.env.CAPTURE_SERVICE_REFRESH_INTERVAL_MS ?? 15_000);
@@ -35,11 +37,42 @@ function sleep(ms: number) {
   });
 }
 
+async function runStartupChecks() {
+  logResolvedPaths();
+
+  const results = [
+    await checkExecutable("ffmpeg", true),
+    await checkExecutable("v4l2-ctl", false),
+    await checkWritableDirectory("data-dir", resolveDataDir()),
+    await checkWritableDirectory("runtime-locks-dir", resolveRuntimeLocksDir()),
+  ];
+
+  for (const result of results) {
+    const line = formatCheckLine(result);
+    if (result.status === "fail") {
+      consoleLogger.error(line);
+    } else if (result.status === "warn") {
+      consoleLogger.warn(line);
+    } else {
+      consoleLogger.info(line);
+    }
+  }
+
+  const hardFailure = results.find((result) => result.status === "fail");
+  if (hardFailure) {
+    throw new Error(
+      `Startup check failed: ${hardFailure.name} - ${hardFailure.detail}. Run "npm run doctor" for a full report.`,
+    );
+  }
+}
+
 async function main() {
   consoleLogger.info("PlantLab capture service starting", {
     pid: process.pid,
     refreshIntervalMs: REFRESH_INTERVAL_MS,
   });
+
+  await runStartupChecks();
 
   const scheduler = new CaptureScheduler({
     prisma,

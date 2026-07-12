@@ -20,6 +20,7 @@ import {
   elapsedMs,
 } from "@/lib/experiment";
 import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
+import { localCameraHardwareEnabled } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
 import { formatDateTimeInZone } from "@/lib/timezone";
@@ -70,7 +71,7 @@ export default async function ProjectPage({ params }: PageProps) {
   });
   const monthCards = groupPhotosByMonth(galleryPhotos, projectRecord.timeZone);
   const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos, projectRecord.timeZone) : [];
-  const canCaptureLocally = process.env.NODE_ENV !== "production";
+  const canCaptureLocally = localCameraHardwareEnabled();
   const nextCaptureAt = nextPermittedCaptureTime({
     startAt: projectRecord.captureStartAt,
     intervalMinutes: projectRecord.photoIntervalMinutes,

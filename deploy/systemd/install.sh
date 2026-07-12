@@ -1,37 +1,52 @@
 #!/usr/bin/env bash
-# Installs the PlantLab capture service as a user-level systemd unit.
-# Run once per machine: ./deploy/systemd/install.sh
+# Installs the PlantLab web and camera/scheduler services as user-level
+# systemd units. Run once per machine: ./deploy/systemd/install.sh
+#
+# This only writes unit files - it does not enable, start, build, or
+# install dependencies. See DEPLOYMENT.md for the full sequence.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEMPLATE_PATH="$SCRIPT_DIR/plantlab-capture.service.template"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNIT_PATH="$UNIT_DIR/plantlab-capture.service"
 
-PNPM_BIN="$(command -v pnpm || true)"
-if [ -z "$PNPM_BIN" ]; then
-  echo "error: pnpm was not found on PATH. Install pnpm and re-run this script." >&2
+RUN_BIN="$(command -v npm || command -v pnpm || true)"
+if [ -z "$RUN_BIN" ]; then
+  echo "error: neither npm nor pnpm was found on PATH. Install one and re-run this script." >&2
   exit 1
 fi
 
 mkdir -p "$UNIT_DIR"
 
-sed \
-  -e "s#__REPO_PATH__#$REPO_PATH#g" \
-  -e "s#__PNPM_BIN__#$PNPM_BIN#g" \
-  "$TEMPLATE_PATH" > "$UNIT_PATH"
+install_unit() {
+  local name="$1"
+  local template_path="$SCRIPT_DIR/${name}.service.template"
+  local unit_path="$UNIT_DIR/${name}.service"
 
-echo "Installed unit: $UNIT_PATH"
+  sed \
+    -e "s#__REPO_PATH__#$REPO_PATH#g" \
+    -e "s#__RUN_BIN__#$RUN_BIN#g" \
+    "$template_path" > "$unit_path"
+
+  echo "Installed unit: $unit_path"
+}
+
+install_unit "plantlab-web"
+install_unit "plantlab-camera"
+
+echo ""
 echo "  repo path: $REPO_PATH"
-echo "  pnpm:      $PNPM_BIN"
+echo "  npm/pnpm:  $RUN_BIN"
 echo ""
-echo "Next steps:"
+echo "Next steps (see DEPLOYMENT.md for the full sequence, including build):"
 echo "  systemctl --user daemon-reload"
-echo "  systemctl --user enable --now plantlab-capture.service"
+echo "  systemctl --user enable --now plantlab-web.service plantlab-camera.service"
 echo ""
-echo "If this machine has no active login session when the service should run,"
+echo "If this machine has no active login session when the services should run,"
 echo "also enable lingering once: loginctl enable-linger \"\$USER\""
 echo ""
 echo "If the camera device is only accessible to the 'video' group, add yourself"
 echo "to it once and log out/in: sudo usermod -aG video \"\$USER\""
+echo ""
+echo "Run \"npm run doctor\" (or \"pnpm doctor\") before enabling either service to"
+echo "catch configuration problems early."

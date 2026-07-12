@@ -30,3 +30,10 @@ The goal is to make documenting long-running experiments effortless by combining
 - Raspberry Pi capture nodes
 
 PlantLab is designed as a practical digital lab notebook that scales from simple webcam time-lapses to complex selective breeding and microscopy workflows while keeping all experiment data under the user's control.
+
+## Production deployment
+
+See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for building and running PlantLab as
+two long-running production processes (the web app and the camera/scheduler
+service) on an Ubuntu machine with an attached camera, including systemd
+units and a `npm run doctor` readiness check.

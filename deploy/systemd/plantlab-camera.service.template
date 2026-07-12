@@ -1,0 +1,24 @@
+[Unit]
+Description=PlantLab camera/scheduler service (multi-project capture + shared shelf-camera fan-out)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_PATH__
+# PLANTLAB_ROOT_DIR is redundant with WorkingDirectory in the normal case -
+# it's set explicitly anyway so path resolution (data/photo/backup/lock
+# directories - see src/lib/paths.ts) is correct even if this unit is ever
+# edited to run from a different working directory.
+Environment=PLANTLAB_ROOT_DIR=__REPO_PATH__
+ExecStart=__RUN_BIN__ run camera:service
+Restart=on-failure
+RestartSec=5
+# Loaded if present; missing files are ignored (leading "-"). Put
+# CAMERA_DEVICE, CAMERA_WARMUP_SECONDS, CAPTURE_SERVICE_REFRESH_INTERVAL_MS,
+# etc. here - this script does not get Next.js's own .env auto-loading.
+EnvironmentFile=-__REPO_PATH__/.env.local
+EnvironmentFile=-%h/.config/plantlab/camera.env
+
+[Install]
+WantedBy=default.target

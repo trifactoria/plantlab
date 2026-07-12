@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CameraSetupPanel } from "@/components/CameraSetupPanel";
 import { formatDateTime } from "@/lib/format";
+import { localCameraHardwareEnabled } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
 import { formatDateTimeInZone } from "@/lib/timezone";
@@ -30,9 +31,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
     captureWindowEndMinutes: project.captureWindowEndMinutes,
   });
   const insideWindow = isInsideCaptureWindow(new Date(), project);
-  const production =
-    process.env.NODE_ENV === "production" &&
-    process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI !== "1";
+  const production = !localCameraHardwareEnabled();
 
   return (
     <main className="min-h-screen">
