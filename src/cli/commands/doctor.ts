@@ -429,14 +429,13 @@ async function runEdgeAgentDoctor(
   const problems: string[] = [];
   const repairs: string[] = [];
 
-  const coordinatorUrl = inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || defaultCoordinatorUrl();
-
   let diagnostics: EdgeAgentDiagnostics | null = null;
   try {
     diagnostics = await diagnoseEdgeAgent(sshHost);
   } catch (error) {
     problems.push(`Edge agent diagnostics failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const coordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || defaultCoordinatorUrl();
 
   const probe = await probeRemoteCredential({ sshHost, coordinatorUrl, remoteUser: inspection.remoteUser });
   const needsCredentialRepair = probe.status !== "valid" && probe.status !== "unknown";
@@ -447,6 +446,10 @@ async function runEdgeAgentDoctor(
   }
   if (!diagnostics?.configExists) {
     problems.push(coordinatorRecord ? "Remote edge-agent configuration is missing or incomplete (coordinator has a pending enrollment record)." : "Node role is not configured.");
+    repairs.push("Rewrite edge-agent configuration.");
+  } else if (!diagnostics.configValid) {
+    problems.push(`Remote edge-agent configuration is incomplete${diagnostics.configError ? `: ${diagnostics.configError}` : "."}`);
+    if (!diagnostics.coordinatorUrl) problems.push("coordinatorUrl is missing from edge-agent.json.");
     repairs.push("Rewrite edge-agent configuration.");
   }
   if (coordinatorRecord) {
@@ -470,7 +473,8 @@ async function runEdgeAgentDoctor(
     repairs.push("Install ffmpeg: sudo apt-get install -y ffmpeg");
   }
   if (diagnostics && diagnostics.unitStatus !== "active") {
-    problems.push(`plantlab-edge-agent.service is ${diagnostics.unitStatus || "not installed"}.`);
+    problems.push(`plantlab-edge-agent.service is ${diagnostics.activeState || diagnostics.unitStatus || "not installed"}${diagnostics.subState ? ` (${diagnostics.subState})` : ""}.`);
+    if (diagnostics.latestException) problems.push(`Latest edge-agent failure: ${diagnostics.latestException}`);
     repairs.push("Restart the edge agent.");
   }
   if (coordinatorRecord && coordinatorRecord.status !== "active") {
@@ -481,6 +485,11 @@ async function runEdgeAgentDoctor(
   console.log(`Runtime: python-edge`);
   if (diagnostics) {
     console.log(`Python: ${diagnostics.pythonVersion ?? "(unknown)"}`);
+    console.log(`Config: ${diagnostics.configPath ?? "(unknown)"}`);
+    console.log(`Coordinator URL: ${diagnostics.coordinatorUrl ?? "(missing)"}`);
+    console.log(`Credential: ${diagnostics.credentialHasVariable ? "present" : "missing"}${diagnostics.credentialMode ? ` (${diagnostics.credentialMode})` : ""}`);
+    console.log(`Service: ${diagnostics.activeState ?? diagnostics.unitStatus ?? "(unknown)"}${diagnostics.subState ? ` (${diagnostics.subState})` : ""}${diagnostics.restartCount !== null ? `, restarts ${diagnostics.restartCount}` : ""}`);
+    if (diagnostics.latestException) console.log(`Latest failure: ${diagnostics.latestException}`);
     console.log(`Disk free: ${diagnostics.diskFree ?? "(unknown)"}`);
     console.log(`Memory: ${diagnostics.memoryTotalMb !== null ? `${diagnostics.memoryTotalMb} MB` : "(unknown)"}${diagnostics.memoryAvailableMb !== null ? ` (${diagnostics.memoryAvailableMb} MB available)` : ""}`);
     console.log(`Spool: ${diagnostics.spoolRoot ?? "(unknown)"}${diagnostics.spoolSizeBytes !== null ? ` (${formatBytes(diagnostics.spoolSizeBytes)})` : ""}`);

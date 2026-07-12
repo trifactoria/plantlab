@@ -137,6 +137,19 @@ lightweight Python edge agent instead, not the full Node.js stack. Either
 edge agent path. See `edge-agent/README.md` and `DEPLOYMENT.md`
 "Lightweight edge agent" for details.
 
+On the edge device itself, use:
+
+```bash
+plantlab-edge doctor
+plantlab-edge status
+plantlab-edge config show
+```
+
+If `edge-agent.json` has an empty `coordinatorUrl`, the service will exit
+before sending a heartbeat. Re-run `plantlab node attach <host>` from the
+coordinator; attachment now rewrites the edge config atomically before it
+waits for heartbeat.
+
 ## Logs
 
 See [Systemd Services](SYSTEMD.md) for `journalctl` commands.

@@ -28,6 +28,10 @@ def test_discover_cameras_reports_name_and_stable_id_when_tools_available():
     def fake_run(args, **kwargs):
         if args[0] == "v4l2-ctl" and "--info" in args:
             return _completed(stdout="Card type: Logitech C270\n")
+        if args[0] == "v4l2-ctl" and "--all" in args:
+            return _completed(stdout="Device Caps: Video Capture\n")
+        if args[0] == "v4l2-ctl" and "--list-formats-ext" in args:
+            return _completed(stdout="[0]: 'MJPG' (Motion-JPEG)\n  Size: Discrete 1280x720\n")
         if args[0] == "udevadm":
             return _completed(stdout="ID_VENDOR_ID=046d\nID_MODEL_ID=0825\nID_SERIAL_SHORT=ABC123\n")
         return _completed()
@@ -39,6 +43,28 @@ def test_discover_cameras_reports_name_and_stable_id_when_tools_available():
         assert len(cameras) == 1
         assert cameras[0].name == "Logitech C270"
         assert cameras[0].stable_id == "usb:046d:0825:ABC123"
+
+
+def test_discover_cameras_groups_duplicate_video_nodes_and_prefers_capture_node():
+    def fake_run(args, **kwargs):
+        device = args[args.index("--device") + 1] if "--device" in args else ""
+        if args[0] == "v4l2-ctl" and "--info" in args:
+            return _completed(stdout="Card type: Integrated Webcam\n")
+        if args[0] == "v4l2-ctl" and "--all" in args:
+            return _completed(stdout="Device Caps: Video Capture\n" if device == "/dev/video0" else "Device Caps: Metadata Capture\n")
+        if args[0] == "v4l2-ctl" and "--list-formats-ext" in args:
+            return _completed(stdout="[0]: 'MJPG' (Motion-JPEG)\n  Size: Discrete 1280x720\n")
+        if args[0] == "udevadm":
+            return _completed(stdout="ID_VENDOR_ID=0c45\nID_MODEL_ID=6a15\nID_SERIAL_SHORT=ABC123\n")
+        return _completed()
+
+    with patch("glob.glob", return_value=["/dev/video0", "/dev/video1"]), patch.object(camera, "command_exists", return_value=True), patch(
+        "subprocess.run", side_effect=fake_run
+    ):
+        cameras = camera.discover_cameras()
+        assert len(cameras) == 1
+        assert cameras[0].device == "/dev/video0"
+        assert cameras[0].alternate_devices == ["/dev/video1"]
 
 
 def test_capture_frame_raises_when_ffmpeg_fails(tmp_path):

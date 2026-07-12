@@ -65,7 +65,7 @@ async function postCameraInventory(coordinatorUrl: string, token: string) {
       devicePath: camera.device,
       name: camera.name,
       available: camera.supportsCapture,
-      formats: await listCameraFormats(camera.device).catch(() => []),
+      formats: camera.formats ?? (await listCameraFormats(camera.device).catch(() => [])),
     })),
   );
   return requestJson(`${coordinatorUrl}/api/agents/cameras`, token, {

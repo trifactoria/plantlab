@@ -7,6 +7,10 @@ export type LocalCamera = {
   supportsCapture: boolean;
   /** Stable USB-based identity, when Linux exposes enough information to compute one. */
   stableId: string | null;
+  /** Other /dev/video* nodes that expose the same physical camera identity. Diagnostic only. */
+  alternateDevices?: Array<{ device: string; supportsCapture: boolean; reason?: string }>;
+  /** Formats for the selected primary capture device. */
+  formats?: CameraFormat[];
 };
 
 export type CameraControl = {
@@ -58,7 +62,7 @@ function execFileText(command: string, args: string[]) {
 
 export async function discoverLocalCameras(): Promise<LocalCamera[]> {
   const output = await execFileText("v4l2-ctl", ["--list-devices"]);
-  const cameras: LocalCamera[] = [];
+  const rawCameras: LocalCamera[] = [];
   let currentName = "Unknown camera";
 
   for (const line of output.split("\n")) {
@@ -80,16 +84,48 @@ export async function discoverLocalCameras(): Promise<LocalCamera[]> {
     const stableId = await readUsbIdentity(device)
       .then((identity) => composeStableId(identity))
       .catch(() => null);
-    cameras.push({ name: currentName, device, supportsCapture, stableId });
+    const formats = supportsCapture ? await listCameraFormats(device).catch(() => []) : [];
+    rawCameras.push({ name: currentName, device, supportsCapture, stableId, formats });
   }
 
-  return cameras.sort((a, b) => {
+  const grouped = groupPhysicalCameras(rawCameras);
+  return grouped.sort((a, b) => {
     if (a.supportsCapture !== b.supportsCapture) {
       return a.supportsCapture ? -1 : 1;
     }
 
     return a.device.localeCompare(b.device, undefined, { numeric: true });
   });
+}
+
+export function groupPhysicalCameras(cameras: LocalCamera[]): LocalCamera[] {
+  const groups = new Map<string, LocalCamera[]>();
+  for (const camera of cameras) {
+    const key = camera.stableId ?? `device:${camera.device}`;
+    groups.set(key, [...(groups.get(key) ?? []), camera]);
+  }
+
+  const result: LocalCamera[] = [];
+  for (const group of groups.values()) {
+    const sorted = [...group].sort((a, b) => scoreCameraNode(b) - scoreCameraNode(a) || a.device.localeCompare(b.device, undefined, { numeric: true }));
+    const primary = sorted[0];
+    result.push({
+      ...primary,
+      alternateDevices: sorted.slice(1).map((camera) => ({
+        device: camera.device,
+        supportsCapture: camera.supportsCapture,
+        reason: camera.supportsCapture ? "alternate capture node" : "not capture-capable",
+      })),
+    });
+  }
+  return result;
+}
+
+function scoreCameraNode(camera: LocalCamera): number {
+  let score = 0;
+  if (camera.supportsCapture) score += 10;
+  if ((camera.formats ?? []).some((format) => format.resolutions.length > 0)) score += 20;
+  return score;
 }
 
 async function deviceSupportsCapture(device: string) {

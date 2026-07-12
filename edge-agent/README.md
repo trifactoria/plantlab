@@ -35,6 +35,23 @@ for a Pi-Zero-class device. Neither install path ever asks you to create,
 retrieve, or paste a credential by hand - the coordinator issues one
 automatically during `node attach` / `doctor --fix`.
 
+The installer creates a lightweight local command, without installing the
+full Node CLI:
+
+```sh
+plantlab-edge status
+plantlab-edge doctor
+plantlab-edge config show
+plantlab-edge camera list
+plantlab-edge service status
+plantlab-edge service restart
+plantlab-edge logs
+plantlab-edge version
+```
+
+These commands use only Python and the copied `edge-agent/` package. They
+never print the node credential.
+
 ## Layout
 
 ```
@@ -54,8 +71,11 @@ wholesale over SSH (`plantlab node attach` does exactly that) or package as
 a tiny tarball - the Pi never needs to clone or retain the full PlantLab
 repository. To update an already-installed edge agent, copy a newer
 `edge-agent/` directory over and re-run `./install.sh` (idempotent - it
-never touches an existing credential or config). There is no `plantlab
-update` equivalent for the edge agent yet; see "Known limitations" below.
+never touches an existing credential). Coordinator attachment always
+converges `~/.config/plantlab/edge-agent.json` to the coordinator-known
+role, node name, URL, spool root, and camera capability while preserving
+user-tuned intervals and byte limits. There is no `plantlab update`
+equivalent for the edge agent yet; see "Known limitations" below.
 
 ## Known limitations
 

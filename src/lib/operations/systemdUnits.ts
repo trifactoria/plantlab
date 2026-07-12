@@ -186,7 +186,7 @@ export function buildUnitConvergenceScript(input: UnitConvergenceScriptInput, re
     // sh -s` session that doesn't export HOME. Falling back to getent FIRST
     // would silently diverge from the Node-side paths whenever $HOME is
     // deliberately overridden.
-    'home_dir="$HOME"',
+    'home_dir="${HOME:-}"',
     'if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi',
     'unit_dir="$home_dir/.config/systemd/user"',
     `repo=${shellQuote(repoPath)}`,

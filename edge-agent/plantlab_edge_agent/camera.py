@@ -29,6 +29,8 @@ class CameraInfo:
     name: Optional[str]
     stable_id: Optional[str]
     supports_capture: bool = True
+    formats: List[str] = field(default_factory=list)
+    alternate_devices: List[str] = field(default_factory=list)
 
 
 def command_exists(name: str) -> bool:
@@ -53,8 +55,33 @@ def discover_cameras() -> List[CameraInfo]:
     for device in devices:
         name = _v4l2_card_name(device)
         stable_id = _stable_id_for_device(device)
-        cameras.append(CameraInfo(device=device, name=name, stable_id=stable_id))
-    return cameras
+        supports_capture = _supports_capture(device)
+        formats = _format_lines(device) if supports_capture else []
+        cameras.append(CameraInfo(device=device, name=name, stable_id=stable_id, supports_capture=supports_capture, formats=formats))
+    return _group_physical_cameras(cameras)
+
+
+def _group_physical_cameras(cameras: List[CameraInfo]) -> List[CameraInfo]:
+    groups: dict[str, List[CameraInfo]] = {}
+    for cam in cameras:
+        groups.setdefault(cam.stable_id or f"device:{cam.device}", []).append(cam)
+    grouped: List[CameraInfo] = []
+    for group in groups.values():
+        # Keep numeric device order as the tie breaker, ascending.
+        ordered = sorted(group, key=lambda c: (-_camera_score(c), _device_sort_key(c.device)))
+        primary = ordered[0]
+        primary.alternate_devices = [c.device for c in ordered[1:]]
+        grouped.append(primary)
+    return sorted(grouped, key=lambda c: _device_sort_key(c.device))
+
+
+def _camera_score(camera: CameraInfo) -> int:
+    return (10 if camera.supports_capture else 0) + (20 if camera.formats else 0)
+
+
+def _device_sort_key(device: str) -> int:
+    match = re.search(r"(\d+)$", device)
+    return int(match.group(1)) if match else 10_000
 
 
 def _v4l2_card_name(device: str) -> Optional[str]:
@@ -63,6 +90,20 @@ def _v4l2_card_name(device: str) -> Optional[str]:
         return None
     match = re.search(r"Card type\s*:\s*(.+)", result.stdout)
     return match.group(1).strip() if match else None
+
+
+def _supports_capture(device: str) -> bool:
+    result = subprocess.run(["v4l2-ctl", "--device", device, "--all"], capture_output=True, text=True, timeout=5)
+    if result.returncode != 0:
+        return False
+    return "Video Capture" in result.stdout or "Video Capture Multiplanar" in result.stdout
+
+
+def _format_lines(device: str) -> List[str]:
+    result = subprocess.run(["v4l2-ctl", "--device", device, "--list-formats-ext"], capture_output=True, text=True, timeout=5)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if "Size: Discrete" in line or re.search(r"\[\d+\]:", line)]
 
 
 def _stable_id_for_device(device: str) -> Optional[str]:

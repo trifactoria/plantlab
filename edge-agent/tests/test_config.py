@@ -23,6 +23,17 @@ def test_write_then_read_config_round_trips(isolated_config):
     assert read_back.capabilities == ["camera"]
 
 
+def test_validate_config_rejects_missing_coordinator_url(isolated_config):
+    cfg = config.EdgeAgentConfig(
+        role="greenhouse-node",
+        node_name="greenhouse-zero",
+        coordinator_url="",
+        spool_root=str(isolated_config / "spool"),
+        capabilities=["camera"],
+    )
+    assert "coordinatorUrl is missing." in config.validate_config(cfg)
+
+
 def test_write_config_leaves_no_leftover_tmp_files(isolated_config):
     config.write_config(
         config.EdgeAgentConfig(role="camera-node", node_name="x", coordinator_url="http://c:3000", spool_root="/tmp/x", capabilities=["camera"])

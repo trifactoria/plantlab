@@ -23,7 +23,7 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
-const { applyCameraControls, parseControlsOutput } = await import("../../src/lib/v4l2");
+const { applyCameraControls, groupPhysicalCameras, parseControlsOutput } = await import("../../src/lib/v4l2");
 
 const SAMPLE_OUTPUT = `
                      brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
@@ -142,5 +142,30 @@ describe("applyCameraControls", () => {
   it("resolves with no failures when every control applies cleanly", async () => {
     const failures = await applyCameraControls("/dev/video0", { brightness: 128 });
     expect(failures).toEqual([]);
+  });
+});
+
+describe("groupPhysicalCameras", () => {
+  it("groups duplicate V4L2 nodes by stable ID and prefers the capture-capable node with formats", () => {
+    const grouped = groupPhysicalCameras([
+      {
+        name: "Integrated Webcam",
+        device: "/dev/video1",
+        stableId: "usb:0c45:6a15:ABC",
+        supportsCapture: false,
+        formats: [],
+      },
+      {
+        name: "Integrated Webcam",
+        device: "/dev/video0",
+        stableId: "usb:0c45:6a15:ABC",
+        supportsCapture: true,
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: [] }] }],
+      },
+    ]);
+
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0].device).toBe("/dev/video0");
+    expect(grouped[0].alternateDevices).toEqual([{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }]);
   });
 });

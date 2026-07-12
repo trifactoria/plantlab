@@ -18,6 +18,11 @@ async function listCameras(): Promise<void> {
     console.log(`${camera.device}`);
     console.log(`  name:      ${camera.name ?? "(unknown)"}`);
     console.log(`  stable id: ${camera.stableId ?? "(none - device path may change across reboots)"}`);
+    if (camera.alternateDevices && camera.alternateDevices.length > 0) {
+      for (const alternate of camera.alternateDevices) {
+        console.log(`  alternate: ${alternate.device}${alternate.reason ? ` (${alternate.reason})` : ""}`);
+      }
+    }
   }
 }
 
@@ -31,6 +36,8 @@ type CameraAttachOptions = {
   format?: string;
   yes?: boolean;
   json?: boolean;
+  prompt?: (question: string) => Promise<string>;
+  interactive?: boolean;
 };
 
 async function ask(question: string): Promise<string> {
@@ -42,9 +49,9 @@ async function ask(question: string): Promise<string> {
   }
 }
 
-async function chooseIndex(prompt: string, count: number, fallback = 1): Promise<number> {
+async function chooseIndex(prompt: string, count: number, fallback = 1, askFn = ask): Promise<number> {
   for (;;) {
-    const answer = await ask(`${prompt} [${fallback}-${count}]: `);
+    const answer = await askFn(`${prompt} [1-${count}, default ${fallback}]: `);
     if (!answer) return fallback - 1;
     const index = Number(answer);
     if (Number.isInteger(index) && index >= 1 && index <= count) {
@@ -64,6 +71,9 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
     throw new Error(`Node "${options.node}" has not reported any cameras yet. Ensure plantlab-agent.service is running.`);
   }
 
+  const askFn = options.prompt ?? ask;
+  const canPrompt = (options.interactive ?? Boolean(process.stdin.isTTY)) && !options.yes;
+
   let selectedCamera =
     options.camera && /^\d+$/.test(options.camera)
       ? node.cameras[Number(options.camera) - 1]
@@ -71,14 +81,14 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
         ? node.cameras.find((item) => item.stableId === options.camera)
         : undefined;
 
-  if (!selectedCamera && process.stdin.isTTY && !options.yes) {
+  if (!selectedCamera && canPrompt) {
     console.log("Select a camera:");
     node.cameras.forEach((camera, index) => {
       console.log(`\n${index + 1}) ${camera.name ?? "Unknown camera"}`);
       console.log(`   ${camera.devicePath}`);
       console.log(`   Stable ID: ${camera.stableId}`);
     });
-    selectedCamera = node.cameras[await chooseIndex("Camera", node.cameras.length)];
+    selectedCamera = node.cameras[await chooseIndex("Camera", node.cameras.length, 1, askFn)];
   }
   selectedCamera ??= node.cameras[0];
   if (!selectedCamera) {
@@ -89,17 +99,20 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
   let captureSourceId = options.captureSource ?? null;
   let newName = options.name ?? `${node.name} ${selectedCamera.name ?? "Camera"}`;
 
-  if (!captureSourceId && process.stdin.isTTY && !options.yes) {
+  if (!captureSourceId && canPrompt) {
     console.log("\nAttach to:");
     console.log("1) Existing capture source");
     console.log("2) Create new capture source");
-    const choice = sources.length > 0 ? await chooseIndex("Choice", 2, 2) : 1;
+    const choice = await chooseIndex("Choice", 2, sources.length > 0 ? 1 : 2, askFn);
     if (choice === 0 && sources.length > 0) {
       console.log("\nExisting capture sources:");
       sources.forEach((source, index) => console.log(`${index + 1}) ${source.name}`));
-      captureSourceId = sources[await chooseIndex("Capture source", sources.length)].id;
+      captureSourceId = sources[await chooseIndex("Capture source", sources.length, 1, askFn)].id;
     } else {
-      const answer = await ask(`Capture source name [${newName}]: `);
+      if (choice === 0 && sources.length === 0) {
+        console.log("No existing capture sources are available; creating a new one.");
+      }
+      const answer = await askFn(`Capture source name [${newName}]: `);
       if (answer) newName = answer;
     }
   }
@@ -115,16 +128,16 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
   let width = options.width ?? mode.width;
   let height = options.height ?? mode.height;
   let inputFormat = options.format ?? mode.inputFormat;
-  if (!options.width && !options.height && process.stdin.isTTY && !options.yes && resolutionChoices.length > 0) {
+  if (!options.width && !options.height && canPrompt && resolutionChoices.length > 0) {
     console.log("\nResolution:");
     resolutionChoices.forEach((choice, index) => console.log(`${index + 1}) ${choice.width}x${choice.height} ${choice.inputFormat.toUpperCase()}`));
-    const selected = resolutionChoices[await chooseIndex("Resolution", resolutionChoices.length)];
+    const selected = resolutionChoices[await chooseIndex("Resolution", resolutionChoices.length, 1, askFn)];
     width = selected.width;
     height = selected.height;
     inputFormat = selected.inputFormat;
   }
 
-  if (!options.yes && !process.stdin.isTTY) {
+  if (!options.yes && !canPrompt) {
     throw new Error("Refusing to attach a camera without confirmation. Re-run with --yes.");
   }
 

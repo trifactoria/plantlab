@@ -18,6 +18,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse
 
 CONFIG_DIR = Path(os.environ.get("PLANTLAB_EDGE_CONFIG_DIR", str(Path.home() / ".config" / "plantlab")))
 CONFIG_PATH = CONFIG_DIR / "edge-agent.json"
@@ -61,10 +62,8 @@ def read_config() -> Optional[EdgeAgentConfig]:
     )
 
 
-def write_config(config: EdgeAgentConfig) -> None:
-    """Atomic write (temp file + rename), same pattern as writeNodeConfigRaw() in config.ts."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {
+def config_to_payload(config: EdgeAgentConfig) -> dict:
+    return {
         "role": config.role,
         "nodeName": config.node_name,
         "coordinatorUrl": config.coordinator_url,
@@ -75,6 +74,12 @@ def write_config(config: EdgeAgentConfig) -> None:
         "maxSpoolBytes": config.max_spool_bytes,
         "maxUploadBytes": config.max_upload_bytes,
     }
+
+
+def write_config(config: EdgeAgentConfig) -> None:
+    """Atomic write (temp file + rename), same pattern as writeNodeConfigRaw() in config.ts."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = config_to_payload(config)
     tmp_path = CONFIG_PATH.with_name(f".{CONFIG_PATH.name}.tmp-{os.getpid()}")
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -95,6 +100,24 @@ def read_credential() -> Optional[str]:
             value = line[len("PLANTLAB_NODE_CREDENTIAL="):].strip()
             return value or None
     return None
+
+
+def validate_config(config: EdgeAgentConfig) -> List[str]:
+    problems: List[str] = []
+    if not config.node_name:
+        problems.append("nodeName is missing.")
+    if not config.role:
+        problems.append("role is missing.")
+    parsed = urlparse(config.coordinator_url)
+    if not config.coordinator_url:
+        problems.append("coordinatorUrl is missing.")
+    elif parsed.scheme not in ("http", "https") or not parsed.netloc:
+        problems.append("coordinatorUrl must be an http(s) URL.")
+    if not config.spool_root:
+        problems.append("spoolRoot is missing.")
+    if not config.capabilities:
+        problems.append("capabilities is empty.")
+    return problems
 
 
 def write_credential(token: str) -> None:

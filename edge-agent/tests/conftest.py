@@ -125,6 +125,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_GET(self):  # noqa: N802
+        if self.path == "/api/node-info":
+            self._send_json(200, {"name": "test-coordinator", "role": "coordinator", "health": "ok"})
+            return
         if not self.state.authorized(self.headers):
             self._send_json(401, {"error": "Unauthorized"})
             return

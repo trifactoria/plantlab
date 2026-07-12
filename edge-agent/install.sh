@@ -22,6 +22,7 @@ set -eu
 INSTALL_DIR="${PLANTLAB_EDGE_INSTALL_DIR:-$HOME/.local/share/plantlab-edge-agent}"
 CONFIG_DIR="$HOME/.config/plantlab"
 SPOOL_ROOT="${PLANTLAB_EDGE_SPOOL_ROOT:-$HOME/.local/state/plantlab-edge-agent}"
+USER_BIN_DIR="${PLANTLAB_EDGE_USER_BIN_DIR:-$HOME/.local/bin}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 echo "PlantLab Edge Agent installer"
@@ -91,6 +92,20 @@ else
 fi
 
 echo ""
+echo "Installing local command ..."
+mkdir -p "$USER_BIN_DIR"
+cat > "$USER_BIN_DIR/plantlab-edge" <<EOF
+#!/bin/sh
+PYTHONPATH="$INSTALL_DIR" PLANTLAB_EDGE_CONFIG_DIR="$CONFIG_DIR" exec "$PYTHON_BIN" -m plantlab_edge_agent "\$@"
+EOF
+chmod 755 "$USER_BIN_DIR/plantlab-edge"
+echo "PASS: plantlab-edge installed at $USER_BIN_DIR/plantlab-edge."
+case ":$PATH:" in
+  *":$USER_BIN_DIR:"*) : ;;
+  *) echo "WARN: $USER_BIN_DIR is not currently on PATH. Invoke directly as: $USER_BIN_DIR/plantlab-edge" ;;
+esac
+
+echo ""
 echo "Installing systemd --user unit ..."
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$UNIT_DIR"
@@ -106,6 +121,7 @@ mkdir -p "$UNIT_DIR/plantlab-edge-agent.service.d"
 cat > "$UNIT_DIR/plantlab-edge-agent.service.d/pythonpath.conf" <<EOF
 [Service]
 Environment=PYTHONPATH=$INSTALL_DIR
+Environment=PLANTLAB_EDGE_CONFIG_DIR=$CONFIG_DIR
 EOF
 echo "PASS: unit installed."
 
@@ -130,15 +146,19 @@ echo ""
 PYTHONPATH="$INSTALL_DIR" "$PYTHON_BIN" -m plantlab_edge_agent install-check || true
 
 echo ""
+echo "Edge agent installed."
+echo ""
+echo "Local diagnostics:"
+echo "  plantlab-edge doctor"
+echo "  plantlab-edge status"
+echo ""
+echo "Finish enrollment from the coordinator:"
+echo "  plantlab node attach $(hostname)"
+echo ""
 if [ -f "$CONFIG_DIR/agent.env" ]; then
   echo "A credential already exists - starting the agent now."
   systemctl --user enable --now plantlab-edge-agent.service 2>/dev/null || echo "WARN: could not start the service automatically - start it with: systemctl --user start plantlab-edge-agent.service"
 else
   echo "No node credential yet - this is expected for a fresh install."
-  echo "From the coordinator, run:"
-  echo ""
-  echo "    plantlab node attach $(hostname)"
-  echo ""
-  echo "This registers the node, issues a credential automatically, installs"
-  echo "it here, and starts the agent - no manual token handling required."
+  echo "Coordinator attachment registers the node, issues a credential automatically, installs it here, and starts the agent - no manual token handling required."
 fi

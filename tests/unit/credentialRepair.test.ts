@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "../../src/lib/prisma";
@@ -397,6 +397,54 @@ describe("credentialRepair", () => {
 
       const probe = await probeRemoteCredential({ sshHost: "greenhouse-followup", coordinatorUrl: server.url });
       expect(probe.status).toBe("valid");
+    }, 15_000);
+
+    it("converges an incomplete edge config and restarts even when the credential is already valid", async () => {
+      await setUp();
+      const registered = await registerOrRotateNode(prisma, { name: "greenhouse-config-repair", role: "greenhouse-node", rotateCredential: true });
+      await writeRemoteCredentialFile(remoteHome.home, `PLANTLAB_NODE_CREDENTIAL=${registered.credential}\n`);
+      const configDir = path.join(remoteHome.home, ".config", "plantlab");
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        path.join(configDir, "edge-agent.json"),
+        JSON.stringify(
+          {
+            role: "greenhouse-node",
+            nodeName: "greenhouse-config-repair",
+            coordinatorUrl: "",
+            spoolRoot: path.join(remoteHome.home, ".local", "state", "plantlab-edge-agent"),
+            capabilities: ["camera"],
+            heartbeatIntervalSeconds: 17,
+            pollIntervalSeconds: 3,
+            maxSpoolBytes: 123456,
+            maxUploadBytes: 654321,
+          },
+          null,
+          2,
+        ),
+      );
+      simulateHeartbeatAfter(registered.node.id, 200);
+
+      const result = await ensureValidNodeCredential(prisma, {
+        sshHost: "greenhouse-config-repair",
+        repoPath: "~/plantlab-edge-agent",
+        coordinatorUrl: server.url,
+        role: "greenhouse-node",
+        runtime: "python-edge",
+        nodeName: "greenhouse-config-repair",
+        registerInput: { name: "greenhouse-config-repair", role: "greenhouse-node" },
+        heartbeatTimeoutMs: 8000,
+      });
+
+      expect(result.probe.status).toBe("valid");
+      expect(result.rotated).toBe(false);
+      expect(result.steps.find((s) => s.name === "edge-config")?.detail).toContain("UPDATED");
+      expect(result.steps.find((s) => s.name === "agent-restart")?.status).toBe("completed");
+      const repaired = JSON.parse(await readFile(path.join(configDir, "edge-agent.json"), "utf8"));
+      expect(repaired.coordinatorUrl).toBe(server.url);
+      expect(repaired.heartbeatIntervalSeconds).toBe(17);
+      expect(repaired.pollIntervalSeconds).toBe(3);
+      expect(await fake.isActive("plantlab-edge-agent.service")).toBe(true);
     }, 15_000);
   });
 });

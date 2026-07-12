@@ -7,6 +7,7 @@ import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operatio
 import { markNodeStatus } from "../../lib/operations/nodeCredentials";
 import { ensureValidNodeCredential, rotateAndInstallCredential, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
 import { copyEdgeAgentDirectory, runEdgeAgentInstall } from "../../lib/operations/edgeAgentInstall";
+import { diagnoseEdgeAgent } from "../../lib/operations/edgeAgentDiagnostics";
 import {
   checkCoordinatorReachableFromRemote,
   defaultCoordinatorUrl,
@@ -421,16 +422,18 @@ Examples:
     );
 }
 
-async function promptEdgeAgentRole(yes?: boolean): Promise<"camera-node" | "greenhouse-node"> {
+async function promptEdgeAgentRole(sshHost: string, yes?: boolean): Promise<"camera-node" | "greenhouse-node"> {
+  const recommended: "camera-node" | "greenhouse-node" = /greenhouse/i.test(sshHost) ? "greenhouse-node" : "camera-node";
   console.log("");
   console.log("Select role:");
   console.log("");
-  console.log("1) Camera node");
-  console.log("2) Greenhouse node");
-  if (yes || !process.stdin.isTTY) return "camera-node";
+  console.log(`1) Camera node${recommended === "camera-node" ? " (recommended)" : ""}`);
+  console.log(`2) Greenhouse node${recommended === "greenhouse-node" ? " (recommended)" : ""}`);
+  if (yes || !process.stdin.isTTY) return recommended;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await rl.question("\nRole [1-2, default 1]: ")).trim();
+    const answer = (await rl.question(`\nRole [1-2, default ${recommended === "greenhouse-node" ? "2" : "1"}]: `)).trim();
+    if (!answer) return recommended;
     return answer === "2" ? "greenhouse-node" : "camera-node";
   } finally {
     rl.close();
@@ -454,7 +457,7 @@ async function runEdgeAgentAttach(input: {
 }): Promise<void> {
   const { sshHost, inspection, options, steps } = input;
 
-  const role = await promptEdgeAgentRole(options.yes);
+  const role = await promptEdgeAgentRole(sshHost, options.yes);
   steps.complete("Role selection", role);
 
   console.log(`\nCopying edge agent to ${sshHost}...`);
@@ -532,6 +535,7 @@ async function runEdgeAgentAttach(input: {
     return;
   }
   if (!repair.ok) {
+    await printEdgeAgentDiagnosis(sshHost);
     printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
     process.exitCode = 1;
     return;
@@ -570,6 +574,31 @@ async function runEdgeAgentAttach(input: {
   console.log(`Coordinator: ${options.coordinatorUrl}`);
   console.log(`Cameras detected: ${inventory.length}`);
   console.log("Remote agent: healthy");
+}
+
+async function printEdgeAgentDiagnosis(sshHost: string): Promise<void> {
+  try {
+    const diagnostics = await diagnoseEdgeAgent(sshHost);
+    console.error("");
+    console.error("Edge agent diagnostics:");
+    console.error(`- Config: ${diagnostics.configPath ?? "(unknown)"}`);
+    if (!diagnostics.configExists) console.error("- edge-agent.json is missing.");
+    else if (!diagnostics.configValid) {
+      console.error(`- edge-agent.json is incomplete${diagnostics.configError ? `: ${diagnostics.configError}` : "."}`);
+      if (!diagnostics.coordinatorUrl) console.error("- coordinatorUrl is missing.");
+    }
+    console.error(`- Credential: ${diagnostics.credentialPath ?? "(unknown)"} (${diagnostics.credentialHasVariable ? "present" : "missing"})`);
+    console.error(`- Service: ${diagnostics.activeState ?? diagnostics.unitStatus ?? "(unknown)"} ${diagnostics.subState ?? ""}`.trim());
+    if (diagnostics.restartCount !== null) console.error(`- Restarts: ${diagnostics.restartCount}`);
+    if (diagnostics.latestException) console.error(`- Latest failure: ${sanitizeText(diagnostics.latestException)}`);
+    const lines = diagnostics.journal.length > 0 ? diagnostics.journal : diagnostics.serviceStatus;
+    if (lines.length > 0) {
+      console.error("Recent service output:");
+      for (const line of lines.slice(-8)) console.error(`  ${sanitizeText(line)}`);
+    }
+  } catch (error) {
+    console.error(`Could not collect edge-agent diagnostics: ${sanitizeError(error)}`);
+  }
 }
 
 function printInspection(inspection: Awaited<ReturnType<typeof inspectRemoteHost>>) {

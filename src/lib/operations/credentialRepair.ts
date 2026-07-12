@@ -26,6 +26,7 @@
 import { runRemoteShell } from "./shellExec";
 import { shellQuote } from "./systemdUnits";
 import { convergeNodeRole, type ConvergenceStep } from "./roleConvergence";
+import { convergeEdgeAgentConfig } from "./edgeAgentInstall";
 import { registerOrRotateNode, markNodeStatus, type RegisterNodeInput } from "./nodeCredentials";
 import type { PrismaClient } from "@prisma/client";
 import type { NodeRole } from "./config";
@@ -57,7 +58,7 @@ export async function probeRemoteCredential(input: {
 }): Promise<CredentialProbeResult> {
   const script = String.raw`
 set -eu
-home_dir="$HOME"
+home_dir="${"${HOME:-}"}"
 if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
 env_path="$home_dir/.config/plantlab/agent.env"
 coordinator_url=${shellQuote(input.coordinatorUrl)}
@@ -168,7 +169,7 @@ async function installEdgeAgentCredential(input: {
 
   const script = String.raw`
 set -eu
-home_dir="$HOME"
+home_dir="${"${HOME:-}"}"
 if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
 env_dir="$home_dir/.config/plantlab"
 env_path="$env_dir/agent.env"
@@ -274,9 +275,29 @@ export async function rotateAndInstallCredential(
     steps.push(...convergence.steps);
     installOk = convergence.ok;
   } else {
-    const install = await installEdgeAgentCredential({ sshHost: input.sshHost, credential: registered.credential || null, forceRestart });
-    steps.push(...install.steps);
-    installOk = install.ok;
+    const configConvergence = await convergeEdgeAgentConfig(input.sshHost, {
+      role: input.role === "camera-node" ? "camera-node" : "greenhouse-node",
+      nodeName: input.nodeName ?? input.registerInput.name,
+      coordinatorUrl: input.coordinatorUrl,
+      spoolRoot: input.spoolRoot,
+      capabilities: input.registerInput.capabilities ?? ["camera"],
+    });
+    steps.push({
+      name: "edge-config",
+      status: configConvergence.ok ? "completed" : "failed",
+      detail: `${configConvergence.status}: ${configConvergence.detail}${configConvergence.configPath ? ` (${configConvergence.configPath})` : ""}`,
+    });
+    if (!configConvergence.ok) {
+      installOk = false;
+    } else {
+      const install = await installEdgeAgentCredential({
+        sshHost: input.sshHost,
+        credential: registered.credential || null,
+        forceRestart: forceRestart || configConvergence.status === "UPDATED",
+      });
+      steps.push(...install.steps);
+      installOk = install.ok;
+    }
   }
 
   if (!installOk) {
