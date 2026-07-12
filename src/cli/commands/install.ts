@@ -39,6 +39,17 @@ export function registerInstallCommand(program: Command): void {
     .option("--role <role>", `One of: ${NODE_ROLES.join(", ")}`)
     .option("--coordinator-url <url>", "Coordinator URL for a camera-node/microscope-node/mobile-uploader role (registration itself is still manual)")
     .option("--skip-systemd", "Do not generate systemd units (useful in a dev sandbox)")
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab install
+  plantlab install --role standalone
+  plantlab install --role coordinator
+  plantlab install --role camera-node --coordinator-url http://plantlab:3000
+`,
+    )
     .action(async (options: { role?: string; coordinatorUrl?: string; skipSystemd?: boolean }) => {
       let role: NodeRole;
       if (options.role) {

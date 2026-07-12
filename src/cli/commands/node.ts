@@ -25,7 +25,20 @@ async function printLocalNodeInfo(): Promise<void> {
 }
 
 export function registerNodeCommand(program: Command): void {
-  const node = program.command("node").description("Inspect, enroll, and configure PlantLab deployment nodes");
+  const node = program
+    .command("node")
+    .description("Inspect, enroll, and configure PlantLab deployment nodes")
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab node info
+  plantlab node inspect xps
+  plantlab node attach xps
+  plantlab node attach xps --coordinator-url http://plantlab:3000
+`,
+    );
 
   node
     .command("list")

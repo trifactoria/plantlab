@@ -21,7 +21,20 @@ async function listCameras(): Promise<void> {
 }
 
 export function registerCameraCommand(program: Command): void {
-  const camera = program.command("camera").description("Inspect and test locally attached cameras");
+  const camera = program
+    .command("camera")
+    .description("Inspect and test locally attached cameras")
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab camera list
+  plantlab camera list --node xps
+  plantlab camera attach --node xps
+  plantlab camera test /dev/video4
+`,
+    );
 
   camera
     .command("list")

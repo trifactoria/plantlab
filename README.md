@@ -1,47 +1,98 @@
 # PlantLab
 
-PlantLab is a local-first experiment tracking platform for plant breeding, mycology, tissue culture, microscopy, and other biological projects that change over time.
+PlantLab is a local-first experiment tracking platform for biological
+projects that change over time: plant growth, selective breeding, mycology,
+tissue culture, microscopy, and field specimens.
 
-The goal is to make documenting long-running experiments effortless by combining scheduled image capture, event timelines, and structured project data into a single application.
+It keeps project records, observations, timelines, photos, camera captures,
+and backups on machines you control.
 
-## Current Features
+## Features
 
-- 🌱 Multi-project experiment management
-- 📸 Local webcam image capture
-- 🗂 Local filesystem photo storage
-- 🪴 Plant tracking
-- 📝 Timestamped event logging
-- 📅 Chronological experiment timelines
-- ⚙️ Camera configuration and preview
-- 💾 SQLite + Prisma backend
-- 🚫 Local-first (no cloud required)
+- Local-first project tracking with SQLite and filesystem photo storage
+- Plant/specimen records, observations, milestones, and timelines
+- Local camera discovery, preview, capture, and shared capture sources
+- Coordinator and camera-node workflow for cross-machine image capture
+- HTTP-based agent ingest with idempotent retries
+- Backup creation, verification, and safe restore staging
+- Operational CLI: `plantlab`
 
-## Planned Features
+## Requirements
 
-- Automatic scheduled image capture
-- Camera profiles
-- Event image cropping
-- Growth charts
-- Computer vision measurements
-- Selective breeding genealogy
-- Time-lapse generation
-- OpenFlexure microscope integration
-- Multi-camera support
-- Raspberry Pi capture nodes
+- Ubuntu or another Linux system with systemd user services
+- Git
+- Node.js 22 or newer
 
-PlantLab is designed as a practical digital lab notebook that scales from simple webcam time-lapses to complex selective breeding and microscopy workflows while keeping all experiment data under the user's control.
+The installer enables `pnpm` with Corepack when possible.
 
-## Operating PlantLab
+## Installation
 
-`plantlab` is the operational CLI (`plantlab doctor`, `plantlab backup`,
-`plantlab service`, `plantlab project`, ...) - see
-[`DEPLOYMENT.md`](./DEPLOYMENT.md) for the full command reference and
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) for how the codebase is organized
-and where it's headed as a multi-node platform.
+```bash
+git clone https://github.com/trifactoria/plantlab.git
+cd plantlab
+./install.sh
+```
 
-## Production deployment
+The installer checks dependencies, installs project packages, prepares a new
+local database when needed, builds PlantLab, installs the `plantlab` command,
+and then runs the interactive setup.
 
-See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for building and running PlantLab as
-two long-running production processes (the web app and the camera/scheduler
-service) on an Ubuntu machine with an attached camera, including systemd
-units and a `plantlab doctor` readiness check.
+After installation:
+
+```bash
+plantlab doctor
+```
+
+works from any directory.
+
+## Basic Usage
+
+```bash
+plantlab --help
+plantlab doctor
+plantlab camera list
+plantlab backup list
+```
+
+For a coordinator with a separate camera node:
+
+```bash
+plantlab node inspect xps
+plantlab node attach xps
+plantlab camera list --node xps
+plantlab camera attach --node xps
+plantlab capture test --node xps
+```
+
+## CLI Overview
+
+- `plantlab install` - configure this machine as standalone, coordinator, or camera node
+- `plantlab doctor` - check health and show next actions
+- `plantlab camera` - list, attach, and test cameras
+- `plantlab node` - inspect and attach remote nodes over SSH
+- `plantlab capture` - run manual coordinator-driven capture jobs
+- `plantlab backup` - create, list, verify, and stage restores
+- `plantlab service` - manage PlantLab systemd user services
+- `plantlab project` - inspect projects and lifecycle metadata
+
+## Documentation
+
+- [Installation](docs/INSTALLATION.md)
+- [Coordinator Deployment](docs/COORDINATOR.md)
+- [Camera Node Deployment](docs/CAMERA_NODE.md)
+- [Backups](docs/BACKUPS.md)
+- [Systemd Services](docs/SYSTEMD.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Development](docs/DEVELOPMENT.md)
+- [Architecture](ARCHITECTURE.md)
+- [Advanced deployment reference](DEPLOYMENT.md)
+
+## Development
+
+```bash
+pnpm install
+pnpm dev
+pnpm test:unit
+```
+
+See [Development](docs/DEVELOPMENT.md) for the full development workflow.

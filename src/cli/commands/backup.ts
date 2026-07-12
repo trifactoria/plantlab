@@ -3,7 +3,19 @@ import { createBackup, listBackupsWithMetadata, restoreBackup, verifyBackup } fr
 import { formatBytes } from "../../lib/operations/doctor";
 
 export function registerBackupCommand(program: Command): void {
-  const backup = program.command("backup").description("Create, list, verify, and (safely) restore PlantLab backups");
+  const backup = program
+    .command("backup")
+    .description("Create, list, verify, and (safely) restore PlantLab backups")
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab backup list
+  plantlab backup create
+  plantlab backup verify backups/plantlab-2026-07-12.tar.gz
+`,
+    );
 
   backup
     .command("create")

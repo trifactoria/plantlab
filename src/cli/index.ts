@@ -23,7 +23,20 @@ export function buildProgram(): Command {
   program
     .name("plantlab")
     .description("PlantLab operational CLI")
-    .version(packageJson.version);
+    .version(packageJson.version)
+    .showHelpAfterError()
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab doctor
+  plantlab camera list
+  plantlab node inspect xps
+  plantlab backup list
+  plantlab install
+`,
+    );
 
   registerVersionCommand(program);
   registerDoctorCommand(program);

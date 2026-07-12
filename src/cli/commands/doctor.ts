@@ -11,6 +11,17 @@ export function registerDoctorCommand(program: Command): void {
     .description("Structured health report: database, storage, camera, capture service, node status, backups")
     .option("--capture [device]", "Also capture one real temporary frame to verify the hardware path (not saved)")
     .option("--node <ssh-host>", "Run doctor on a remote node through SSH")
+    .addHelpText(
+      "after",
+      `
+
+Examples:
+  plantlab doctor
+  plantlab doctor --capture
+  plantlab doctor --node xps
+  plantlab doctor storage
+`,
+    )
     .action(async (options: { capture?: string | boolean; node?: string }) => {
       try {
         if (options.node) {
