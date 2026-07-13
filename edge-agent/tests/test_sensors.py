@@ -267,3 +267,25 @@ def test_driver_mode_selection_and_manager(monkeypatch):
     monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "bad")
     with pytest.raises(ValueError):
         EnvironmentalSensorManager.from_config(cfg)
+
+
+def test_sensor_manager_does_not_read_between_due_intervals():
+    class CountingDriver:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            return sample(24, 60)
+
+        def close(self):
+            return None
+
+    driver = CountingDriver()
+    manager = EnvironmentalSensorManager([EnvironmentalSensorRuntime(sensor(), driver)], sample_interval_seconds=15, upload_interval_seconds=45)
+    assert len(manager.sample_due(dt(0))) == 1
+    assert manager.sample_due(dt(1)) == []
+    assert manager.sample_due(dt(14)) == []
+    assert driver.reads == 1
+    assert len(manager.sample_due(dt(15))) == 1
+    assert driver.reads == 2

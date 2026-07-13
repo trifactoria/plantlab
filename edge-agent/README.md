@@ -43,6 +43,7 @@ plantlab-edge status
 plantlab-edge doctor
 plantlab-edge config show
 plantlab-edge camera list
+plantlab-edge camera refresh
 plantlab-edge sensor probe
 plantlab-edge sensor test <sensor-key>
 plantlab-edge sensor mode mock|dht22|disabled
@@ -212,6 +213,61 @@ pins in the same order.
 BCM GPIO 8 is also SPI CE0 on Raspberry Pi. `plantlab-edge sensor probe`
 warns when SPI appears enabled, but PlantLab does not disable SPI
 automatically.
+
+## Idle camera lifecycle
+
+Normal heartbeats are lightweight. They do not enumerate `/dev/video*`, run
+`v4l2-ctl`, call `udevadm`, inspect formats, or launch `ffmpeg`.
+
+Verified camera inventory is explicit and serialized. It runs only when:
+
+- the coordinator has a pending camera refresh request, such as from
+  `plantlab camera refresh --node <node>`
+- `plantlab node attach <ssh-host>` starts the edge agent, receives a
+  heartbeat, and then requests camera inventory
+- `plantlab-edge camera refresh` is run locally on the node
+
+The agent polls `/api/agents/cameras/refresh` separately from capture jobs.
+The default `cameraRefreshPollIntervalSeconds` is 60 seconds. Capture-job
+polling still uses `pollIntervalSeconds`, and a no-job response never opens
+the camera.
+
+The last successful verified inventory is cached locally at:
+
+```text
+~/.local/state/plantlab-edge-agent/camera-inventory-cache.json
+```
+
+The cache contains ordinary metadata only: stable IDs, device paths, USB
+identity, formats, verified probe mode, and timestamps. It does not contain
+images. Startup and diagnostics can read the cache without touching camera
+hardware. A refresh lock file prevents overlapping verified inventory
+passes:
+
+```text
+~/.local/state/plantlab-edge-agent/camera-inventory-refresh.lock
+```
+
+Useful diagnostics:
+
+```sh
+plantlab-edge config show
+plantlab-edge camera refresh
+```
+
+`config show` reports cache presence, age, last verified time, whether a
+refresh is already running, the refresh-poll interval, and whether a camera
+subprocess appears active.
+
+To confirm Pi Zero idle behavior:
+
+```sh
+ps -eo pid,etimes,pcpu,pmem,rss,cmd --sort=-pcpu | head -20
+```
+
+When idle there should be no recurring `ffmpeg`, `v4l2-ctl`, or `udevadm`
+work from the edge agent. During an explicit camera refresh, `ffmpeg`
+appears temporarily and exits after the one inventory pass.
 
 ## Layout
 

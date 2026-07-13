@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import agent, camera, config
+from .camera_inventory import camera_inventory_cache_status, inventory_refresh_running
 from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
 from .sensors import probe as sensor_probe
 from .sensors.base import CLASSIFICATION_ACCEPTED, RawEnvironmentalSample, SensorDriverError
@@ -74,6 +75,11 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
             for sensor in (cfg.sensors if cfg else [])
         ],
         "power": {"provider": cfg.power.provider, "host": cfg.power.host, "outlets": dict(cfg.power.outlets)} if cfg and cfg.power else None,
+        "cameraCapabilityEnabled": "camera" in cfg.capabilities if cfg else False,
+        "cameraRefreshPollIntervalSeconds": cfg.camera_refresh_poll_interval_seconds if cfg else None,
+        "cameraInventoryCache": camera_inventory_cache_status(cfg.spool_root if cfg else str(config.DEFAULT_SPOOL_ROOT)),
+        "cameraInventoryRefreshRunning": inventory_refresh_running(cfg.spool_root if cfg else str(config.DEFAULT_SPOOL_ROOT)),
+        "cameraSubprocessActive": _camera_subprocess_active(),
     }
 
 
@@ -239,6 +245,14 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     else:
         print("Power: not configured")
     print(f"Sensor driver mode: {summary['sensorDriverMode']}")
+    cache = summary["cameraInventoryCache"]
+    print(f"Camera capability enabled: {'yes' if summary['cameraCapabilityEnabled'] else 'no'}")
+    print(f"Cached camera inventory: {'present' if cache['valid'] else 'missing'} ({cache['cameraCount']} cameras)")
+    print(f"Cached inventory age: {int(cache['ageSeconds']) if cache['ageSeconds'] is not None else '(unknown)'} seconds")
+    print(f"Last verified inventory time: {cache['verifiedAt'] or '(never)'}")
+    print(f"Inventory refresh currently running: {'yes' if summary['cameraInventoryRefreshRunning'] else 'no'}")
+    print(f"Camera refresh poll interval: {summary['cameraRefreshPollIntervalSeconds'] or '(missing)'} seconds")
+    print(f"Camera subprocess currently active: {'yes' if summary['cameraSubprocessActive'] else 'no'}")
     print(f"Greenhouse secret file: {'present' if summary['greenhouseSecretPresent'] else 'missing'} ({summary['greenhouseSecretPath']})")
     print(f"Heartbeat interval: {summary['heartbeatIntervalSeconds'] or '(missing)'}")
     print(f"Poll interval: {summary['pollIntervalSeconds'] or '(missing)'}")
@@ -372,6 +386,24 @@ def cmd_camera_list(args: argparse.Namespace) -> int:
             else:
                 print("   Advertised modes: (none)")
     return 0
+
+
+def cmd_camera_refresh(_args: argparse.Namespace) -> int:
+    try:
+        cfg, client = agent.load_client_and_config()
+    except agent.FatalAgentError as exc:
+        print(f"Fatal PlantLab edge agent error: {exc}", file=sys.stderr)
+        return 1
+    ok = agent.refresh_camera_inventory(cfg, client, reason="local-cli")
+    return 0 if ok else 1
+
+
+def _camera_subprocess_active() -> bool:
+    try:
+        result = subprocess.run(["pgrep", "-f", "ffmpeg|v4l2-ctl|udevadm"], capture_output=True, text=True, timeout=2)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def cmd_sensor_probe(args: argparse.Namespace) -> int:
@@ -610,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     camera_list.add_argument("--verbose", action="store_true", help="Show all advertised formats, modes, frame rates, and probe details.")
     camera_list.add_argument("--json", action="store_true", help="Print structured JSON.")
     camera_list.set_defaults(func=cmd_camera_list)
+    camera_sub.add_parser("refresh", help="Run an explicit verified camera inventory refresh and post it to the coordinator.").set_defaults(func=cmd_camera_refresh)
     sensor_parser = sub.add_parser("sensor", help="Environmental sensor diagnostics.")
     sensor_sub = sensor_parser.add_subparsers(dest="sensor_command", required=True)
     sensor_probe_parser = sensor_sub.add_parser("probe", help="Inspect GPIO and DHT22 backend readiness without reading a sensor.")

@@ -44,6 +44,7 @@ class _FakeCoordinatorState:
         self.ingested = []
         self.environment_batches = []
         self.next_job_queue = []
+        self.camera_refresh_requested_at = None
 
     def authorized(self, headers) -> bool:
         auth = headers.get("Authorization", "")
@@ -89,6 +90,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/agents/cameras":
             body = self._read_json_body()
             self.state.camera_reports.append(body.get("cameras", []))
+            self.state.camera_refresh_requested_at = None
             self._send_json(200, {"status": "ok", "cameras": len(body.get("cameras", [])), "assignments": []})
             return
 
@@ -151,6 +153,15 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/agents/jobs/next":
             job = self.state.next_job_queue.pop(0) if self.state.next_job_queue else None
             self._send_json(200, {"job": job})
+            return
+        if self.path == "/api/agents/cameras/refresh":
+            self._send_json(
+                200,
+                {
+                    "requested": self.state.camera_refresh_requested_at is not None,
+                    "requestedAt": self.state.camera_refresh_requested_at,
+                },
+            )
             return
         self._send_json(404, {"error": "not found"})
 

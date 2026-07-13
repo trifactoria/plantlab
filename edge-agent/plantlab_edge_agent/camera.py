@@ -126,6 +126,16 @@ def discover_cameras(probe_capture: bool = True) -> List[CameraInfo]:
     return _verify_camera_groups(cameras) if probe_capture else _group_physical_cameras(cameras)
 
 
+def discover_camera_metadata() -> List[CameraInfo]:
+    """Metadata-only camera grouping. Does not run ffmpeg capture probes."""
+    return discover_cameras(probe_capture=False)
+
+
+def verify_camera_metadata(cameras: List[CameraInfo]) -> List[CameraInfo]:
+    """Run serialized ffmpeg verification against already-collected metadata."""
+    return _verify_camera_groups(cameras)
+
+
 def _verify_camera_groups(cameras: List[CameraInfo]) -> List[CameraInfo]:
     """Part 5: real verified-capture selection. Groups by the same stable-identity key as _group_physical_cameras() (kept separately, pure/metadata-only, for its own tests), then - one device at a time, serialized, never in parallel - probes every metadata-plausible candidate in score order. The first one that actually captures becomes primary; every other device in the group is recorded as an alternate, annotated with its real probe failure reason when one was attempted."""
     groups: "dict[str, List[CameraInfo]]" = {}

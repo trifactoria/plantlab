@@ -67,6 +67,11 @@ previously reported - see `src/lib/operations/capabilities.ts`.
 `environment` is aggregate health only; full environmental telemetry uses
 the endpoint below.
 
+Heartbeat is intentionally lightweight. Edge agents must not use heartbeat
+as a trigger for full camera inventory, V4L2 format enumeration, or FFmpeg
+probe capture. Camera inventory is reported only through the camera
+inventory endpoint after an explicit refresh trigger.
+
 ### `POST /api/agents/credential-check`
 
 Narrow, side-effect-free probe (Part 1 of the credential-recovery task) -
@@ -83,6 +88,25 @@ Reports the node's current camera inventory.
 ```
 Response includes any active `NodeCameraAssignment`s so the agent knows
 what capture settings apply to which physical camera.
+
+The coordinator clears a pending `inventoryRefreshRequestedAt` request when
+this endpoint accepts a report. Python edge agents cache the last successful
+verified report locally, but they do not run verified discovery on startup
+or heartbeat.
+
+### `GET /api/agents/cameras/refresh`
+
+Cheap authenticated poll for a pending one-shot camera inventory request:
+
+```json
+{ "requested": true, "requestedAt": "2026-07-13T15:30:00.000Z" }
+```
+
+Agents should process each `requestedAt` value at most once. If the request
+is handled successfully, the following `POST /api/agents/cameras` clears it
+on the coordinator. If verified discovery fails, the agent should continue
+heartbeats, job polling, and environmental telemetry without tight-looping
+FFmpeg; a later user/coordinator request creates a new timestamp.
 
 ### `POST /api/agents/environment`
 

@@ -20,6 +20,14 @@ import time
 import uuid
 
 from . import camera, config
+from .camera_inventory import (
+    InventoryRefreshInProgress,
+    camera_inventory_cache_status,
+    camera_to_inventory_payload,
+    inventory_refresh_lock,
+    load_camera_inventory_cache,
+    write_camera_inventory_cache,
+)
 from .protocol import AgentProtocolClient, ProtocolError
 from .sensors.runtime import EnvironmentalSensorManager, selected_driver_mode
 from .spool import Spool
@@ -27,6 +35,7 @@ from .spool import Spool
 logger = logging.getLogger("plantlab_edge_agent")
 
 ACK_RETAIN_SECONDS = 7 * 24 * 60 * 60
+MAX_IDLE_SLEEP_SECONDS = 1.0
 
 
 class FatalAgentError(Exception):
@@ -45,7 +54,11 @@ def load_client_and_config() -> tuple[config.EdgeAgentConfig, AgentProtocolClien
     return cfg, AgentProtocolClient(cfg.coordinator_url, token)
 
 
-def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager | None = None) -> None:
+def camera_capability_enabled(cfg: config.EdgeAgentConfig) -> bool:
+    return "camera" in cfg.capabilities
+
+
+def send_heartbeat(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager | None = None) -> None:
     info = _platform_info()
     try:
         client.heartbeat(
@@ -59,36 +72,50 @@ def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtoc
     except ProtocolError as exc:
         logger.warning("Heartbeat failed: %s", exc)
 
+
+def refresh_camera_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, reason: str = "requested") -> bool:
+    if not camera_capability_enabled(cfg):
+        logger.info("Camera inventory refresh skipped: camera capability is disabled.")
+        return False
+
     try:
-        cameras = camera.discover_cameras()
-        payload = [
-            {
-                "stableId": c.stable_id or f"device:{c.device}",
-                "legacyStableId": c.legacy_stable_id,
-                "devicePath": c.device,
-                "name": c.name,
-                "vendorId": c.vendor_id,
-                "productId": c.product_id,
-                "serial": c.serial,
-                "physicalPath": c.physical_path,
-                "usbPath": c.usb_path,
-                "usbPort": c.usb_port,
-                "alternateDevices": c.alternate_devices,
-                # A real, ffmpeg-verified capture (Part 5), not just V4L2
-                # metadata claiming "Video Capture" support - metadata alone
-                # is what let a Raspberry Pi's non-camera hardware codec/ISP
-                # devices (each its own stable-ID group) show up as if they
-                # were selectable cameras.
-                "available": c.verified_capture is True,
-                "formats": c.formats,
-                "formatsStatus": c.formats_status,
-                "formatsError": c.formats_error,
-            }
-            for c in cameras
-        ]
-        client.post_camera_inventory(payload)
+        with inventory_refresh_lock(cfg.spool_root):
+            started = time.monotonic()
+            logger.info("Camera inventory refresh started: reason=%s", reason)
+            metadata = camera.discover_camera_metadata()
+            metadata_at = time.monotonic()
+            logger.info("Camera metadata scan completed in %.1f seconds: groups=%d", metadata_at - started, len(metadata))
+            cameras = camera.verify_camera_metadata(metadata)
+            verified_at_monotonic = time.monotonic()
+            logger.info("Verified %d candidate group(s) in %.1f seconds.", len(cameras), verified_at_monotonic - metadata_at)
+            payload = [camera_to_inventory_payload(c) for c in cameras]
+            client.post_camera_inventory(payload)
+            verified_at = _now_iso()
+            write_camera_inventory_cache(cfg.spool_root, payload, verified_at)
+            logger.info("Camera inventory posted and cached: cameras=%d elapsed=%.1fs", len(payload), time.monotonic() - started)
+            return True
+    except InventoryRefreshInProgress:
+        logger.info("Camera inventory refresh skipped: another refresh is already running.")
+        return False
     except ProtocolError as exc:
         logger.warning("Camera inventory report failed: %s", exc)
+        return False
+    except Exception as exc:
+        logger.warning("Camera inventory refresh failed: %s", exc)
+        return False
+
+
+def post_cached_camera_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient) -> bool:
+    cache = load_camera_inventory_cache(cfg.spool_root)
+    if not cache:
+        return False
+    try:
+        client.post_camera_inventory(cache.cameras)
+        logger.info("Posted cached camera inventory: cameras=%d verifiedAt=%s", len(cache.cameras), cache.verified_at)
+        return True
+    except ProtocolError as exc:
+        logger.warning("Cached camera inventory report failed: %s", exc)
+        return False
 
 
 def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, spool: Spool) -> None:
@@ -131,16 +158,21 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
         logger.error("Capture job %s failed: %s", job.id, exc)
 
 
-def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager | None = None) -> bool:
+def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, state: dict) -> bool:
+    if not camera_capability_enabled(cfg):
+        return False
     try:
         refresh = client.camera_inventory_refresh_request()
     except ProtocolError as exc:
         logger.warning("Inventory refresh check failed: %s", exc)
         return False
-    if refresh.get("requested"):
-        run_heartbeat_and_inventory(cfg, client, sensors)
-        return True
-    return False
+    requested_at = refresh.get("requestedAt") if refresh.get("requested") else None
+    if not requested_at or not isinstance(requested_at, str):
+        return False
+    if requested_at == state.get("last_refresh_requested_at"):
+        return False
+    state["last_refresh_requested_at"] = requested_at
+    return refresh_camera_inventory(cfg, client, reason=f"coordinator:{requested_at}")
 
 
 def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, spool: Spool) -> None:
@@ -220,6 +252,14 @@ def run_loop(stop_check=lambda: False) -> None:
         )
     if cfg.sensors and not sensors.runtimes:
         logger.info("No enabled greenhouse environmental sensors are configured.")
+    cache_status = camera_inventory_cache_status(cfg.spool_root)
+    if camera_capability_enabled(cfg):
+        logger.info(
+            "Camera inventory cache: %s cameras=%s verifiedAt=%s",
+            "valid" if cache_status["valid"] else "missing/invalid",
+            cache_status["cameraCount"],
+            cache_status["verifiedAt"] or "never",
+        )
 
     stopping = {"value": False}
 
@@ -229,25 +269,56 @@ def run_loop(stop_check=lambda: False) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    last_heartbeat = 0.0
+    refresh_state: dict = {}
+    now = time.monotonic()
+    next_heartbeat_at = now
+    next_job_poll_at = now
+    next_refresh_poll_at = now if camera_capability_enabled(cfg) else float("inf")
+    next_sensor_sample_at = now if sensors.runtimes else float("inf")
+    next_environment_upload_at = now
+    next_capture_upload_at = now
+    next_cleanup_at = now + max(60, cfg.spool_cleanup_interval_seconds)
     try:
         while not stopping["value"] and not stop_check():
             now = time.monotonic()
-            if now - last_heartbeat >= cfg.heartbeat_interval_seconds:
-                run_heartbeat_and_inventory(cfg, client, sensors)
-                last_heartbeat = now
-            elif maybe_refresh_inventory(cfg, client, sensors):
-                last_heartbeat = now
-            sample_environment(cfg, sensors, spool)
-            poll_and_run_job(cfg, client, spool)
-            process_uploads(cfg, client, spool)
-            process_environment_uploads(cfg, client, sensors, spool)
-            try:
-                spool.cleanup_acknowledged(ACK_RETAIN_SECONDS)
-                spool.cleanup_acknowledged_environment(ACK_RETAIN_SECONDS)
-            except Exception:
-                pass
-            time.sleep(cfg.poll_interval_seconds)
+            if now >= next_heartbeat_at:
+                send_heartbeat(cfg, client, sensors)
+                next_heartbeat_at = now + cfg.heartbeat_interval_seconds
+            if now >= next_refresh_poll_at:
+                maybe_refresh_inventory(cfg, client, refresh_state)
+                next_refresh_poll_at = now + max(1, cfg.camera_refresh_poll_interval_seconds)
+            if now >= next_sensor_sample_at:
+                sample_environment(cfg, sensors, spool)
+                next_sensor_sample_at = now + max(1, cfg.sensor_sample_interval_seconds) if sensors.runtimes else float("inf")
+            if now >= next_job_poll_at:
+                poll_and_run_job(cfg, client, spool)
+                next_job_poll_at = now + max(1, cfg.poll_interval_seconds)
+            if now >= next_capture_upload_at:
+                process_uploads(cfg, client, spool)
+                next_capture_upload_at = now + max(1, cfg.poll_interval_seconds)
+            if now >= next_environment_upload_at:
+                process_environment_uploads(cfg, client, sensors, spool)
+                next_environment_upload_at = now + max(1, cfg.environment_upload_interval_seconds)
+            if now >= next_cleanup_at:
+                try:
+                    spool.cleanup_acknowledged(ACK_RETAIN_SECONDS)
+                    spool.cleanup_acknowledged_environment(ACK_RETAIN_SECONDS)
+                except Exception:
+                    pass
+                next_cleanup_at = now + max(60, cfg.spool_cleanup_interval_seconds)
+
+            next_due = min(
+                next_heartbeat_at,
+                next_job_poll_at,
+                next_refresh_poll_at,
+                next_sensor_sample_at,
+                next_environment_upload_at,
+                next_capture_upload_at,
+                next_cleanup_at,
+            )
+            sleep_for = max(0.0, min(MAX_IDLE_SLEEP_SECONDS, next_due - time.monotonic()))
+            if sleep_for > 0:
+                time.sleep(sleep_for)
     finally:
         sensors.close()
         spool.close()

@@ -1,7 +1,7 @@
 import os from "node:os";
 import { createInterface } from "node:readline/promises";
 import type { Command } from "commander";
-import { updateCameraInventory } from "../../lib/operations/agentProtocol";
+import { requestCameraInventoryRefresh, updateCameraInventory } from "../../lib/operations/agentProtocol";
 import { readNodeConfig } from "../../lib/operations/config";
 import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operations/manualCapture";
 import { markNodeStatus } from "../../lib/operations/nodeCredentials";
@@ -1066,8 +1066,11 @@ async function runEdgeAgentAttach(input: {
 
   let inventory: Awaited<ReturnType<typeof waitForNodeInventory>> = [];
   if (registerCapabilities.includes("camera")) {
+    const requestedInventory = await requestCameraInventoryRefresh(prisma, repair.node.name);
+    const inventorySince = requestedInventory.inventoryRefreshRequestedAt ?? heartbeatSince;
+    steps.complete("Camera inventory refresh", `Requested verified camera inventory at ${inventorySince.toISOString()}.`);
     console.log(timeoutPolicy.lowResource ? "Waiting for camera inventory from low-resource node..." : "Waiting for camera inventory...");
-    inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, inventoryTimeoutMs, {
+    inventory = await waitForNodeInventory(repair.node.id, inventorySince, inventoryTimeoutMs, {
       progressMs: 30_000,
       progressMessage: timeoutPolicy.lowResource ? "Still waiting; the node is healthy and enumerating video devices." : "Still waiting for camera inventory...",
     });
@@ -1267,6 +1270,7 @@ const ATTACH_STEP_ORDER = [
   "Sensor driver mode",
   "Service start",
   "Heartbeat",
+  "Camera inventory refresh",
   "Camera report",
 ] as const;
 

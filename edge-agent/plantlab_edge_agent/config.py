@@ -59,6 +59,8 @@ class EdgeAgentConfig:
     power: Optional[GreenhousePowerConfig] = None
     heartbeat_interval_seconds: int = 30
     poll_interval_seconds: int = 5
+    camera_refresh_poll_interval_seconds: int = 60
+    spool_cleanup_interval_seconds: int = 600
     sensor_sample_interval_seconds: int = 15
     environment_upload_interval_seconds: int = 45
     max_spool_bytes: int = 512 * 1024 * 1024  # 512MB - a Pi Zero's whole SD card is usually 8-32GB, but this stays conservative.
@@ -95,6 +97,8 @@ def read_config() -> Optional[EdgeAgentConfig]:
         power=power,
         heartbeat_interval_seconds=int(raw.get("heartbeatIntervalSeconds", 30)),
         poll_interval_seconds=int(raw.get("pollIntervalSeconds", 5)),
+        camera_refresh_poll_interval_seconds=int(raw.get("cameraRefreshPollIntervalSeconds", 60)),
+        spool_cleanup_interval_seconds=int(raw.get("spoolCleanupIntervalSeconds", 600)),
         sensor_sample_interval_seconds=int(raw.get("sensorSampleIntervalSeconds", 15)),
         environment_upload_interval_seconds=int(raw.get("environmentUploadIntervalSeconds", 45)),
         max_spool_bytes=int(raw.get("maxSpoolBytes", 512 * 1024 * 1024)),
@@ -111,6 +115,8 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "capabilities": config.capabilities,
         "heartbeatIntervalSeconds": config.heartbeat_interval_seconds,
         "pollIntervalSeconds": config.poll_interval_seconds,
+        "cameraRefreshPollIntervalSeconds": config.camera_refresh_poll_interval_seconds,
+        "spoolCleanupIntervalSeconds": config.spool_cleanup_interval_seconds,
         "sensorSampleIntervalSeconds": config.sensor_sample_interval_seconds,
         "environmentUploadIntervalSeconds": config.environment_upload_interval_seconds,
         "maxSpoolBytes": config.max_spool_bytes,

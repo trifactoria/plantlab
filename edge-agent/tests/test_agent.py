@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from plantlab_edge_agent import agent, camera, config
+from plantlab_edge_agent.camera_inventory import load_camera_inventory_cache
 from plantlab_edge_agent.protocol import AgentProtocolClient
 from plantlab_edge_agent.sensors.runtime import EnvironmentalSensorManager
 from plantlab_edge_agent.spool import Spool
@@ -19,17 +20,31 @@ def _make_config(tmp_path, coordinator_url):
     )
 
 
-def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_coordinator):
+def test_send_heartbeat_does_not_discover_cameras(tmp_path, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+
+    with patch.object(camera, "discover_cameras") as discover:
+        agent.send_heartbeat(cfg, client)
+
+    state = fake_coordinator["state"]
+    assert len(state.heartbeats) == 1
+    assert state.camera_reports == []
+    discover.assert_not_called()
+
+
+def test_refresh_camera_inventory_reports_discovered_cameras_and_writes_cache(tmp_path, fake_coordinator):
     cfg = _make_config(tmp_path, fake_coordinator["url"])
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
 
     formats = [{"pixelFormat": "mjpeg", "description": "Motion-JPEG", "resolutions": [{"width": 1280, "height": 720, "frameRates": ["30.000 fps"]}]}]
     fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:1:2:3", verified_capture=True, formats=formats)
-    with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
-        agent.run_heartbeat_and_inventory(cfg, client)
+    with patch.object(camera, "discover_camera_metadata", return_value=[fake_camera]) as metadata, patch.object(camera, "verify_camera_metadata", return_value=[fake_camera]) as verify:
+        assert agent.refresh_camera_inventory(cfg, client, reason="test") is True
 
     state = fake_coordinator["state"]
-    assert len(state.heartbeats) == 1
+    metadata.assert_called_once()
+    verify.assert_called_once()
     assert state.camera_reports == [
         [
             {
@@ -48,12 +63,17 @@ def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_c
                 "formats": formats,
                 "formatsStatus": "unknown",
                 "formatsError": None,
+                "verifiedProbeMode": None,
+                "captureProbeError": None,
             }
         ]
     ]
+    cache = load_camera_inventory_cache(cfg.spool_root)
+    assert cache is not None
+    assert cache.cameras[0]["stableId"] == "usb:1:2:3"
 
 
-def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(tmp_path, fake_coordinator):
+def test_refresh_camera_inventory_reports_unverified_devices_as_unavailable(tmp_path, fake_coordinator):
     """Part 5/9: a device with no verified real capture (e.g. a Raspberry Pi's
     bcm2835-codec-decode/isp hardware helper nodes) must never be reported as
     available - metadata claiming "Video Capture" support isn't proof, and a
@@ -62,8 +82,8 @@ def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(t
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
 
     fake_camera = camera.CameraInfo(device="/dev/video10", name="bcm2835-codec-decode", stable_id="platform:bcm2835-codec-decode", verified_capture=False)
-    with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
-        agent.run_heartbeat_and_inventory(cfg, client)
+    with patch.object(camera, "discover_camera_metadata", return_value=[fake_camera]), patch.object(camera, "verify_camera_metadata", return_value=[fake_camera]):
+        agent.refresh_camera_inventory(cfg, client)
 
     state = fake_coordinator["state"]
     assert state.camera_reports == [
@@ -84,9 +104,35 @@ def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(t
                 "formats": [],
                 "formatsStatus": "unknown",
                 "formatsError": None,
+                "verifiedProbeMode": None,
+                "captureProbeError": None,
             }
         ]
     ]
+
+
+def test_maybe_refresh_inventory_processes_each_request_once(tmp_path, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    fake_coordinator["state"].camera_refresh_requested_at = "2026-07-13T15:30:00.000Z"
+    fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:refresh", verified_capture=True)
+    state = {}
+    with patch.object(camera, "discover_camera_metadata", return_value=[fake_camera]) as metadata, patch.object(camera, "verify_camera_metadata", return_value=[fake_camera]):
+        assert agent.maybe_refresh_inventory(cfg, client, state) is True
+        fake_coordinator["state"].camera_refresh_requested_at = "2026-07-13T15:30:00.000Z"
+        assert agent.maybe_refresh_inventory(cfg, client, state) is False
+    metadata.assert_called_once()
+
+
+def test_camera_disabled_node_ignores_refresh(tmp_path, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    cfg.capabilities = []
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    fake_coordinator["state"].camera_refresh_requested_at = "2026-07-13T15:30:00.000Z"
+    with patch.object(camera, "discover_camera_metadata") as metadata:
+        assert agent.maybe_refresh_inventory(cfg, client, {}) is False
+        assert agent.refresh_camera_inventory(cfg, client) is False
+    metadata.assert_not_called()
 
 
 def test_poll_and_run_job_captures_a_frame_to_the_durable_spool_before_uploading(tmp_path, fake_coordinator):
