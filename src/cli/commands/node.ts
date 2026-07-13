@@ -7,7 +7,14 @@ import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operatio
 import { markNodeStatus } from "../../lib/operations/nodeCredentials";
 import { ensureValidNodeCredential, rotateAndInstallCredential, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
 import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
-import { copyEdgeAgentDirectory, runEdgeAgentInstall, verifyEdgeCommand } from "../../lib/operations/edgeAgentInstall";
+import {
+  copyEdgeAgentDirectory,
+  edgeAgentInstallChangeStatus,
+  localEdgeAgentVersion,
+  readInstalledEdgeAgentVersion,
+  runEdgeAgentInstall,
+  verifyEdgeCommand,
+} from "../../lib/operations/edgeAgentInstall";
 import { diagnoseEdgeAgent } from "../../lib/operations/edgeAgentDiagnostics";
 import {
   diagnoseRemoteAgent,
@@ -472,6 +479,8 @@ async function runEdgeAgentAttach(input: {
 
   const role = await promptEdgeAgentRole(sshHost, options.yes);
   steps.complete("Role selection", role);
+  const sourceVersion = await localEdgeAgentVersion();
+  const installedBefore = await readInstalledEdgeAgentVersion(sshHost);
 
   console.log(`\nCopying edge agent to ${sshHost}...`);
   const copyResult = await copyEdgeAgentDirectory(sshHost);
@@ -491,7 +500,18 @@ async function runEdgeAgentAttach(input: {
     process.exitCode = 1;
     return;
   }
-  steps.complete("Install edge agent", "Dependencies verified, spool prepared, systemd unit installed.");
+  const installedAfter = await readInstalledEdgeAgentVersion(sshHost);
+  if (sourceVersion.contentHash && installedAfter?.contentHash && sourceVersion.contentHash !== installedAfter.contentHash) {
+    steps.fail("Install edge agent", `FAILED: source edge-agent hash ${sourceVersion.contentHash} but installed hash is ${installedAfter.contentHash}.`);
+    printAttachIncomplete(steps, sshHost);
+    process.exitCode = 1;
+    return;
+  }
+  const installStatus = edgeAgentInstallChangeStatus(sourceVersion, installedBefore);
+  steps.complete(
+    "Install edge agent",
+    `${installStatus}: source edge-agent ${sourceVersion.version ?? "(unknown)"} ${sourceVersion.contentHash?.slice(0, 12) ?? "(no hash)"}; installed ${installedAfter?.version ?? "(unknown)"} ${installedAfter?.contentHash?.slice(0, 12) ?? "(no hash)"}.`,
+  );
 
   // Verify the local `plantlab-edge` command is actually usable (Part 3) -
   // a plain non-interactive SSH command never sources ~/.profile, so this

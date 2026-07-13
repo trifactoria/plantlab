@@ -53,8 +53,63 @@ fi
 echo ""
 echo "Installing to $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
-cp -r "$SCRIPT_DIR/plantlab_edge_agent" "$INSTALL_DIR/"
-echo "PASS: package copied."
+PACKAGE_SOURCE="$SCRIPT_DIR/plantlab_edge_agent"
+PACKAGE_TARGET="$INSTALL_DIR/plantlab_edge_agent"
+PACKAGE_TMP="$INSTALL_DIR/plantlab_edge_agent.tmp.$$"
+SOURCE_COMMIT="${PLANTLAB_EDGE_SOURCE_COMMIT:-unknown}"
+
+package_hash() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    if "__pycache__" in path.parts or rel.endswith(".pyc") or rel == "_install_meta.py":
+        continue
+    digest.update(rel.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+SOURCE_HASH="$(package_hash "$PACKAGE_SOURCE")"
+if [ -n "${PLANTLAB_EDGE_SOURCE_HASH:-}" ] && [ "$SOURCE_HASH" != "$PLANTLAB_EDGE_SOURCE_HASH" ]; then
+  echo "FATAL: source package hash changed before install: expected $PLANTLAB_EDGE_SOURCE_HASH, found $SOURCE_HASH" >&2
+  exit 1
+fi
+
+# Reinstall must be an exact mirror of this package. Remove only the
+# installed Python package directory; config, credential, spool, and logs
+# live outside this package path and are deliberately preserved.
+rm -rf "$PACKAGE_TARGET" "$PACKAGE_TMP"
+cp -R "$PACKAGE_SOURCE" "$PACKAGE_TMP"
+find "$PACKAGE_TMP" -type d -name __pycache__ -prune -exec rm -rf {} +
+cat > "$PACKAGE_TMP/_install_meta.py" <<EOF
+SOURCE_COMMIT = "$SOURCE_COMMIT"
+SOURCE_HASH = "$SOURCE_HASH"
+EOF
+STAGED_HASH="$(package_hash "$PACKAGE_TMP")"
+if [ "$STAGED_HASH" != "$SOURCE_HASH" ]; then
+  echo "FATAL: staged package hash differs from source: source=$SOURCE_HASH staged=$STAGED_HASH" >&2
+  rm -rf "$PACKAGE_TMP"
+  exit 1
+fi
+mv "$PACKAGE_TMP" "$PACKAGE_TARGET"
+find "$PACKAGE_TARGET" -type d -name __pycache__ -prune -exec rm -rf {} +
+INSTALLED_HASH="$(package_hash "$PACKAGE_TARGET")"
+if [ "$INSTALLED_HASH" != "$SOURCE_HASH" ]; then
+  echo "FATAL: installed package hash differs from source: source=$SOURCE_HASH installed=$INSTALLED_HASH" >&2
+  exit 1
+fi
+echo "PASS: package mirrored exactly (hash $INSTALLED_HASH)."
 
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
@@ -190,6 +245,7 @@ fi
 systemctl --user daemon-reload 2>/dev/null || echo "WARN: systemctl --user daemon-reload failed - is a user systemd session available? Try: loginctl enable-linger \$(whoami) then log back in."
 
 echo ""
+PYTHONPATH="$INSTALL_DIR" "$PYTHON_BIN" -m plantlab_edge_agent version
 PYTHONPATH="$INSTALL_DIR" "$PYTHON_BIN" -m plantlab_edge_agent install-check || true
 
 echo ""

@@ -12,6 +12,7 @@ poll any other node's agent uses - see docs/AGENT_PROTOCOL.md.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -19,6 +20,11 @@ from pathlib import Path
 
 from . import agent, camera, config
 from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
+
+try:
+    from . import _install_meta
+except Exception:  # pragma: no cover - absent in source checkouts before install.sh writes it
+    _install_meta = None
 
 
 def _load_config_safely():
@@ -335,8 +341,53 @@ def cmd_logs(_args: argparse.Namespace) -> int:
     return result.returncode
 
 
-def cmd_version(_args: argparse.Namespace) -> int:
-    print(f"plantlab-edge {AGENT_VERSION}")
+def _package_content_hash() -> str:
+    package_dir = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(package_dir).as_posix()
+        if "__pycache__" in path.parts or rel.endswith(".pyc") or rel == "_install_meta.py":
+            continue
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _git_commit() -> str | None:
+    install_commit = getattr(_install_meta, "SOURCE_COMMIT", None) if _install_meta else None
+    if install_commit:
+        return str(install_commit)
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def version_info() -> dict:
+    return {
+        "command": "plantlab-edge",
+        "version": AGENT_VERSION,
+        "runtime": AGENT_RUNTIME,
+        "protocolVersion": PROTOCOL_VERSION,
+        "commit": _git_commit(),
+        "contentHash": _package_content_hash(),
+    }
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    info = version_info()
+    if args.json:
+        print(json.dumps(info, sort_keys=True))
+    else:
+        commit = info["commit"] or "unknown"
+        print(f"plantlab-edge {info['version']} commit {commit} hash {info['contentHash']}")
     return 0
 
 
@@ -383,7 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
     service_sub.add_parser("status", help="Show systemd user service status.").set_defaults(func=cmd_service_status)
     service_sub.add_parser("restart", help="Restart the systemd user service.").set_defaults(func=cmd_service_restart)
     sub.add_parser("logs", help="Show recent edge-agent service logs.").set_defaults(func=cmd_logs)
-    sub.add_parser("version", help="Print edge-agent version.").set_defaults(func=cmd_version)
+    version_parser = sub.add_parser("version", help="Print edge-agent version.")
+    version_parser.add_argument("--json", action="store_true", help="Print structured version metadata.")
+    version_parser.set_defaults(func=cmd_version)
     sub.add_parser("run", help="Run the agent loop (heartbeat, camera inventory, job polling, durable uploads).").set_defaults(func=cmd_run)
     sub.add_parser("heartbeat", help="Send one heartbeat and exit.").set_defaults(func=cmd_heartbeat)
     sub.add_parser("credential-check", help="Probe the current credential against the coordinator and exit.").set_defaults(func=cmd_credential_check)

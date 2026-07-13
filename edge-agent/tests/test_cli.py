@@ -62,3 +62,12 @@ def test_config_show_json_is_non_secret(isolated_config, fake_coordinator, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["credentialPresent"] is True
     assert "pln_validtoken" not in json.dumps(payload)
+
+
+def test_version_json_reports_package_commit_and_content_hash(capsys):
+    assert cli.main(["version", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "plantlab-edge"
+    assert payload["version"]
+    assert "commit" in payload
+    assert len(payload["contentHash"]) == 64

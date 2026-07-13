@@ -15,7 +15,8 @@
 // touched by this.
 
 import path from "node:path";
-import { resolveRootDir } from "../paths.server";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import { runLocalCommand, runRemoteShell, validateSshHost, type CommandResult } from "./shellExec";
 import { shellQuote } from "./systemdUnits";
 
@@ -26,7 +27,96 @@ if (typeof window !== "undefined") {
 const REMOTE_EDGE_AGENT_DIR = "plantlab-edge-agent";
 
 export function localEdgeAgentDir(): string {
-  return path.join(resolveRootDir(), "edge-agent");
+  return path.join(process.cwd(), "edge-agent");
+}
+
+export type EdgeAgentVersionInfo = {
+  version: string | null;
+  commit: string | null;
+  contentHash: string | null;
+  raw?: unknown;
+};
+
+export function edgeAgentInstallChangeStatus(source: EdgeAgentVersionInfo, installedBefore: EdgeAgentVersionInfo | null): "UPDATED" | "UNCHANGED" {
+  return installedBefore?.contentHash && source.contentHash && installedBefore.contentHash === source.contentHash ? "UNCHANGED" : "UPDATED";
+}
+
+async function walkFiles(root: string, current = root): Promise<string[]> {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "__pycache__") continue;
+      files.push(...(await walkFiles(root, fullPath)));
+    } else if (entry.isFile()) {
+      const rel = path.relative(root, fullPath).split(path.sep).join("/");
+      if (rel.endsWith(".pyc") || rel === "_install_meta.py") continue;
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+async function hashPackageDirectory(packageDir: string): Promise<string> {
+  const digest = createHash("sha256");
+  const files = (await walkFiles(packageDir)).sort();
+  for (const file of files) {
+    const rel = path.relative(packageDir, file).split(path.sep).join("/");
+    digest.update(rel);
+    digest.update("\0");
+    digest.update(await readFile(file));
+    digest.update("\0");
+  }
+  return digest.digest("hex");
+}
+
+function parsePackageVersion(pyproject: string): string | null {
+  return /^version\s*=\s*"([^"]+)"/m.exec(pyproject)?.[1] ?? null;
+}
+
+export async function localEdgeAgentVersion(): Promise<EdgeAgentVersionInfo> {
+  const root = localEdgeAgentDir();
+  const packageDir = path.join(root, "plantlab_edge_agent");
+  const pyproject = await readFile(path.join(root, "pyproject.toml"), "utf8").catch(() => "");
+  const commitResult = await runLocalCommand("git", ["-C", process.cwd(), "rev-parse", "HEAD"], { timeoutMs: 5_000 }).catch(() => null);
+  return {
+    version: parsePackageVersion(pyproject),
+    commit: commitResult?.status === 0 ? commitResult.stdout.trim() || null : null,
+    contentHash: await hashPackageDirectory(packageDir),
+  };
+}
+
+export async function readInstalledEdgeAgentVersion(sshHost: string): Promise<EdgeAgentVersionInfo | null> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+wrapper_path="$home_dir/.local/bin/plantlab-edge"
+json=""
+if command -v bash >/dev/null 2>&1; then
+  json="$(bash -lc 'plantlab-edge version --json' 2>/dev/null || true)"
+fi
+if [ -z "$json" ] && [ -x "$wrapper_path" ]; then
+  json="$("$wrapper_path" version --json 2>/dev/null || true)"
+fi
+[ -n "$json" ] || exit 44
+printf '%s\n' "$json"
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 }).catch(() => ({ stdout: "", stderr: "", status: 255 }));
+  if (result.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as { version?: string; commit?: string; contentHash?: string };
+    return {
+      version: parsed.version ?? null,
+      commit: parsed.commit ?? null,
+      contentHash: parsed.contentHash ?? null,
+      raw: parsed,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Copies edge-agent/ over SSH via scp (rsync isn't guaranteed present on Raspberry Pi OS Lite; scp ships with openssh-client, which SSH access itself already requires). */
@@ -54,14 +144,16 @@ export type EdgeAgentInstallInput = {
 /** Runs install.sh remotely - non-interactive by construction (install.sh never prompts; role/node-name/coordinator-url are passed as env vars). Never creates a credential - see install.sh's own doc comment. */
 export async function runEdgeAgentInstall(sshHost: string, input: EdgeAgentInstallInput): Promise<CommandResult> {
   validateSshHost(sshHost);
-  const script = [
-    `cd ~/${REMOTE_EDGE_AGENT_DIR}`,
+  const source = await localEdgeAgentVersion();
+  const env = [
     `PLANTLAB_EDGE_ROLE=${shellQuote(input.role)}`,
     `PLANTLAB_EDGE_NODE_NAME=${shellQuote(input.nodeName)}`,
     `PLANTLAB_EDGE_COORDINATOR_URL=${shellQuote(input.coordinatorUrl)}`,
     input.spoolRoot ? `PLANTLAB_EDGE_SPOOL_ROOT=${shellQuote(input.spoolRoot)}` : "",
-    "sh install.sh",
-  ].filter(Boolean).join(" ");
+    source.contentHash ? `PLANTLAB_EDGE_SOURCE_HASH=${shellQuote(source.contentHash)}` : "",
+    source.commit ? `PLANTLAB_EDGE_SOURCE_COMMIT=${shellQuote(source.commit)}` : "",
+  ].filter(Boolean);
+  const script = `cd ~/${REMOTE_EDGE_AGENT_DIR} && ${env.join(" ")} sh install.sh`;
   return runRemoteShell(sshHost, script, [], { timeoutMs: 120_000 });
 }
 
