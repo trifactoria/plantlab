@@ -100,10 +100,57 @@ PYTHONPATH="$INSTALL_DIR" PLANTLAB_EDGE_CONFIG_DIR="$CONFIG_DIR" exec "$PYTHON_B
 EOF
 chmod 755 "$USER_BIN_DIR/plantlab-edge"
 echo "PASS: plantlab-edge installed at $USER_BIN_DIR/plantlab-edge."
-case ":$PATH:" in
-  *":$USER_BIN_DIR:"*) : ;;
-  *) echo "WARN: $USER_BIN_DIR is not currently on PATH. Invoke directly as: $USER_BIN_DIR/plantlab-edge" ;;
-esac
+
+# Best-effort: /usr/local/bin is on PATH for every session type (login,
+# non-login, interactive, non-interactive - e.g. a plain `ssh host cmd`)
+# with zero shell-startup-file dependency. Only used when already writable
+# by this user - never via sudo, never assumed.
+if [ -w /usr/local/bin ] 2>/dev/null; then
+  ln -sf "$USER_BIN_DIR/plantlab-edge" /usr/local/bin/plantlab-edge 2>/dev/null \
+    && echo "PASS: also linked from /usr/local/bin/plantlab-edge (writable without sudo)."
+fi
+
+# Idempotently ensure $HOME/.local/bin is on the *login* PATH (Part 3) -
+# the real greenhouse-zero bug: the wrapper above was created, but
+# ~/.local/bin was never on PATH for a plain `ssh host plantlab-edge ...`
+# (a non-interactive, non-login shell - bash reads neither ~/.profile nor
+# ~/.bashrc for that invocation style; only a real login shell does).
+# Never silently edits an "arbitrary" file - only the two standard,
+# well-known Debian/Raspberry Pi OS shell startup files
+# (~/.profile for login shells, ~/.bashrc for interactive non-login
+# shells), each touched at most once (a unique marker comment makes this
+# safe to re-run).
+PLANTLAB_PATH_MARKER="# Added by the PlantLab edge-agent installer - see edge-agent/install.sh"
+ensure_local_bin_on_path() {
+  target_file="$1"
+  if [ -f "$target_file" ] && grep -qF "$PLANTLAB_PATH_MARKER" "$target_file" 2>/dev/null; then
+    return 0
+  fi
+  {
+    echo ""
+    echo "$PLANTLAB_PATH_MARKER"
+    echo 'if [ -d "$HOME/.local/bin" ] && ! case ":$PATH:" in *":$HOME/.local/bin:"*) true ;; *) false ;; esac; then'
+    echo '  PATH="$HOME/.local/bin:$PATH"'
+    echo '  export PATH'
+    echo 'fi'
+  } >> "$target_file"
+}
+ensure_local_bin_on_path "$HOME/.profile"
+ensure_local_bin_on_path "$HOME/.bashrc"
+echo "PASS: ensured \$HOME/.local/bin is on PATH in \$HOME/.profile and \$HOME/.bashrc (idempotent - safe to re-run)."
+
+# Verify through a fresh, non-interactive LOGIN shell - never assumes the
+# freshly-appended PATH line took effect, actually re-execs a real login
+# shell (bash -l) to prove `command -v plantlab-edge` resolves, exactly
+# the way Part 3 requires this to be checked.
+if command -v bash >/dev/null 2>&1 && VERIFIED_PATH="$(bash -lc 'command -v plantlab-edge' 2>/dev/null)" && [ -n "$VERIFIED_PATH" ]; then
+  echo "PASS: plantlab-edge resolves on PATH in a fresh login shell: $VERIFIED_PATH"
+else
+  echo ""
+  echo "Installed successfully."
+  echo "Reconnect your SSH session, or run:"
+  echo "  $USER_BIN_DIR/plantlab-edge doctor"
+fi
 
 echo ""
 echo "Installing systemd --user unit ..."

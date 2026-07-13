@@ -58,7 +58,18 @@ export async function attachNodeCamera(
   let createdCaptureSource = false;
   let captureSource: CaptureSource;
   if (input.captureSourceId) {
-    captureSource = await prisma.captureSource.findUniqueOrThrow({ where: { id: input.captureSourceId } });
+    // Part 7 reconciliation: an existing source's cameraDevice/cameraName
+    // are display-only fields (actual captures resolve the device via
+    // NodeCameraAssignment -> NodeCamera.devicePath at job-creation time,
+    // kept fresh by every heartbeat's inventory upsert - see
+    // agentProtocol.ts serializeJobForAgent()) - but they must still
+    // reflect the current verified primary device, not a stale path from
+    // whenever this source was first created (e.g. bokchoy's video1 ->
+    // video0 reconciliation).
+    captureSource = await prisma.captureSource.update({
+      where: { id: input.captureSourceId },
+      data: { cameraDevice: camera.devicePath, cameraName: camera.name, cameraStableId: camera.stableId },
+    });
   } else {
     const name = (input.newCaptureSourceName ?? `${node.name} ${camera.name ?? "Camera"}`).trim();
     captureSource = await prisma.captureSource.create({
@@ -118,8 +129,24 @@ export async function attachNodeCamera(
   return { node, camera, captureSource, assignment, createdCaptureSource, createdAssignment: !existing };
 }
 
+/**
+ * The default resolution/format offered when a caller doesn't explicitly
+ * choose one (see camera.ts's runCameraAttachFlow) - prefers MJPEG among
+ * the camera's actually-reported formats (Part 6). The fallback below is
+ * only reached when a camera has genuinely reported no formats at all
+ * (e.g. discovery hasn't completed yet); it is deliberately a
+ * conservative, commonly-supported resolution (Part 5/6: "fall back to a
+ * conservative resolution such as 640x480") rather than an unverified
+ * 1920x1080 guess - the real bokchoy failure: an unverified device with
+ * empty formats fell back to 1920x1080 and the capture failed outright.
+ */
 export function firstSupportedMode(camera: NodeCameraWithFormats): { width: number; height: number; inputFormat: string } {
-  for (const format of camera.formats) {
+  const byMjpegFirst = [...camera.formats].sort((a, b) => {
+    const aScore = /mjp/i.test(a.pixelFormat) ? 0 : 1;
+    const bScore = /mjp/i.test(b.pixelFormat) ? 0 : 1;
+    return aScore - bScore;
+  });
+  for (const format of byMjpegFirst) {
     const resolution = format.resolutions[0];
     if (resolution) {
       return {
@@ -129,5 +156,5 @@ export function firstSupportedMode(camera: NodeCameraWithFormats): { width: numb
       };
     }
   }
-  return { width: 1920, height: 1080, inputFormat: "mjpeg" };
+  return { width: 640, height: 480, inputFormat: "mjpeg" };
 }

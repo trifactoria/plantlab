@@ -22,13 +22,31 @@ def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_c
     cfg = _make_config(tmp_path, fake_coordinator["url"])
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
 
-    fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:1:2:3")
+    fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:1:2:3", verified_capture=True)
     with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
         agent.run_heartbeat_and_inventory(cfg, client)
 
     state = fake_coordinator["state"]
     assert len(state.heartbeats) == 1
     assert state.camera_reports == [[{"stableId": "usb:1:2:3", "devicePath": "/dev/video0", "name": "Test Cam", "available": True, "formats": []}]]
+
+
+def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(tmp_path, fake_coordinator):
+    """Part 5/9: a device with no verified real capture (e.g. a Raspberry Pi's
+    bcm2835-codec-decode/isp hardware helper nodes) must never be reported as
+    available - metadata claiming "Video Capture" support isn't proof, and a
+    nontechnical user's dashboard should never count it as a real camera."""
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+
+    fake_camera = camera.CameraInfo(device="/dev/video10", name="bcm2835-codec-decode", stable_id="platform:bcm2835-codec-decode", verified_capture=False)
+    with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
+        agent.run_heartbeat_and_inventory(cfg, client)
+
+    state = fake_coordinator["state"]
+    assert state.camera_reports == [
+        [{"stableId": "platform:bcm2835-codec-decode", "devicePath": "/dev/video10", "name": "bcm2835-codec-decode", "available": False, "formats": []}]
+    ]
 
 
 def test_poll_and_run_job_captures_a_frame_to_the_durable_spool_before_uploading(tmp_path, fake_coordinator):

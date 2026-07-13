@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readNodeConfig, writeNodeConfig, writeNodeConfigRaw } from "../src/lib/operations/config";
 import { cleanupVisualData, disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
 import { goto } from "./helpers/navigation";
 
@@ -455,4 +456,33 @@ test("guided project crop setup, legacy adoption, and visual-history sync", asyn
   await expect(page.getByText("Visual histories synchronized")).toBeVisible();
   await expect(page.getByText("2 configured")).toBeVisible();
   await expect(page.getByText("0 failures")).toBeVisible();
+});
+
+test.describe("role-aware dashboard", () => {
+  test("a standalone/non-coordinator node shows the local Capture Service panel", async ({ page }) => {
+    const original = await readNodeConfig();
+    await writeNodeConfig("standalone");
+    try {
+      await goto(page, "/");
+      await expect(page.getByRole("heading", { name: "Capture Service" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Coordinator" })).not.toBeVisible();
+      await expect(page.getByRole("heading", { name: "Nodes" })).not.toBeVisible();
+    } finally {
+      if (original) await writeNodeConfigRaw(original);
+    }
+  });
+
+  test("a coordinator node shows Coordinator/Nodes sections instead of the local capture-service card", async ({ page }) => {
+    const original = await readNodeConfig();
+    await writeNodeConfig("coordinator");
+    try {
+      await goto(page, "/");
+      await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Capture Service" })).not.toBeVisible();
+      await expect(page.getByText("Local camera service:")).toBeVisible();
+    } finally {
+      if (original) await writeNodeConfigRaw(original);
+    }
+  });
 });

@@ -1,3 +1,4 @@
+import "../src/lib/suppressExpectedWarnings";
 import { openAsBlob } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
@@ -64,7 +65,11 @@ async function postCameraInventory(coordinatorUrl: string, token: string) {
       stableId: camera.stableId ?? camera.device,
       devicePath: camera.device,
       name: camera.name,
-      available: camera.supportsCapture,
+      // A real, ffmpeg-verified capture (Part 5), not just V4L2 metadata
+      // claiming "Video Capture" support - metadata alone is what let a
+      // Raspberry Pi's non-camera hardware codec/ISP devices (each its own
+      // stable-ID group) show up as if they were selectable cameras.
+      available: camera.verifiedCapture === true,
       formats: camera.formats ?? (await listCameraFormats(camera.device).catch(() => [])),
     })),
   );

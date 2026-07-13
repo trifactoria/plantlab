@@ -58,7 +58,12 @@ def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtoc
                 "stableId": c.stable_id or f"device:{c.device}",
                 "devicePath": c.device,
                 "name": c.name,
-                "available": c.supports_capture,
+                # A real, ffmpeg-verified capture (Part 5), not just V4L2
+                # metadata claiming "Video Capture" support - metadata alone
+                # is what let a Raspberry Pi's non-camera hardware codec/ISP
+                # devices (each its own stable-ID group) show up as if they
+                # were selectable cameras.
+                "available": c.verified_capture is True,
                 "formats": [],
             }
             for c in cameras

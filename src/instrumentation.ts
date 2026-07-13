@@ -27,10 +27,26 @@
  * should keep importing the shared, canonical paths.server.ts - only this
  * one file is restricted this way.
  */
+// Inlined from src/lib/suppressExpectedWarnings.ts rather than imported -
+// see the file-level comment above on why this file cannot import any
+// local module, even a dependency-free one. Keep these two in sync.
+const EXPECTED_SQLITE_WARNING = /SQLite is an experimental feature/i;
+
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") {
     return;
   }
+
+  const originalEmitWarning = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+    const message = typeof warning === "string" ? warning : warning.message;
+    const type = typeof rest[0] === "string" ? rest[0] : undefined;
+    const isExperimentalOrUntyped = type === undefined || type === "ExperimentalWarning";
+    if (isExperimentalOrUntyped && EXPECTED_SQLITE_WARNING.test(message)) {
+      return;
+    }
+    return (originalEmitWarning as (...args: unknown[]) => void)(warning, ...rest);
+  }) as typeof process.emitWarning;
 
   try {
     const override = process.env.PLANTLAB_ROOT_DIR;

@@ -144,7 +144,23 @@ camera_status="$(systemctl --user is-active plantlab-camera.service 2>/dev/null 
 agent_status="$(systemctl --user is-active plantlab-agent.service 2>/dev/null || true)"
 camera_json="[]"
 if [ "$v4l2" = "true" ] && [ -n "$repo" ]; then
-  camera_json="$(cd "$repo" && node --import tsx -e "import('./src/lib/v4l2.ts').then(async m => console.log(JSON.stringify(await m.discoverLocalCameras()))).catch(() => console.log('[]'))" 2>/dev/null || printf '[]')"
+  # A dynamic import("./src/lib/v4l2.ts") inside a plain "node -e" eval does
+  # not reliably resolve through tsx's loader (empirically: it silently
+  # returns only a "default" export, so discoverLocalCameras is never
+  # actually called and this always fell back to "[]") - a real file with a
+  # static import, run inside the repo directory so the relative import
+  # resolves correctly, does not have this problem.
+  camera_probe_script="$repo/.plantlab-camera-probe-$$.mjs"
+  cat > "$camera_probe_script" <<'CAMERA_PROBE_EOF'
+import { discoverLocalCameras } from "./src/lib/v4l2.ts";
+try {
+  console.log(JSON.stringify(await discoverLocalCameras()));
+} catch {
+  console.log("[]");
+}
+CAMERA_PROBE_EOF
+  camera_json="$(cd "$repo" && node --import tsx "$camera_probe_script" 2>/dev/null || printf '[]')"
+  rm -f "$camera_probe_script"
 fi
 printf '{'
 printf '"remoteHostname":"%s",' "$(json_escape "$(hostname 2>/dev/null || true)")"

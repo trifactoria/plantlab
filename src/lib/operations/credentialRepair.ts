@@ -38,9 +38,23 @@ if (typeof window !== "undefined") {
 export const CREDENTIAL_PROBE_STATUSES = ["missing", "empty", "var-missing", "malformed", "rejected", "valid", "unknown"] as const;
 export type CredentialProbeStatus = (typeof CREDENTIAL_PROBE_STATUSES)[number];
 
+/**
+ * The specific network-layer reason a probe couldn't be completed, when
+ * status is "unknown" for a network reason (never for the file-based
+ * statuses) - Part 4's "Doctor should distinguish: DNS resolution failure,
+ * TCP connection failure, coordinator endpoint mismatch ... service
+ * crash". Kept separate from `status` deliberately: `status` drives the
+ * rotate/don't-rotate decision (see INVALID_STATUSES below - a network
+ * problem must never look like an invalid credential and trigger
+ * rotation), `networkIssue` is purely for diagnostic display.
+ */
+export const NETWORK_ISSUES = ["dns", "tcp", "timeout", "endpoint-mismatch", "service-error"] as const;
+export type NetworkIssue = (typeof NETWORK_ISSUES)[number];
+
 export type CredentialProbeResult = {
   status: CredentialProbeStatus;
   detail: string;
+  networkIssue?: NetworkIssue;
 };
 
 /**
@@ -50,6 +64,19 @@ export type CredentialProbeResult = {
  * used for one curl call on the remote machine, and is never printed to
  * stdout/stderr or returned to this process. Only one of
  * CREDENTIAL_PROBE_STATUSES comes back.
+ *
+ * Classifies the *network* outcome (DNS/TCP/timeout/wrong endpoint/
+ * coordinator error) separately from an actual credential rejection
+ * (HTTP 401) - the real greenhouse-zero bug: a coordinator URL that fails
+ * DNS resolution was previously indistinguishable from a genuinely revoked
+ * credential, so attach kept rotating credentials that were never the
+ * problem while waiting for a heartbeat that could never arrive.
+ *
+ * Deliberately `set -u` only (never `set -e`) in the remote script - under
+ * `set -e`, a failing command inside `var="$(cmd)"` aborts the whole
+ * script in dash (Raspberry Pi OS Lite's /bin/sh) before the next line can
+ * inspect `$?`, verified empirically against a real Pi. See
+ * coordinatorDiscovery.ts's identical fix for the full writeup.
  */
 export async function probeRemoteCredential(input: {
   sshHost: string;
@@ -57,7 +84,7 @@ export async function probeRemoteCredential(input: {
   remoteUser?: string | null;
 }): Promise<CredentialProbeResult> {
   const script = String.raw`
-set -eu
+set -u
 home_dir="${"${HOME:-}"}"
 if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
 env_path="$home_dir/.config/plantlab/agent.env"
@@ -76,10 +103,24 @@ esac
 
 if ! command -v curl >/dev/null 2>&1; then echo "NOCURL"; exit 0; fi
 
-if curl -fsS --max-time 8 -X POST -H "authorization: Bearer $value" -H "content-type: application/json" "$coordinator_url/api/agents/credential-check" >/dev/null 2>&1; then
+err_file="$(mktemp)"
+curl_status=0
+http_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST -H "authorization: Bearer $value" -H "content-type: application/json" "$coordinator_url/api/agents/credential-check" 2>"$err_file")" || curl_status=$?
+rm -f "$err_file"
+
+if [ "$http_code" = "200" ]; then
   echo "VALID"
-else
+elif [ "$http_code" = "401" ]; then
   echo "REJECTED"
+elif [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
+  echo "ENDPOINT_MISMATCH:$http_code"
+else
+  case "$curl_status" in
+    6) echo "DNS_FAILURE" ;;
+    7) echo "TCP_FAILURE" ;;
+    28) echo "TIMEOUT" ;;
+    *) echo "NETWORK_UNKNOWN:$curl_status" ;;
+  esac
 fi
 `;
 
@@ -90,21 +131,50 @@ fi
   }));
 
   const line = result.stdout.trim().split("\n").pop()?.trim() ?? "";
-  switch (line) {
-    case "MISSING":
+  switch (true) {
+    case line === "MISSING":
       return { status: "missing", detail: "Credential file is missing on the remote node." };
-    case "EMPTY":
+    case line === "EMPTY":
       return { status: "empty", detail: "Credential file exists but is empty." };
-    case "VAR_MISSING":
+    case line === "VAR_MISSING":
       return { status: "var-missing", detail: "Credential file exists but does not set PLANTLAB_NODE_CREDENTIAL." };
-    case "MALFORMED":
+    case line === "MALFORMED":
       return { status: "malformed", detail: "Credential file's value does not look like a valid PlantLab node credential." };
-    case "VALID":
+    case line === "VALID":
       return { status: "valid", detail: "Credential authenticated successfully against the coordinator." };
-    case "REJECTED":
+    case line === "REJECTED":
       return { status: "rejected", detail: "Credential was rejected by the coordinator (revoked, rotated, or never matched)." };
-    case "NOCURL":
+    case line === "NOCURL":
       return { status: "unknown", detail: "curl is not installed on the remote node - credential validity could not be verified." };
+    case line === "DNS_FAILURE":
+      return {
+        status: "unknown",
+        detail: `Could not resolve the coordinator hostname in "${input.coordinatorUrl}" - this is a DNS/networking problem, not an invalid credential.`,
+        networkIssue: "dns",
+      };
+    case line === "TCP_FAILURE":
+      return {
+        status: "unknown",
+        detail: `Could not connect to "${input.coordinatorUrl}" (connection refused) - this is a networking problem, not an invalid credential.`,
+        networkIssue: "tcp",
+      };
+    case line === "TIMEOUT":
+      return {
+        status: "unknown",
+        detail: `Connection to "${input.coordinatorUrl}" timed out - this is a networking problem, not an invalid credential.`,
+        networkIssue: "timeout",
+      };
+    case line.startsWith("ENDPOINT_MISMATCH:"): {
+      const httpCode = line.split(":")[1] ?? "";
+      const isServerError = httpCode.startsWith("5");
+      return {
+        status: "unknown",
+        detail: isServerError
+          ? `"${input.coordinatorUrl}" responded with HTTP ${httpCode} - the coordinator app may have crashed or be unhealthy.`
+          : `"${input.coordinatorUrl}" responded with HTTP ${httpCode}, not a PlantLab coordinator - check the URL/port point at the right app.`,
+        networkIssue: isServerError ? "service-error" : "endpoint-mismatch",
+      };
+    }
     default:
       return {
         status: "unknown",

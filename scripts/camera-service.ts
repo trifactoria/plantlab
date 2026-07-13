@@ -1,3 +1,4 @@
+import "../src/lib/suppressExpectedWarnings";
 import { captureProjectPhoto } from "../src/lib/camera";
 import { CaptureScheduler, consoleLogger } from "../src/lib/captureService";
 import { CaptureSourceScheduler } from "../src/lib/captureSourceService";

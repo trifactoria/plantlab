@@ -23,7 +23,7 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
-const { applyCameraControls, groupPhysicalCameras, parseControlsOutput } = await import("../../src/lib/v4l2");
+const { applyCameraControls, capsIndicateVideoCapture, groupPhysicalCameras, parseControlsOutput } = await import("../../src/lib/v4l2");
 
 const SAMPLE_OUTPUT = `
                      brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
@@ -167,5 +167,85 @@ describe("groupPhysicalCameras", () => {
     expect(grouped).toHaveLength(1);
     expect(grouped[0].device).toBe("/dev/video0");
     expect(grouped[0].alternateDevices).toEqual([{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }]);
+  });
+});
+
+describe("capsIndicateVideoCapture", () => {
+  // All three fixtures below are real `v4l2-ctl -d <device> --all` output
+  // recorded from actual hardware (bokchoy's Integrated_Webcam_HD and
+  // greenhouse-zero's Raspberry Pi ISP/codec devices), not hand-written -
+  // this is the exact text that drove the real onboarding bugs being fixed.
+
+  it("recognizes a real capture device (bokchoy /dev/video0)", () => {
+    const output = [
+      "Driver Info:",
+      "\tDriver name      : uvcvideo",
+      "\tCard type        : webcam 1080P: webcam 1080P",
+      "\tBus info         : usb-20980000.usb-1.3",
+      "\tDriver version   : 6.18.34",
+      "\tCapabilities     : 0x84a00001",
+      "\t\tVideo Capture",
+      "\t\tMetadata Capture",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+      "\t\tDevice Capabilities",
+      "\tDevice Caps      : 0x04200001",
+      "\t\tVideo Capture",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+    ].join("\n");
+
+    expect(capsIndicateVideoCapture(output)).toBe(true);
+  });
+
+  it("rejects a metadata-only node whose aggregate Capabilities block misleadingly lists Video Capture (bokchoy /dev/video1)", () => {
+    const output = [
+      "Driver Info:",
+      "\tDriver name      : uvcvideo",
+      "\tCard type        : Integrated_Webcam_HD: Integrate",
+      "\tBus info         : usb-0000:00:14.0-5",
+      "\tDriver version   : 7.0.6",
+      "\tCapabilities     : 0x84a00001",
+      "\t\tVideo Capture",
+      "\t\tMetadata Capture",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+      "\t\tDevice Capabilities",
+      "\tDevice Caps      : 0x04a00000",
+      "\t\tMetadata Capture",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+    ].join("\n");
+
+    expect(capsIndicateVideoCapture(output)).toBe(false);
+  });
+
+  it("rejects a memory-to-memory hardware codec device even though its format section header contains the literal substring 'Video Capture' (greenhouse-zero bcm2835-codec-decode)", () => {
+    const output = [
+      "Driver Info:",
+      "\tDriver name      : bcm2835-codec",
+      "\tCard type        : bcm2835-codec-decode",
+      "\tBus info         : platform:bcm2835-codec",
+      "\tDriver version   : 6.18.34",
+      "\tCapabilities     : 0x84204000",
+      "\t\tVideo Memory-to-Memory Multiplanar",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+      "\t\tDevice Capabilities",
+      "\tDevice Caps      : 0x04204000",
+      "\t\tVideo Memory-to-Memory Multiplanar",
+      "\t\tStreaming",
+      "\t\tExtended Pix Format",
+      "Priority: 2",
+      "Format Video Capture Multiplanar:",
+      "\tWidth/Height      : 32/32",
+      "\tPixel Format      : 'YU12' (Planar YUV 4:2:0)",
+    ].join("\n");
+
+    expect(capsIndicateVideoCapture(output)).toBe(false);
+  });
+
+  it("returns false when neither a Device Caps nor Capabilities block is present", () => {
+    expect(capsIndicateVideoCapture("Driver Info:\n\tDriver name      : nonsense\n")).toBe(false);
   });
 });

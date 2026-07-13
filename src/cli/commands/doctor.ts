@@ -4,9 +4,10 @@ import { formatBytes, runDoctorReport, runStorageAudit, applyStorageRemediation 
 import { checkMigrationStatus } from "../../lib/operations/migrations";
 import { computeNodeStatus, hasActiveCredential } from "../../lib/operations/nodeCredentials";
 import { probeRemoteCredential, rotateAndInstallCredential } from "../../lib/operations/credentialRepair";
+import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
 import { diagnoseEdgeAgent, type EdgeAgentDiagnostics } from "../../lib/operations/edgeAgentDiagnostics";
+import { verifyEdgeCommand } from "../../lib/operations/edgeAgentInstall";
 import {
-  defaultCoordinatorUrl,
   diagnoseRemoteAgent,
   inspectRemoteHost,
   type RemoteAgentDiagnostics,
@@ -184,6 +185,28 @@ async function loadCoordinatorRecord(sshHost: string) {
   return { node, activeCredential, status: computeNodeStatus(node, activeCredential) };
 }
 
+/**
+ * Doctor's coordinator-URL check (Part 4): tests the node's *currently
+ * configured* URL as the first discovery candidate (see
+ * coordinatorDiscovery.ts - an explicit candidate is always tried first,
+ * then other reachable addresses), so doctor can tell the difference
+ * between "the configured URL genuinely works" and "the configured URL is
+ * broken, but here's one that works" - never silently substitutes a
+ * guessed default the way the old `|| defaultCoordinatorUrl()` fallback
+ * did. Read-only - `--fix` decides separately whether to write anything.
+ */
+async function resolveAndVerifyCoordinatorUrl(sshHost: string, configuredUrl: string | null) {
+  const discovery = await discoverCoordinatorUrl(sshHost, { explicitUrl: configuredUrl });
+  const configuredAttempt = configuredUrl ? discovery.attempts.find((attempt) => attempt.url === configuredUrl) : undefined;
+  return {
+    configuredUrl,
+    configuredReachable: configuredAttempt?.reachable ?? false,
+    configuredDetail: configuredAttempt?.detail ?? null,
+    selected: discovery.selected,
+    attempts: discovery.attempts,
+  };
+}
+
 async function queryRemoteAgentUnitState(sshHost: string) {
   const script = buildQueryUnitStatesScript(["plantlab-agent.service", "plantlab-web.service", "plantlab-camera.service"]);
   const result = await runRemoteShell(sshHost, script).catch(() => null);
@@ -241,14 +264,23 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
       .map((service) => ({ service, unit: SERVICE_UNITS[service] }))
       .filter(({ unit }) => unitStates.find((s) => s.id === unit)?.activeState === "active");
 
-    const coordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || defaultCoordinatorUrl();
+    // Never silently guess a default (Part 1/4) - test whatever is
+    // currently configured, discover a working replacement if it isn't
+    // reachable, and never let a network problem masquerade as an invalid
+    // credential (see coordinatorDiscovery.ts / credentialRepair.ts).
+    const configuredCoordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || null;
+    const coordinatorCheck = await resolveAndVerifyCoordinatorUrl(sshHost, configuredCoordinatorUrl);
 
-    // Real authenticated probe against the coordinator (Part 1), not just
-    // file existence/permissions - see credentialRepair.ts for why (the
-    // real bokchoy failure: a credential file existed with correct
-    // permissions but unusable content).
-    const probe = await probeRemoteCredential({ sshHost, coordinatorUrl, remoteUser: inspection.remoteUser });
-    const needsCredentialRepair = probe.status !== "valid" && probe.status !== "unknown";
+    let probe: Awaited<ReturnType<typeof probeRemoteCredential>> | null = null;
+    if (coordinatorCheck.selected) {
+      // Real authenticated probe against a coordinator URL that has
+      // already been proven reachable (Part 1), not just file
+      // existence/permissions - see credentialRepair.ts for why (the real
+      // bokchoy failure: a credential file existed with correct
+      // permissions but unusable content).
+      probe = await probeRemoteCredential({ sshHost, coordinatorUrl: coordinatorCheck.selected, remoteUser: inspection.remoteUser });
+    }
+    const needsCredentialRepair = probe !== null && probe.status !== "valid" && probe.status !== "unknown";
 
     if (agentUnit && isMaskedState(agentUnit)) {
       problems.push(`Required unit plantlab-agent.service is masked (state: ${classifyUnitState(agentUnit)}).`);
@@ -259,15 +291,35 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
       repairs.push("Rewrite camera-node configuration.");
     }
     if (coordinatorRecord) {
-      problems.push(`Coordinator enrollment exists: ${coordinatorRecord.node.role} (${coordinatorRecord.status}).`);
+      // Informational, not a problem: an enrollment existing (even an
+      // unhealthy one) is normal and expected once a node has ever
+      // attached. The real "is this node okay" signal is the status check
+      // below - unconditionally treating "an enrollment exists" as a
+      // problem meant a perfectly healthy, active node always showed
+      // "Problems detected" (Part 11).
+      console.log(`Coordinator enrollment: ${coordinatorRecord.node.role} (${coordinatorRecord.status}).`);
     } else {
       problems.push("No coordinator enrollment record exists for this node yet.");
       repairs.push("Register this node with the coordinator.");
     }
-    if (needsCredentialRepair) {
+    if (!configuredCoordinatorUrl) {
+      problems.push("No coordinator URL is configured on this node.");
+      repairs.push("Discover and write a reachable coordinator URL.");
+    } else if (!coordinatorCheck.configuredReachable) {
+      problems.push(`Configured coordinator URL "${configuredCoordinatorUrl}" is not reachable from this node: ${coordinatorCheck.configuredDetail ?? "unknown reason"}.`);
+      repairs.push(
+        coordinatorCheck.selected ? `Update the coordinator URL to ${coordinatorCheck.selected} (verified reachable).` : "Discover and write a reachable coordinator URL.",
+      );
+    }
+    if (!coordinatorCheck.selected) {
+      // Deliberately no "Rotate node credential" recommendation here (Part
+      // 4) - with no reachable coordinator address at all, the credential
+      // cannot even be tested, so there is no evidence it's the problem.
+      problems.push("No reachable coordinator address could be found from this node - resolve network/Tailscale connectivity before anything else.");
+    } else if (needsCredentialRepair && probe) {
       problems.push(`Agent credential is not demonstrably valid: ${probe.detail}`);
       repairs.push("Rotate node credential.");
-    } else if (probe.status === "unknown") {
+    } else if (probe?.status === "unknown") {
       problems.push(`Agent credential validity could not be verified: ${probe.detail}`);
     }
     if (!diagnostics?.spoolWritable) {
@@ -309,6 +361,17 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
       return;
     }
 
+    if (!coordinatorCheck.selected) {
+      // Stop before rotating credentials or waiting for a heartbeat that
+      // can never arrive (Part 2) - there is nothing else useful --fix can
+      // do until this node can reach a coordinator at all.
+      console.error("");
+      console.error(`Cannot repair: no reachable coordinator address was found from ${sshHost}.`);
+      console.error("Check the coordinator's web service and that this node shares a network (or Tailscale tailnet) with it.");
+      process.exitCode = 1;
+      return;
+    }
+
     console.log("");
 
     // convergeNodeRole() (invoked inside rotateAndInstallCredential())
@@ -318,7 +381,9 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
     // asked individually for visibility and control per DEPLOYMENT.md
     // "doctor --fix checklist", but any "yes" triggers the same underlying
     // convergence.
+    const urlNeedsRewrite = coordinatorCheck.selected !== configuredCoordinatorUrl;
     const confirmations = [
+      urlNeedsRewrite ? await confirmOrYes(`Update coordinator URL to ${coordinatorCheck.selected}? [Y/n] `, options.yes) : false,
       await confirmOrYes("Unmask agent service? [Y/n] ", options.yes),
       await confirmOrYes("Rewrite camera-node configuration? [Y/n] ", options.yes),
       await confirmOrYes("Create/fix spool directory? [Y/n] ", options.yes),
@@ -335,8 +400,8 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
       return;
     }
 
-    const rotate = needsCredentialRepair && confirmations[6];
-    if (rotate) {
+    const rotate = needsCredentialRepair && confirmations[7];
+    if (rotate && probe) {
       console.log("");
       console.log(`Existing node credential is ${probe.status === "missing" ? "missing" : probe.status === "rejected" ? "rejected by the coordinator" : "not valid"}.`);
       console.log("Rotating credential automatically...");
@@ -345,7 +410,7 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
     const repair = await rotateAndInstallCredential(prisma, {
       sshHost,
       repoPath,
-      coordinatorUrl,
+      coordinatorUrl: coordinatorCheck.selected,
       role: intendedRole,
       runtime: "node",
       nodeName: sshHost,
@@ -358,11 +423,11 @@ async function runRemoteDoctor(sshHost: string, options: { fix?: boolean; yes?: 
         operatingSystem: inspection.operatingSystem,
         architecture: inspection.architecture,
         softwareVersion: inspection.plantLabVersion,
-        coordinatorUrl,
+        coordinatorUrl: coordinatorCheck.selected,
       },
       waitForHeartbeat,
       rotate,
-      forceRestart: confirmations[7],
+      forceRestart: confirmations[8],
     });
 
     for (const step of repair.steps) {
@@ -435,10 +500,14 @@ async function runEdgeAgentDoctor(
   } catch (error) {
     problems.push(`Edge agent diagnostics failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const coordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || defaultCoordinatorUrl();
+  const configuredCoordinatorUrl = diagnostics?.coordinatorUrl || inspection.coordinatorUrl || coordinatorRecord?.node.coordinatorUrl || null;
+  const coordinatorCheck = await resolveAndVerifyCoordinatorUrl(sshHost, configuredCoordinatorUrl);
 
-  const probe = await probeRemoteCredential({ sshHost, coordinatorUrl, remoteUser: inspection.remoteUser });
-  const needsCredentialRepair = probe.status !== "valid" && probe.status !== "unknown";
+  let probe: Awaited<ReturnType<typeof probeRemoteCredential>> | null = null;
+  if (coordinatorCheck.selected) {
+    probe = await probeRemoteCredential({ sshHost, coordinatorUrl: coordinatorCheck.selected, remoteUser: inspection.remoteUser });
+  }
+  const needsCredentialRepair = probe !== null && probe.status !== "valid" && probe.status !== "unknown";
 
   if (!diagnostics?.edgeAgentDirExists) {
     problems.push("~/plantlab-edge-agent was not found on the remote node.");
@@ -452,16 +521,28 @@ async function runEdgeAgentDoctor(
     if (!diagnostics.coordinatorUrl) problems.push("coordinatorUrl is missing from edge-agent.json.");
     repairs.push("Rewrite edge-agent configuration.");
   }
-  if (coordinatorRecord) {
-    problems.push(`Coordinator enrollment exists: ${coordinatorRecord.node.role} (${coordinatorRecord.status}), agent version ${coordinatorRecord.node.softwareVersion ?? "(unknown)"}, protocol ${coordinatorRecord.node.protocolVersion ?? "(unknown)"}.`);
-  } else {
+  if (!coordinatorRecord) {
     problems.push("No coordinator enrollment record exists for this node yet.");
     repairs.push("Register this node with the coordinator.");
   }
-  if (needsCredentialRepair) {
+  if (!configuredCoordinatorUrl) {
+    problems.push("No coordinator URL is configured on this node.");
+    repairs.push("Discover and write a reachable coordinator URL.");
+  } else if (!coordinatorCheck.configuredReachable) {
+    problems.push(`Configured coordinator URL "${configuredCoordinatorUrl}" is not reachable from this node: ${coordinatorCheck.configuredDetail ?? "unknown reason"}.`);
+    repairs.push(
+      coordinatorCheck.selected ? `Update the coordinator URL to ${coordinatorCheck.selected} (verified reachable).` : "Discover and write a reachable coordinator URL.",
+    );
+  }
+  if (!coordinatorCheck.selected) {
+    // No "Rotate node credential" recommendation here (Part 4) - the exact
+    // greenhouse-zero bug this fixes: a broken coordinator URL must never
+    // be treated as evidence the credential is bad.
+    problems.push("No reachable coordinator address could be found from this node - resolve network/Tailscale connectivity before anything else.");
+  } else if (needsCredentialRepair && probe) {
     problems.push(`Agent credential is not demonstrably valid: ${probe.detail}`);
     repairs.push("Rotate node credential.");
-  } else if (probe.status === "unknown") {
+  } else if (probe?.status === "unknown") {
     problems.push(`Agent credential validity could not be verified: ${probe.detail}`);
   }
   if (diagnostics && !diagnostics.spoolWritable) {
@@ -483,16 +564,32 @@ async function runEdgeAgentDoctor(
   }
 
   console.log(`Runtime: python-edge`);
+  if (coordinatorRecord) {
+    // Informational, not a problem - see the camera-node branch above for
+    // why an enrollment existing (even an unhealthy one) must not itself
+    // count as "Problems detected" (Part 11).
+    console.log(
+      `Coordinator enrollment: ${coordinatorRecord.node.role} (${coordinatorRecord.status}), agent version ${coordinatorRecord.node.softwareVersion ?? "(unknown)"}, protocol ${coordinatorRecord.node.protocolVersion ?? "(unknown)"}.`,
+    );
+  }
   if (diagnostics) {
     console.log(`Python: ${diagnostics.pythonVersion ?? "(unknown)"}`);
     console.log(`Config: ${diagnostics.configPath ?? "(unknown)"}`);
-    console.log(`Coordinator URL: ${diagnostics.coordinatorUrl ?? "(missing)"}`);
-    console.log(`Credential: ${diagnostics.credentialHasVariable ? "present" : "missing"}${diagnostics.credentialMode ? ` (${diagnostics.credentialMode})` : ""}`);
+    console.log(
+      `Coordinator URL: ${diagnostics.coordinatorUrl ?? "(missing)"}${configuredCoordinatorUrl ? ` (${coordinatorCheck.configuredReachable ? "resolves, reachable" : `NOT reachable: ${coordinatorCheck.configuredDetail ?? "unknown reason"}`})` : ""}`,
+    );
+    console.log(`Credential: ${diagnostics.credentialHasVariable ? "present" : "missing"}${diagnostics.credentialMode ? ` (${diagnostics.credentialMode})` : ""}${probe ? `, ${probe.status}` : ""}`);
     console.log(`Service: ${diagnostics.activeState ?? diagnostics.unitStatus ?? "(unknown)"}${diagnostics.subState ? ` (${diagnostics.subState})` : ""}${diagnostics.restartCount !== null ? `, restarts ${diagnostics.restartCount}` : ""}`);
     if (diagnostics.latestException) console.log(`Latest failure: ${diagnostics.latestException}`);
     console.log(`Disk free: ${diagnostics.diskFree ?? "(unknown)"}`);
     console.log(`Memory: ${diagnostics.memoryTotalMb !== null ? `${diagnostics.memoryTotalMb} MB` : "(unknown)"}${diagnostics.memoryAvailableMb !== null ? ` (${diagnostics.memoryAvailableMb} MB available)` : ""}`);
     console.log(`Spool: ${diagnostics.spoolRoot ?? "(unknown)"}${diagnostics.spoolSizeBytes !== null ? ` (${formatBytes(diagnostics.spoolSizeBytes)})` : ""}`);
+  }
+  const edgeCommand = await verifyEdgeCommand(sshHost, inspection.remoteUser).catch(() => null);
+  if (edgeCommand) {
+    console.log(
+      `plantlab-edge command: ${edgeCommand.resolvesInLoginShell ? `on PATH (${edgeCommand.resolvedPath})` : edgeCommand.wrapperExists ? `installed but not on PATH - run ${edgeCommand.wrapperPath} directly` : "not installed"}`,
+    );
   }
   console.log("");
 
@@ -519,18 +616,30 @@ async function runEdgeAgentDoctor(
     return;
   }
 
+  if (!coordinatorCheck.selected) {
+    // Stop before rotating credentials or waiting for a heartbeat that can
+    // never arrive (Part 2) - the exact greenhouse-zero bug.
+    console.error("");
+    console.error(`Cannot repair: no reachable coordinator address was found from ${sshHost}.`);
+    console.error("Check the coordinator's web service and that this node shares a network (or Tailscale tailnet) with it.");
+    process.exitCode = 1;
+    return;
+  }
+
   console.log("");
+  const urlNeedsRewrite = coordinatorCheck.selected !== configuredCoordinatorUrl;
+  const urlConfirm = urlNeedsRewrite ? await confirmOrYes(`Update coordinator URL to ${coordinatorCheck.selected}? [Y/n] `, options.yes) : false;
   const rotateConfirm = needsCredentialRepair ? await confirmOrYes("Rotate node credential? [Y/n] ", options.yes) : false;
   const restartConfirm = await confirmOrYes("Restart edge agent? [Y/n] ", options.yes);
   const waitForHeartbeat = await confirmOrYes("Wait for heartbeat? [Y/n] ", options.yes);
 
-  if (!rotateConfirm && !restartConfirm) {
+  if (!urlConfirm && !rotateConfirm && !restartConfirm) {
     console.log("No repairs applied.");
     return;
   }
 
   const rotate = needsCredentialRepair && rotateConfirm;
-  if (rotate) {
+  if (rotate && probe) {
     console.log("");
     console.log(`Existing node credential is ${probe.status === "missing" ? "missing" : probe.status === "rejected" ? "rejected by the coordinator" : "not valid"}.`);
     console.log("Rotating credential automatically...");
@@ -540,7 +649,7 @@ async function runEdgeAgentDoctor(
   const repair = await rotateAndInstallCredential(prisma, {
     sshHost,
     repoPath: "~/plantlab-edge-agent",
-    coordinatorUrl,
+    coordinatorUrl: coordinatorCheck.selected,
     role: fallbackRole,
     runtime: "python-edge",
     nodeName: sshHost,
@@ -552,7 +661,7 @@ async function runEdgeAgentDoctor(
       operatingSystem: inspection.operatingSystem,
       architecture: inspection.architecture,
       softwareVersion: coordinatorRecord?.node.softwareVersion ?? null,
-      coordinatorUrl,
+      coordinatorUrl: coordinatorCheck.selected,
     },
     waitForHeartbeat,
     rotate,

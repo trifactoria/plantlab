@@ -1,3 +1,4 @@
+import "../lib/suppressExpectedWarnings";
 import { Command } from "commander";
 import packageJson from "../../package.json";
 import { registerBackupCommand } from "./commands/backup";

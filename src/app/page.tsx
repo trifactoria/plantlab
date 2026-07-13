@@ -1,8 +1,11 @@
 import Link from "next/link";
+import { CoordinatorStatusPanel } from "@/components/CoordinatorStatusPanel";
 import { ProjectForm } from "@/components/ProjectForm";
 import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
 import { formatDateTime } from "@/lib/format";
 import { localCameraHardwareEnabled } from "@/lib/localOnly";
+import { readNodeConfig } from "@/lib/operations/config";
+import { getCoordinatorDashboardData } from "@/lib/operations/coordinatorDashboard";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +20,9 @@ export default async function HomePage() {
     },
   });
   const canManageLocally = localCameraHardwareEnabled();
+  const nodeConfig = await readNodeConfig();
+  const isCoordinator = nodeConfig?.role === "coordinator";
+  const coordinatorData = isCoordinator ? await getCoordinatorDashboardData(prisma) : null;
 
   return (
     <main className="min-h-screen">
@@ -34,7 +40,13 @@ export default async function HomePage() {
         </div>
       </header>
 
-      {canManageLocally ? (
+      {isCoordinator && coordinatorData ? (
+        <section className="section pb-0">
+          <div className="container">
+            <CoordinatorStatusPanel data={coordinatorData} localCameraServiceEnabled={canManageLocally} />
+          </div>
+        </section>
+      ) : canManageLocally ? (
         <section className="section pb-0">
           <div className="container">
             <ServiceStatusPanel />

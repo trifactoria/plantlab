@@ -65,6 +65,54 @@ export async function runEdgeAgentInstall(sshHost: string, input: EdgeAgentInsta
   return runRemoteShell(sshHost, script, [], { timeoutMs: 120_000 });
 }
 
+export type EdgeCommandVerification = {
+  /** True only if `command -v plantlab-edge` resolves in a *real* fresh login shell (bash -l) - a plain non-interactive `ssh host cmd` never sources ~/.profile/~/.bashrc, so that alone is never used as evidence either way (Part 3). */
+  resolvesInLoginShell: boolean;
+  /** The absolute path a login shell resolves `plantlab-edge` to, when it does. */
+  resolvedPath: string | null;
+  /** The install location the wrapper script should exist at regardless of PATH - always reported so the coordinator can show it even when PATH resolution fails. */
+  wrapperPath: string;
+  wrapperExists: boolean;
+};
+
+/**
+ * Verifies the `plantlab-edge` command is actually usable after install -
+ * Part 3: "Coordinator-side attachment must verify the edge command after
+ * installation and display its exact path." Checks the wrapper file
+ * exists on disk *and* separately whether it resolves via PATH in a real
+ * login shell (`bash -lc` - not just a plain non-interactive SSH command,
+ * which never sources shell startup files regardless of PATH edits).
+ */
+export async function verifyEdgeCommand(sshHost: string, remoteUser?: string | null): Promise<EdgeCommandVerification> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+wrapper_path="$home_dir/.local/bin/plantlab-edge"
+wrapper_exists=false
+[ -x "$wrapper_path" ] && wrapper_exists=true
+resolved=""
+if command -v bash >/dev/null 2>&1; then
+  resolved="$(bash -lc 'command -v plantlab-edge' 2>/dev/null || true)"
+fi
+printf 'WRAPPER_PATH=%s\n' "$wrapper_path"
+printf 'WRAPPER_EXISTS=%s\n' "$wrapper_exists"
+printf 'RESOLVED=%s\n' "$resolved"
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 }).catch(() => ({ stdout: "", stderr: "", status: 255 }));
+  const wrapperPathMatch = /^WRAPPER_PATH=(.*)$/m.exec(result.stdout);
+  const wrapperExistsMatch = /^WRAPPER_EXISTS=(.*)$/m.exec(result.stdout);
+  const resolvedMatch = /^RESOLVED=(.*)$/m.exec(result.stdout);
+  const resolvedPath = resolvedMatch?.[1]?.trim() || null;
+  return {
+    resolvesInLoginShell: Boolean(resolvedPath),
+    resolvedPath,
+    wrapperPath: wrapperPathMatch?.[1]?.trim() || `/home/${remoteUser || sshHost}/.local/bin/plantlab-edge`,
+    wrapperExists: wrapperExistsMatch?.[1]?.trim() === "true",
+  };
+}
+
 export type EdgeConfigConvergenceResult = {
   ok: boolean;
   status: "UNCHANGED" | "UPDATED" | "FAILED";

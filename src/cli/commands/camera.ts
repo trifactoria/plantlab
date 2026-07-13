@@ -1,5 +1,13 @@
 import type { Command } from "commander";
 import { createInterface } from "node:readline/promises";
+import {
+  type CaptureSourceInspection,
+  deleteEmptyCaptureSource,
+  describeReasons,
+  findSuspiciousCaptureSources,
+  inspectCaptureSourceByIdOrName,
+  renameCaptureSource,
+} from "../../lib/operations/captureSourceDoctor";
 import { runCameraTestCapture } from "../../lib/operations/doctor";
 import { attachNodeCamera, firstSupportedMode, listNodeCameras } from "../../lib/operations/nodeCameras";
 import { prisma } from "../../lib/prisma";
@@ -61,6 +69,57 @@ async function chooseIndex(prompt: string, count: number, fallback = 1, askFn = 
   }
 }
 
+function printCaptureSourceInspection(inspection: CaptureSourceInspection): void {
+  console.log(`"${inspection.source.name}" (id: ${inspection.source.id})`);
+  console.log(`  Device: ${inspection.source.cameraDevice}`);
+  console.log(`  Captures: ${inspection.captureCount}`);
+  console.log(`  Project viewports: ${inspection.viewportCount}`);
+  console.log(`  Created: ${inspection.source.createdAt.toISOString()}`);
+  if (inspection.suspicious) {
+    console.log("  Looks accidental or unused:");
+    for (const reason of describeReasons(inspection.reasons)) {
+      console.log(`    - ${reason}`);
+    }
+  } else {
+    console.log("  Does not look accidental or unused.");
+  }
+}
+
+/**
+ * Never runs automatically - always presents Rename / Delete-if-empty /
+ * Leave-unchanged and requires an explicit interactive choice (Part 8).
+ */
+async function guideCaptureSourceAction(inspection: CaptureSourceInspection, askFn: (question: string) => Promise<string>): Promise<void> {
+  console.log("\nWhat would you like to do?");
+  console.log("1) Rename");
+  console.log("2) Delete (only if empty)");
+  console.log("3) Leave unchanged");
+  const choice = await chooseIndex("Choice", 3, 3, askFn);
+  if (choice === 0) {
+    const name = await askFn(`New name [${inspection.source.name}]: `);
+    if (!name.trim()) {
+      console.log("No name entered; leaving unchanged.");
+      return;
+    }
+    await renameCaptureSource(prisma, inspection.source.id, name);
+    console.log(`Renamed to "${name.trim()}".`);
+  } else if (choice === 1) {
+    if (inspection.captureCount > 0 || inspection.viewportCount > 0) {
+      console.log(`Not empty (${inspection.captureCount} capture(s), ${inspection.viewportCount} viewport(s)); refusing to delete.`);
+      return;
+    }
+    const confirm = await askFn(`Delete "${inspection.source.name}"? This cannot be undone. [y/N] `);
+    if (/^y/i.test(confirm.trim())) {
+      await deleteEmptyCaptureSource(prisma, inspection.source.id);
+      console.log("Deleted.");
+    } else {
+      console.log("Left unchanged.");
+    }
+  } else {
+    console.log("Left unchanged.");
+  }
+}
+
 export async function runCameraAttachFlow(options: CameraAttachOptions) {
   const nodes = await listNodeCameras(prisma, options.node);
   const node = nodes[0];
@@ -107,7 +166,46 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
     if (choice === 0 && sources.length > 0) {
       console.log("\nExisting capture sources:");
       sources.forEach((source, index) => console.log(`${index + 1}) ${source.name}`));
-      captureSourceId = sources[await chooseIndex("Capture source", sources.length, 1, askFn)].id;
+      const chosenSource = sources[await chooseIndex("Capture source", sources.length, 1, askFn)];
+      const inspection = await inspectCaptureSourceByIdOrName(prisma, chosenSource.id);
+
+      if (inspection.suspicious) {
+        // Part 8: never silently reuse a source that looks like it came
+        // from a failed/accidental onboarding (e.g. one literally named
+        // "2") - make the user choose explicitly.
+        console.log(`\n"${inspection.source.name}" looks like it may be an accidental or unused capture source:`);
+        for (const reason of describeReasons(inspection.reasons)) {
+          console.log(`  - ${reason}`);
+        }
+        console.log("\nThis camera should not silently reuse it. Choose:");
+        console.log("1) Create a properly named capture source instead");
+        console.log("2) Choose a different existing capture source");
+        console.log(`3) Rename "${inspection.source.name}" and use it`);
+        const resolution = await chooseIndex("Choice", 3, 1, askFn);
+        if (resolution === 1) {
+          const remaining = sources.filter((source) => source.id !== chosenSource.id);
+          if (remaining.length === 0) {
+            console.log("No other existing capture sources are available; creating a new one instead.");
+            const answer = await askFn(`Capture source name [${newName}]: `);
+            if (answer) newName = answer;
+          } else {
+            console.log("\nExisting capture sources:");
+            remaining.forEach((source, index) => console.log(`${index + 1}) ${source.name}`));
+            captureSourceId = remaining[await chooseIndex("Capture source", remaining.length, 1, askFn)].id;
+          }
+        } else if (resolution === 2) {
+          const answer = await askFn(`Rename "${inspection.source.name}" to: `);
+          if (answer.trim()) {
+            await renameCaptureSource(prisma, chosenSource.id, answer);
+          }
+          captureSourceId = chosenSource.id;
+        } else {
+          const answer = await askFn(`Capture source name [${newName}]: `);
+          if (answer) newName = answer;
+        }
+      } else {
+        captureSourceId = chosenSource.id;
+      }
     } else {
       if (choice === 0 && sources.length === 0) {
         console.log("No existing capture sources are available; creating a new one.");
@@ -252,6 +350,74 @@ Examples:
       console.log(formatCheckLine(result));
       if (result.status === "fail") {
         process.exitCode = 1;
+      }
+    });
+
+  const sources = camera.command("sources").description("Manage capture sources across the coordinator");
+  sources
+    .command("doctor")
+    .description("Scan capture sources for ones that look accidental or unused (e.g. left over from a failed onboarding)")
+    .option("--yes", "Report findings without prompting for action")
+    .option("--json", "Print structured JSON")
+    .action(async (options: { yes?: boolean; json?: boolean }) => {
+      const suspicious = await findSuspiciousCaptureSources(prisma);
+      if (options.json) {
+        console.log(JSON.stringify(suspicious, null, 2));
+        return;
+      }
+      if (suspicious.length === 0) {
+        console.log("No suspicious capture sources found.");
+        return;
+      }
+      console.log(`Found ${suspicious.length} capture source(s) that may be accidental or unused:`);
+      const canPrompt = Boolean(process.stdin.isTTY) && !options.yes;
+      for (const inspection of suspicious) {
+        console.log("");
+        printCaptureSourceInspection(inspection);
+        if (canPrompt) {
+          await guideCaptureSourceAction(inspection, ask);
+        }
+      }
+      if (!canPrompt) {
+        console.log('\nRun "plantlab camera source inspect <id>" to review and act on one of these.');
+      }
+    });
+
+  const source = camera.command("source").description("Inspect a single capture source");
+  source
+    .command("inspect")
+    .description("Show detail for one capture source and, if it looks accidental, offer to rename, delete, or leave it")
+    .argument("<id-or-name>", "Capture source id or exact name")
+    .option("--yes", "Report findings without prompting for action")
+    .option("--rename <name>", "Rename this source directly, without the interactive menu (for scripting/non-TTY use)")
+    .option("--json", "Print structured JSON")
+    .action(async (idOrName: string, options: { yes?: boolean; rename?: string; json?: boolean }) => {
+      const inspection = await inspectCaptureSourceByIdOrName(prisma, idOrName);
+      if (options.rename) {
+        const renamed = await renameCaptureSource(prisma, inspection.source.id, options.rename);
+        if (options.json) {
+          console.log(JSON.stringify({ ...inspection, source: renamed }, null, 2));
+        } else {
+          console.log(`Renamed "${inspection.source.name}" to "${renamed.name}".`);
+        }
+        return;
+      }
+      if (options.json) {
+        console.log(JSON.stringify(inspection, null, 2));
+        return;
+      }
+      printCaptureSourceInspection(inspection);
+      const canPrompt = Boolean(process.stdin.isTTY) && !options.yes;
+      if (canPrompt) {
+        // Rename/leave-unchanged are always safe, and delete self-guards on
+        // emptiness (guideCaptureSourceAction/deleteEmptyCaptureSource) -
+        // the guided menu is offered for any explicitly-inspected source,
+        // not just ones the automatic scan flagged as suspicious, so a
+        // source that started out accidental but has since picked up real
+        // activity (e.g. "2") can still be renamed to something meaningful.
+        await guideCaptureSourceAction(inspection, ask);
+      } else if (inspection.suspicious) {
+        console.log('\nRun without --yes in an interactive session to rename, delete, or leave this unchanged.');
       }
     });
 }

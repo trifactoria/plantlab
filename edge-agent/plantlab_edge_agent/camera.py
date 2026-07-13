@@ -12,15 +12,20 @@ defaults (see DEFAULT_WIDTH/DEFAULT_HEIGHT), single JPEG frame.
 from __future__ import annotations
 
 import glob
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 CAPTURE_TIMEOUT_SECONDS = 15
+CAPTURE_PROBE_TIMEOUT_SECONDS = 8
+CONSERVATIVE_FALLBACK_WIDTH = 640
+CONSERVATIVE_FALLBACK_HEIGHT = 480
 
 
 @dataclass
@@ -31,6 +36,21 @@ class CameraInfo:
     supports_capture: bool = True
     formats: List[str] = field(default_factory=list)
     alternate_devices: List[str] = field(default_factory=list)
+    # Part 5: whether a real, short ffmpeg one-frame capture actually
+    # succeeded on this device - never assume reported V4L2 capabilities
+    # mean a device can actually be opened for streaming. The real bokchoy
+    # failure: two /dev/video* nodes shared one physical camera and one USB
+    # identity; only one could actually be opened by ffmpeg
+    # (VIDIOC_G_INPUT: Inappropriate ioctl for device on the other).
+    verified_capture: bool = False
+    # Part 6: the exact pixel format/resolution the probe succeeded with -
+    # never offer/assign a combination that was never actually proven to
+    # work. None when verified_capture is False.
+    verified_format: Optional[Dict[str, object]] = None
+    capture_probe_error: Optional[str] = None
+    # device -> failure reason, for alternates that were actually probed
+    # (not just skipped because metadata already ruled them out).
+    alternate_probe_errors: Dict[str, str] = field(default_factory=dict)
 
 
 def command_exists(name: str) -> bool:
@@ -42,8 +62,17 @@ def raspicam_tools_available() -> bool:
     return command_exists("libcamera-hello") or command_exists("rpicam-hello")
 
 
-def discover_cameras() -> List[CameraInfo]:
-    """USB/V4L2 cameras via /dev/video* + v4l2-ctl, mirroring the shape (not the exact stable-ID algorithm) of src/lib/v4l2.ts's discoverLocalCameras(). Falls back to bare device-path discovery if v4l2-ctl is missing - never raises."""
+def discover_cameras(probe_capture: bool = True) -> List[CameraInfo]:
+    """USB/V4L2 cameras via /dev/video* + v4l2-ctl, mirroring the shape (not the exact stable-ID algorithm) of src/lib/v4l2.ts's discoverLocalCameras(). Falls back to bare device-path discovery if v4l2-ctl is missing - never raises.
+
+    ``probe_capture=True`` (the default - Part 5) additionally performs a
+    real, short, serialized ffmpeg one-frame capture probe against every
+    metadata-plausible candidate in a stable-identity group, selecting the
+    device that actually captures successfully as primary rather than
+    trusting reported V4L2 capabilities alone. Set False only for callers
+    that explicitly want the cheaper metadata-only grouping (e.g. a fast
+    listing where hardware access isn't wanted).
+    """
     devices = sorted(glob.glob("/dev/video*"))
     if not devices:
         return []
@@ -58,7 +87,47 @@ def discover_cameras() -> List[CameraInfo]:
         supports_capture = _supports_capture(device)
         formats = _format_lines(device) if supports_capture else []
         cameras.append(CameraInfo(device=device, name=name, stable_id=stable_id, supports_capture=supports_capture, formats=formats))
-    return _group_physical_cameras(cameras)
+
+    return _verify_camera_groups(cameras) if probe_capture else _group_physical_cameras(cameras)
+
+
+def _verify_camera_groups(cameras: List[CameraInfo]) -> List[CameraInfo]:
+    """Part 5: real verified-capture selection. Groups by the same stable-identity key as _group_physical_cameras() (kept separately, pure/metadata-only, for its own tests), then - one device at a time, serialized, never in parallel - probes every metadata-plausible candidate in score order. The first one that actually captures becomes primary; every other device in the group is recorded as an alternate, annotated with its real probe failure reason when one was attempted."""
+    groups: "dict[str, List[CameraInfo]]" = {}
+    for cam in cameras:
+        groups.setdefault(cam.stable_id or f"device:{cam.device}", []).append(cam)
+
+    result: List[CameraInfo] = []
+    for group in groups.values():
+        ordered = sorted(group, key=lambda c: (-_camera_score(c), _device_sort_key(c.device)))
+
+        attempts: "dict[str, Tuple[bool, str, Optional[dict]]]" = {}
+        winner: Optional[CameraInfo] = None
+        for candidate in ordered:
+            if not candidate.supports_capture:
+                continue
+            ok, detail, fmt = _probe_device_capture(candidate.device, candidate.formats)
+            attempts[candidate.device] = (ok, detail, fmt)
+            if ok and winner is None:
+                candidate.verified_capture = True
+                candidate.verified_format = fmt
+                candidate.capture_probe_error = None
+                winner = candidate
+
+        primary = winner or ordered[0]
+        if winner is None:
+            attempt = attempts.get(primary.device)
+            primary.verified_capture = False
+            primary.verified_format = None
+            primary.capture_probe_error = attempt[1] if attempt else None
+
+        primary.alternate_devices = [c.device for c in ordered if c.device != primary.device]
+        primary.alternate_probe_errors = {
+            c.device: attempts[c.device][1] for c in ordered if c.device != primary.device and c.device in attempts and not attempts[c.device][0]
+        }
+        result.append(primary)
+
+    return sorted(result, key=lambda c: _device_sort_key(c.device))
 
 
 def _group_physical_cameras(cameras: List[CameraInfo]) -> List[CameraInfo]:
@@ -92,11 +161,48 @@ def _v4l2_card_name(device: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
+def _extract_caps_block(v4l2_ctl_all_output: str, label: str) -> Optional[str]:
+    """Extracts just the capability names listed under a "Device Caps" or
+    "Capabilities" block in `v4l2-ctl --all` output (each capability is a
+    line indented one level deeper than the block's own header line, e.g.
+    "\tDevice Caps      : 0x04200001\n\t\tVideo Capture\n\t\tStreaming").
+    Returns None when that block isn't present at all."""
+    lines = v4l2_ctl_all_output.split("\n")
+    header_pattern = re.compile(rf"^\t{re.escape(label)}\s*:")
+    header_index = next((i for i, line in enumerate(lines) if header_pattern.match(line)), None)
+    if header_index is None:
+        return None
+    collected: List[str] = []
+    for line in lines[header_index + 1 :]:
+        if not re.match(r"^\t\t\S", line):
+            break
+        collected.append(line.strip())
+    return "\n".join(collected)
+
+
+def _caps_indicate_video_capture(v4l2_ctl_all_output: str) -> bool:
+    """Pure, hardware-free so it can be unit tested with recorded output.
+    Only the "Device Caps" block (falling back to the aggregate
+    "Capabilities" block when absent) reflects a node's real functional
+    capability - `--all` also prints a "Format Video Capture Multiplanar:"
+    *section header* for the current format of a memory-to-memory device's
+    queue (e.g. a Raspberry Pi's bcm2835-codec-decode/isp hardware), which
+    contains the literal substring "Video Capture" even though the device
+    cannot actually capture from a sensor - a naive whole-output substring
+    match incorrectly treated every one of those as a real camera."""
+    caps_block = _extract_caps_block(v4l2_ctl_all_output, "Device Caps") or _extract_caps_block(v4l2_ctl_all_output, "Capabilities")
+    if not caps_block:
+        return False
+    if "Memory-to-Memory" in caps_block:
+        return False
+    return "Video Capture" in caps_block
+
+
 def _supports_capture(device: str) -> bool:
     result = subprocess.run(["v4l2-ctl", "--device", device, "--all"], capture_output=True, text=True, timeout=5)
     if result.returncode != 0:
         return False
-    return "Video Capture" in result.stdout or "Video Capture Multiplanar" in result.stdout
+    return _caps_indicate_video_capture(result.stdout)
 
 
 def _format_lines(device: str) -> List[str]:
@@ -120,6 +226,83 @@ def _stable_id_for_device(device: str) -> Optional[str]:
     if vendor and model:
         return f"usb:{vendor}:{model}:{serial or 'noserial'}"
     return None
+
+
+def _build_probe_candidates(format_lines: List[str]) -> List[Tuple[str, int, int]]:
+    """Parses the same raw lines _format_lines() already collects (no extra v4l2-ctl call) into (pixel_format, width, height) candidates - prefers MJPEG's first reported resolution (Part 5), always with a conservative 640x480 fallback for devices with no reported formats or whose reported resolution doesn't actually work."""
+    parsed: List[Tuple[str, int, int]] = []
+    current_format: Optional[str] = None
+    for line in format_lines:
+        format_match = re.search(r"\[\d+\]:\s+'([^']+)'", line)
+        if format_match:
+            current_format = format_match.group(1)
+            continue
+        size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
+        if size_match and current_format:
+            parsed.append((current_format, int(size_match.group(1)), int(size_match.group(2))))
+
+    candidates: List[Tuple[str, int, int]] = []
+    mjpeg = [p for p in parsed if "mjp" in p[0].lower()]
+    preferred = (mjpeg or parsed)[:1]
+    candidates.extend(preferred)
+    if not any(w == CONSERVATIVE_FALLBACK_WIDTH and h == CONSERVATIVE_FALLBACK_HEIGHT for _, w, h in candidates):
+        candidates.append(("MJPG", CONSERVATIVE_FALLBACK_WIDTH, CONSERVATIVE_FALLBACK_HEIGHT))
+    return candidates
+
+
+def _probe_device_capture(device: str, format_lines: List[str]) -> Tuple[bool, str, Optional[Dict[str, object]]]:
+    """Tries each candidate format/resolution in order, stopping at the first real success (Part 5 point 4 plus point 8's 640x480 fallback)."""
+    candidates = _build_probe_candidates(format_lines)
+    last_detail = "No capture candidates were available to probe."
+    for pixel_format, width, height in candidates:
+        ok, detail = _attempt_one_frame_capture(device, pixel_format, width, height)
+        if ok:
+            return True, detail, {"pixelFormat": pixel_format, "width": width, "height": height}
+        last_detail = detail
+    return False, last_detail, None
+
+
+def _attempt_one_frame_capture(device: str, pixel_format: str, width: int, height: int) -> Tuple[bool, str]:
+    """One real, short, serialized ffmpeg capture into a throwaway temp file - never canonical project/capture data, always cleaned up, always externally timed out in case the device hangs rather than erroring quickly."""
+    fd, tmp_path = tempfile.mkstemp(prefix="plantlab-capture-probe-", suffix=".jpg")
+    os.close(fd)
+    try:
+        args = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "v4l2",
+            "-input_format",
+            _ffmpeg_input_format(pixel_format),
+            "-video_size",
+            f"{width}x{height}",
+            "-i",
+            device,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            "-y",
+            tmp_path,
+        ]
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=CAPTURE_PROBE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False, f"ffmpeg capture probe on {device} timed out after {CAPTURE_PROBE_TIMEOUT_SECONDS}s."
+        if result.returncode != 0:
+            return False, (result.stderr.strip()[:500] or f"ffmpeg exited with code {result.returncode}")
+        path_obj = Path(tmp_path)
+        if not path_obj.exists() or path_obj.stat().st_size == 0:
+            return False, "ffmpeg reported success but produced an empty or missing file."
+        with open(tmp_path, "rb") as f:
+            head = f.read(2)
+        if head != b"\xff\xd8":
+            return False, "Output file does not look like a valid JPEG."
+        return True, f"Verified {width}x{height} {pixel_format.upper()} capture."
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 def capture_frame(device: str, output_path: str, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, input_format: str = "mjpeg") -> None:

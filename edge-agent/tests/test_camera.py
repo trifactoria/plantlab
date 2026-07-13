@@ -98,3 +98,93 @@ def test_capture_frame_succeeds_and_uses_conservative_default_resolution(tmp_pat
 def test_raspicam_tools_are_never_required_only_opportunistically_detected():
     with patch.object(camera, "command_exists", return_value=False):
         assert camera.raspicam_tools_available() is False  # must not raise even when absent
+
+
+# All three fixtures below are real `v4l2-ctl -d <device> --all` output
+# recorded from actual hardware (bokchoy's Integrated_Webcam_HD and
+# greenhouse-zero's Raspberry Pi ISP/codec devices), not hand-written - this
+# is the exact text that drove the real onboarding bugs being fixed.
+
+
+def test_caps_indicate_video_capture_recognizes_a_real_capture_device():
+    """bokchoy /dev/video0."""
+    output = "\n".join(
+        [
+            "Driver Info:",
+            "\tDriver name      : uvcvideo",
+            "\tCard type        : webcam 1080P: webcam 1080P",
+            "\tBus info         : usb-20980000.usb-1.3",
+            "\tDriver version   : 6.18.34",
+            "\tCapabilities     : 0x84a00001",
+            "\t\tVideo Capture",
+            "\t\tMetadata Capture",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+            "\t\tDevice Capabilities",
+            "\tDevice Caps      : 0x04200001",
+            "\t\tVideo Capture",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+        ]
+    )
+    assert camera._caps_indicate_video_capture(output) is True
+
+
+def test_caps_indicate_video_capture_rejects_metadata_only_node_despite_misleading_aggregate_capabilities():
+    """bokchoy /dev/video1 - the aggregate Capabilities block lists "Video
+    Capture" even though this specific node cannot capture (only its own
+    Device Caps block is authoritative)."""
+    output = "\n".join(
+        [
+            "Driver Info:",
+            "\tDriver name      : uvcvideo",
+            "\tCard type        : Integrated_Webcam_HD: Integrate",
+            "\tBus info         : usb-0000:00:14.0-5",
+            "\tDriver version   : 7.0.6",
+            "\tCapabilities     : 0x84a00001",
+            "\t\tVideo Capture",
+            "\t\tMetadata Capture",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+            "\t\tDevice Capabilities",
+            "\tDevice Caps      : 0x04a00000",
+            "\t\tMetadata Capture",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+        ]
+    )
+    assert camera._caps_indicate_video_capture(output) is False
+
+
+def test_caps_indicate_video_capture_rejects_memory_to_memory_codec_device_despite_format_section_header_text():
+    """greenhouse-zero bcm2835-codec-decode - a memory-to-memory hardware
+    codec, not a real camera, even though `--all` also prints a "Format
+    Video Capture Multiplanar:" section header containing the literal
+    substring "Video Capture" for its current format."""
+    output = "\n".join(
+        [
+            "Driver Info:",
+            "\tDriver name      : bcm2835-codec",
+            "\tCard type        : bcm2835-codec-decode",
+            "\tBus info         : platform:bcm2835-codec",
+            "\tDriver version   : 6.18.34",
+            "\tCapabilities     : 0x84204000",
+            "\t\tVideo Memory-to-Memory Multiplanar",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+            "\t\tDevice Capabilities",
+            "\tDevice Caps      : 0x04204000",
+            "\t\tVideo Memory-to-Memory Multiplanar",
+            "\t\tStreaming",
+            "\t\tExtended Pix Format",
+            "Priority: 2",
+            "Format Video Capture Multiplanar:",
+            "\tWidth/Height      : 32/32",
+            "\tPixel Format      : 'YU12' (Planar YUV 4:2:0)",
+        ]
+    )
+    assert camera._caps_indicate_video_capture(output) is False
+
+
+def test_caps_indicate_video_capture_returns_false_when_no_caps_block_present():
+    assert camera._caps_indicate_video_capture("Driver Info:\n\tDriver name      : nonsense\n") is False

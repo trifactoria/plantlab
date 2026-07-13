@@ -6,11 +6,10 @@ import { readNodeConfig } from "../../lib/operations/config";
 import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operations/manualCapture";
 import { markNodeStatus } from "../../lib/operations/nodeCredentials";
 import { ensureValidNodeCredential, rotateAndInstallCredential, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
-import { copyEdgeAgentDirectory, runEdgeAgentInstall } from "../../lib/operations/edgeAgentInstall";
+import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
+import { copyEdgeAgentDirectory, runEdgeAgentInstall, verifyEdgeCommand } from "../../lib/operations/edgeAgentInstall";
 import { diagnoseEdgeAgent } from "../../lib/operations/edgeAgentDiagnostics";
 import {
-  checkCoordinatorReachableFromRemote,
-  defaultCoordinatorUrl,
   diagnoseRemoteAgent,
   inspectRemoteHost,
   type RemoteAgentDiagnostics,
@@ -50,7 +49,7 @@ Examples:
   plantlab node info
   plantlab node inspect xps
   plantlab node attach xps
-  plantlab node attach xps --coordinator-url http://plantlab:3000
+  plantlab node attach xps --coordinator-url http://192.168.1.66:3000
 `,
     );
 
@@ -122,7 +121,7 @@ Examples:
     .command("attach")
     .description("Enroll a remote PlantLab camera node and install its agent configuration")
     .argument("<ssh-host>", "SSH host alias, e.g. xps")
-    .option("--coordinator-url <url>", "Coordinator URL the camera node should call", defaultCoordinatorUrl())
+    .option("--coordinator-url <url>", "Coordinator URL the camera node should call - tried first, but still validated; omit to auto-discover a reachable LAN/Tailscale address")
     .option("--repo-path <path>", "Remote PlantLab repository path; defaults to inspection result")
     .option("--spool-root <path>", "Remote durable spool root; defaults to the remote user's ~/.local/state/plantlab-agent")
     .option("--rotate-credential", "Rotate the node credential even if a valid credential file already exists")
@@ -134,7 +133,7 @@ Examples:
       async (
         sshHost: string,
         options: {
-          coordinatorUrl: string;
+          coordinatorUrl?: string;
           repoPath?: string;
           spoolRoot?: string;
           rotateCredential?: boolean;
@@ -157,6 +156,32 @@ Examples:
         }
         steps.complete("Inspection", `Connected to ${sshHost}`);
 
+        // Coordinator URL discovery (Part 1): never trust a URL until this
+        // node has proven - via a real request it makes itself - that it
+        // can reach GET /api/node-info and get back a genuine PlantLab
+        // coordinator response. The real greenhouse-zero bug: silently
+        // defaulting to the coordinator's own hostname
+        // (`http://plantlab:3000`) is only ever resolvable from the
+        // coordinator itself. Runs before ANY credential/config write, and
+        // before the edge-agent-vs-full-agent branch below, since both
+        // paths need a validated URL.
+        console.log("");
+        const discovery = await discoverCoordinatorUrl(sshHost, {
+          explicitUrl: options.coordinatorUrl ?? null,
+          log: (line) => console.log(line),
+        });
+        if (!discovery.selected) {
+          steps.fail("Coordinator discovery", "No reachable PlantLab coordinator address was found from this node.");
+          console.error("");
+          console.error(`Cannot attach ${sshHost}: no candidate coordinator URL was reachable from this node.`);
+          console.error("Check that the coordinator's web service is running and that this node is on the same network (or Tailscale tailnet).");
+          printAttachIncomplete(steps, sshHost);
+          process.exitCode = 1;
+          return;
+        }
+        steps.complete("Coordinator discovery", `Selected ${discovery.selected}`);
+        const coordinatorUrl = discovery.selected;
+
         // Pi Zero / low-resource feasibility (Parts 5, 11): offer the
         // lightweight edge agent instead of requiring the full repo +
         // Node.js stack. Checked before the "PlantLab is not installed"
@@ -168,11 +193,11 @@ Examples:
           console.log("");
           if (options.dryRun) {
             printInspection(inspection);
-            console.log("\nDry run - would offer to install the PlantLab Edge Agent (lightweight, Python-based) instead of the full Node.js agent.");
+            console.log(`\nDry run - would offer to install the PlantLab Edge Agent (lightweight, Python-based) instead of the full Node.js agent, using coordinator ${coordinatorUrl}.`);
             return;
           }
           if (await confirmOrYes("Install the edge agent? [Y/n] ", options.yes, true)) {
-            await runEdgeAgentAttach({ sshHost, inspection, options, steps });
+            await runEdgeAgentAttach({ sshHost, inspection, coordinatorUrl, options, steps });
             return;
           }
           console.log("Continuing with the full Node.js agent (not recommended for this hardware).");
@@ -195,7 +220,7 @@ Examples:
           currentRole,
           role: desiredRole,
           repoPath,
-          coordinatorUrl: options.coordinatorUrl,
+          coordinatorUrl,
           spoolRoot,
           rotateCredential: Boolean(options.rotateCredential),
           dryRun: Boolean(options.dryRun),
@@ -209,19 +234,6 @@ Examples:
             for (const [key, value] of Object.entries(summary)) console.log(`  ${key}: ${value}`);
           }
           return;
-        }
-
-        // Step 2: validate coordinator reachability from the remote node's
-        // own vantage point - a warning, not a hard stop, since a
-        // transient network blip shouldn't block the rest of convergence.
-        const reachability = await checkCoordinatorReachableFromRemote(sshHost, options.coordinatorUrl).catch((error) => ({
-          reachable: false,
-          detail: error instanceof Error ? error.message : String(error),
-        }));
-        if (reachability.reachable) {
-          steps.complete("Coordinator reachability", reachability.detail);
-        } else {
-          console.log(`WARN: ${reachability.detail} Continuing - the agent will retry once network access is restored.`);
         }
 
         if (inspection.role && inspection.role !== desiredRole) {
@@ -269,12 +281,12 @@ Examples:
           operatingSystem: inspection.operatingSystem,
           architecture: inspection.architecture,
           softwareVersion: inspection.plantLabVersion,
-          coordinatorUrl: options.coordinatorUrl,
+          coordinatorUrl,
         };
         const credentialInput = {
           sshHost,
           repoPath,
-          coordinatorUrl: options.coordinatorUrl,
+          coordinatorUrl,
           role: "camera-node" as const,
           runtime: "node" as const,
           nodeName: sshHost,
@@ -378,7 +390,7 @@ Examples:
           console.log("");
           console.log(`Name: ${registered.node.name}`);
           console.log(`Role: ${registered.node.role}`);
-          console.log(`Coordinator: ${options.coordinatorUrl}`);
+          console.log(`Coordinator: ${coordinatorUrl}`);
           console.log(`Cameras detected: ${inventory.length} (${inventorySource})`);
           console.log("Remote agent: healthy");
         }
@@ -413,7 +425,7 @@ Examples:
           console.log("");
           console.log(`${sshHost} camera node is ready.`);
           console.log(`Node: ${sshHost}`);
-          console.log(`Coordinator: ${options.coordinatorUrl}`);
+          console.log(`Coordinator: ${coordinatorUrl}`);
           console.log(`Camera: ${attached.camera.name ?? attached.camera.stableId}`);
           console.log(`Capture source: ${attached.captureSource.name}`);
           console.log("Agent: healthy");
@@ -452,10 +464,11 @@ async function promptEdgeAgentRole(sshHost: string, yes?: boolean): Promise<"cam
 async function runEdgeAgentAttach(input: {
   sshHost: string;
   inspection: Awaited<ReturnType<typeof inspectRemoteHost>>;
-  options: { coordinatorUrl: string; rotateCredential?: boolean; timeoutMs: number; yes?: boolean; json?: boolean };
+  coordinatorUrl: string;
+  options: { rotateCredential?: boolean; timeoutMs: number; yes?: boolean; json?: boolean };
   steps: AttachSteps;
 }): Promise<void> {
-  const { sshHost, inspection, options, steps } = input;
+  const { sshHost, inspection, coordinatorUrl, options, steps } = input;
 
   const role = await promptEdgeAgentRole(sshHost, options.yes);
   steps.complete("Role selection", role);
@@ -471,7 +484,7 @@ async function runEdgeAgentAttach(input: {
   steps.complete("Copy edge agent", `edge-agent/ copied to ~/plantlab-edge-agent on ${sshHost}.`);
 
   console.log("Running install.sh...");
-  const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName: sshHost, coordinatorUrl: options.coordinatorUrl });
+  const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName: sshHost, coordinatorUrl });
   if (installResult.status !== 0) {
     steps.fail("Install edge agent", (installResult.stderr.trim() || installResult.stdout.trim() || "install.sh failed.").slice(0, 2000));
     printAttachIncomplete(steps, sshHost);
@@ -480,6 +493,18 @@ async function runEdgeAgentAttach(input: {
   }
   steps.complete("Install edge agent", "Dependencies verified, spool prepared, systemd unit installed.");
 
+  // Verify the local `plantlab-edge` command is actually usable (Part 3) -
+  // a plain non-interactive SSH command never sources ~/.profile, so this
+  // checks a real login shell (bash -lc) rather than trusting PATH alone.
+  const commandCheck = await verifyEdgeCommand(sshHost, inspection.remoteUser);
+  if (commandCheck.resolvesInLoginShell) {
+    steps.complete("Edge command", `plantlab-edge resolves on PATH in a login shell: ${commandCheck.resolvedPath}`);
+  } else if (commandCheck.wrapperExists) {
+    steps.complete("Edge command", `Installed at ${commandCheck.wrapperPath}. Reconnect your SSH session, or run: ${commandCheck.wrapperPath} doctor`);
+  } else {
+    steps.fail("Edge command", `plantlab-edge was not found at the expected path (${commandCheck.wrapperPath}) after install.`);
+  }
+
   const registerInput = {
     name: sshHost,
     hostname: inspection.remoteHostname ?? sshHost,
@@ -487,7 +512,7 @@ async function runEdgeAgentAttach(input: {
     operatingSystem: inspection.operatingSystem,
     architecture: inspection.architecture,
     softwareVersion: null,
-    coordinatorUrl: options.coordinatorUrl,
+    coordinatorUrl,
   };
   const credentialInput = {
     sshHost,
@@ -495,7 +520,7 @@ async function runEdgeAgentAttach(input: {
     // rotateAndInstallCredential() reads repoPath, to run convergeNodeRole)
     // - kept non-empty only for readable diagnostics if it were ever logged.
     repoPath: "~/plantlab-edge-agent",
-    coordinatorUrl: options.coordinatorUrl,
+    coordinatorUrl,
     role,
     runtime: "python-edge" as const,
     nodeName: sshHost,
@@ -571,9 +596,45 @@ async function runEdgeAgentAttach(input: {
   console.log(`Name: ${repair.node.name}`);
   console.log(`Role: ${repair.node.role}`);
   console.log("Runtime: python-edge (PlantLab Edge Agent)");
-  console.log(`Coordinator: ${options.coordinatorUrl}`);
+  console.log(`Coordinator: ${coordinatorUrl}`);
   console.log(`Cameras detected: ${inventory.length}`);
   console.log("Remote agent: healthy");
+
+  if (await confirmOptional("\nConfigure a camera now? [Y/n] ", options.yes, true)) {
+    const attached = await runCameraAttachFlow({ node: sshHost, yes: options.yes });
+    console.log("");
+    console.log("Camera attached.");
+    console.log(`Camera: ${attached.camera.name ?? attached.camera.stableId}`);
+    console.log(`Capture source: ${attached.captureSource.name}`);
+
+    if (await confirmOptional("\nRun a test capture now? [Y/n] ", options.yes, true)) {
+      const created = await createManualCaptureJob(prisma, { nodeName: sshHost, assignmentId: attached.assignment.id });
+      console.log(created.reused ? "WARN: Reusing an already queued/claimed test job." : "PASS: Job created");
+      const completed = await waitForJobCompletion(prisma, created.job.id, { timeoutMs: 120_000 });
+      if (completed?.status === "completed") {
+        console.log("PASS: Agent claimed job");
+        console.log("PASS: Frame uploaded");
+        console.log("PASS: Checksum verified");
+        console.log("PASS: SourceCapture created on coordinator");
+      } else {
+        console.error(
+          completed?.status === "failed"
+            ? `FAIL: Test capture failed: ${completed.errorMessage ?? "Unknown error"}`
+            : "FAIL: Timed out waiting for test capture completion.",
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+
+    console.log("");
+    console.log(`${sshHost} node is ready.`);
+    console.log(`Node: ${sshHost}`);
+    console.log(`Coordinator: ${coordinatorUrl}`);
+    console.log(`Camera: ${attached.camera.name ?? attached.camera.stableId}`);
+    console.log(`Capture source: ${attached.captureSource.name}`);
+    console.log("Agent: healthy");
+  }
 }
 
 async function printEdgeAgentDiagnosis(sshHost: string): Promise<void> {
@@ -690,7 +751,7 @@ class AttachSteps {
 
 const ATTACH_STEP_ORDER = [
   "Inspection",
-  "Coordinator reachability",
+  "Coordinator discovery",
   "Role confirmation",
   "Credential",
   "Heartbeat",
