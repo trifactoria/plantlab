@@ -26,7 +26,7 @@
 import { runRemoteShell } from "./shellExec";
 import { shellQuote } from "./systemdUnits";
 import { convergeNodeRole, type ConvergenceStep } from "./roleConvergence";
-import { convergeEdgeAgentConfig } from "./edgeAgentInstall";
+import { convergeEdgeAgentConfig, type EdgeConfigConvergenceInput } from "./edgeAgentInstall";
 import { registerOrRotateNode, markNodeStatus, type RegisterNodeInput } from "./nodeCredentials";
 import type { PrismaClient } from "@prisma/client";
 import type { NodeRole } from "./config";
@@ -291,6 +291,8 @@ export type CredentialInstallInput = {
   waitForHeartbeat?: boolean;
   /** Restart the agent even when `rotate` is false (e.g. doctor's "Restart agent?" repair item, answered independently of "Rotate node credential?"). Rotation always implies a restart regardless of this flag - see the module doc comment on the `enable --now` bug this exists to avoid repeating. */
   forceRestart?: boolean;
+  /** Optional greenhouse hardware config collected by the edge attach flow. Omitted fields are preserved by convergeEdgeAgentConfig(). */
+  edgeConfig?: Partial<Omit<EdgeConfigConvergenceInput, "role" | "nodeName" | "coordinatorUrl">>;
 };
 
 /**
@@ -351,6 +353,7 @@ export async function rotateAndInstallCredential(
       coordinatorUrl: input.coordinatorUrl,
       spoolRoot: input.spoolRoot,
       capabilities: input.registerInput.capabilities ?? ["camera"],
+      ...input.edgeConfig,
     });
     steps.push({
       name: "edge-config",

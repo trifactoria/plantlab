@@ -4,10 +4,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   copyEdgeAgentDirectory,
+  convergeEdgeAgentConfig,
   edgeAgentInstallChangeStatus,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
+  readRemoteGreenhouseSecretStatus,
   runEdgeAgentInstall,
+  writeRemoteGreenhouseSecrets,
 } from "../../src/lib/operations/edgeAgentInstall";
 import { createFakeRemoteHome, createFakeSsh, type FakeSsh } from "./helpers/fakeSsh";
 
@@ -86,5 +89,110 @@ describe("edge-agent install mirror", () => {
     expect(installed?.contentHash).toBe(source.contentHash);
     expect(edgeAgentInstallChangeStatus(source, null)).toBe("UPDATED");
     expect(edgeAgentInstallChangeStatus(source, installed)).toBe("UNCHANGED");
+  });
+
+  it("converges edge-agent config by preserving unknown fields and existing greenhouse sections", async () => {
+    const configDir = path.join(remoteHome.home, ".config", "plantlab");
+    const configPath = path.join(configDir, "edge-agent.json");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          role: "greenhouse-node",
+          nodeName: "greenhouse-zero",
+          coordinatorUrl: "http://old",
+          spoolRoot: path.join(remoteHome.home, ".local", "state", "plantlab-edge-agent"),
+          capabilities: ["camera"],
+          sensors: [{ key: "greenhouse-ambient", name: "Greenhouse ambient", type: "dht22", gpio: 4, placement: "Top shelf", enabled: true }],
+          power: { provider: "kasa", host: "192.168.1.72", outlets: { fans: "greenhouse-fans" }, futureNested: { keep: true } },
+          futureTopLevel: { keep: true },
+          heartbeatIntervalSeconds: 17,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await convergeEdgeAgentConfig("greenhouse-zero", {
+      role: "greenhouse-node",
+      nodeName: "greenhouse-zero",
+      coordinatorUrl: "http://coordinator:3000",
+      cameraEnabled: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("UPDATED");
+    const parsed = JSON.parse(await readFile(configPath, "utf8"));
+    expect(parsed.coordinatorUrl).toBe("http://coordinator:3000");
+    expect(parsed.sensors).toHaveLength(1);
+    expect(parsed.power.futureNested).toEqual({ keep: true });
+    expect(parsed.futureTopLevel).toEqual({ keep: true });
+    expect(parsed.heartbeatIntervalSeconds).toBe(17);
+    expect(parsed.capabilities).toEqual(["camera", "temperature", "humidity", "relay", "fan"]);
+  });
+
+  it("can explicitly disable sensors and power during config convergence", async () => {
+    const configDir = path.join(remoteHome.home, ".config", "plantlab");
+    const configPath = path.join(configDir, "edge-agent.json");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        role: "greenhouse-node",
+        nodeName: "greenhouse-zero",
+        coordinatorUrl: "http://old",
+        spoolRoot: path.join(remoteHome.home, ".local", "state", "plantlab-edge-agent"),
+        capabilities: ["camera", "temperature", "humidity", "relay"],
+        sensors: [{ key: "greenhouse-ambient", name: "Greenhouse ambient", type: "dht22", gpio: 4, enabled: true }],
+        power: { provider: "kasa", host: "192.168.1.72", outlets: { water: "greenhouse-water" } },
+      }),
+    );
+
+    const result = await convergeEdgeAgentConfig("greenhouse-zero", {
+      role: "greenhouse-node",
+      nodeName: "greenhouse-zero",
+      coordinatorUrl: "http://coordinator:3000",
+      cameraEnabled: true,
+      disableSensors: true,
+      disablePower: true,
+    });
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(await readFile(configPath, "utf8"));
+    expect(parsed.sensors).toBeUndefined();
+    expect(parsed.power).toBeUndefined();
+    expect(parsed.capabilities).toEqual(["camera"]);
+  });
+
+  it("preserves the prior config when convergence validation fails before the remote write", async () => {
+    const configDir = path.join(remoteHome.home, ".config", "plantlab");
+    const configPath = path.join(configDir, "edge-agent.json");
+    await mkdir(configDir, { recursive: true });
+    const original = JSON.stringify({ role: "greenhouse-node", nodeName: "greenhouse-zero", coordinatorUrl: "http://old", spoolRoot: "/spool", capabilities: ["camera"] }, null, 2);
+    await writeFile(configPath, `${original}\n`);
+
+    await expect(
+      convergeEdgeAgentConfig("greenhouse-zero", {
+        role: "greenhouse-node",
+        nodeName: "greenhouse-zero",
+        coordinatorUrl: "http://coordinator:3000",
+        cameraEnabled: true,
+        sensors: [{ key: "a", name: "A", type: "dht22", gpio: 4, enabled: true }, { key: "b", name: "B", type: "dht22", gpio: 4, enabled: true }],
+      }),
+    ).rejects.toThrow(/Duplicate BCM GPIO/);
+    expect(await readFile(configPath, "utf8")).toBe(`${original}\n`);
+  });
+
+  it("writes greenhouse.env with owner-only permissions without exposing values through status inspection", async () => {
+    const write = await writeRemoteGreenhouseSecrets("greenhouse-zero", { kasaUsername: "user@example.com", kasaPassword: "secret" });
+    expect(write.status).toBe(0);
+    const status = await readRemoteGreenhouseSecretStatus("greenhouse-zero");
+    expect(status.exists).toBe(true);
+    expect(status.mode).toBe("600");
+    const content = await readFile(path.join(remoteHome.home, ".config", "plantlab", "greenhouse.env"), "utf8");
+    expect(content).toContain('KASA_USERNAME="user@example.com"');
+    expect(content).toContain('KASA_PASSWORD="secret"');
+    expect(JSON.stringify(status)).not.toContain("secret");
   });
 });

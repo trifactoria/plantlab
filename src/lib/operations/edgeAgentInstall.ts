@@ -19,6 +19,12 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { runLocalCommand, runRemoteShell, validateSshHost, type CommandResult } from "./shellExec";
 import { shellQuote } from "./systemdUnits";
+import {
+  mergeEdgeAgentConfig,
+  type EdgeConfigMergeInput,
+  type GreenhousePowerConfig,
+  type GreenhouseSensorConfig,
+} from "./greenhouseConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/edgeAgentInstall.ts shells out to scp/ssh and must not run in a browser.");
@@ -215,64 +221,205 @@ export type EdgeConfigConvergenceResult = {
   stderr: string;
 };
 
+export type RemoteEdgeAgentConfig = {
+  configPath: string | null;
+  exists: boolean;
+  config: Record<string, unknown>;
+  error: string | null;
+};
+
+export async function readRemoteEdgeAgentConfig(sshHost: string): Promise<RemoteEdgeAgentConfig> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+config_path="$home_dir/.config/plantlab/edge-agent.json"
+python3 - "$config_path" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+payload = {"configPath": path, "exists": os.path.exists(path), "config": {}, "error": None}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+        if isinstance(parsed, dict):
+            payload["config"] = parsed
+        else:
+            payload["error"] = "edge-agent.json must contain a JSON object"
+    except Exception as exc:
+        payload["error"] = str(exc)
+print(json.dumps(payload))
+PY
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || "Could not read remote edge-agent config.");
+  }
+  const parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as RemoteEdgeAgentConfig;
+  return {
+    configPath: typeof parsed.configPath === "string" ? parsed.configPath : null,
+    exists: parsed.exists === true,
+    config: parsed.config && typeof parsed.config === "object" && !Array.isArray(parsed.config) ? parsed.config : {},
+    error: typeof parsed.error === "string" && parsed.error.trim() ? parsed.error : null,
+  };
+}
+
+export type GreenhouseSecretStatus = {
+  path: string | null;
+  exists: boolean;
+  mode: string | null;
+};
+
+export async function readRemoteGreenhouseSecretStatus(sshHost: string): Promise<GreenhouseSecretStatus> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+secret_path="$home_dir/.config/plantlab/greenhouse.env"
+exists=false; [ -f "$secret_path" ] && exists=true
+mode=""; [ -e "$secret_path" ] && mode="$(stat -c '%a' "$secret_path" 2>/dev/null || true)"
+python3 - "$secret_path" "$exists" "$mode" <<'PY'
+import json, sys
+path, exists, mode = sys.argv[1:4]
+print(json.dumps({"path": path, "exists": exists == "true", "mode": mode or None}))
+PY
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || "Could not inspect remote greenhouse secret file.");
+  }
+  const parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as GreenhouseSecretStatus;
+  return {
+    path: typeof parsed.path === "string" ? parsed.path : null,
+    exists: parsed.exists === true,
+    mode: typeof parsed.mode === "string" ? parsed.mode : null,
+  };
+}
+
+export async function writeRemoteGreenhouseSecrets(
+  sshHost: string,
+  secrets: { kasaUsername: string; kasaPassword: string },
+): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  if (secrets.kasaUsername.includes("\n") || secrets.kasaPassword.includes("\n")) {
+    throw new Error("Greenhouse secret values must not contain newlines.");
+  }
+  const payload = Buffer.from(
+    `KASA_USERNAME=${dotenvQuote(secrets.kasaUsername)}\nKASA_PASSWORD=${dotenvQuote(secrets.kasaPassword)}\n`,
+    "utf8",
+  ).toString("base64");
+  const script = String.raw`
+set -eu
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+env_dir="$home_dir/.config/plantlab"
+secret_path="$env_dir/greenhouse.env"
+payload_b64=__PAYLOAD__
+mkdir -p "$env_dir"
+chmod 700 "$env_dir"
+python3 - "$secret_path" "$payload_b64" <<'PY'
+import base64, os, sys
+path, payload_b64 = sys.argv[1:3]
+payload = base64.b64decode(payload_b64.encode("ascii"))
+tmp = f"{path}.tmp-{os.getpid()}"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+try:
+    with os.fdopen(fd, "wb") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+mode="$(stat -c '%a' "$secret_path")"
+if [ "$mode" != "600" ]; then echo "Greenhouse secret file mode is $mode, expected 600" >&2; exit 23; fi
+printf 'greenhouse.env written\n'
+`.replace("__PAYLOAD__", shellQuote(payload));
+  return runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 });
+}
+
+function dotenvQuote(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+export type EdgeConfigConvergenceInput = Omit<EdgeConfigMergeInput, "spoolRoot" | "cameraEnabled" | "sensors" | "power"> & {
+  spoolRoot?: string | null;
+  cameraEnabled?: boolean;
+  capabilities?: string[];
+  sensors?: GreenhouseSensorConfig[] | null;
+  power?: GreenhousePowerConfig | null;
+};
+
 export async function convergeEdgeAgentConfig(
   sshHost: string,
-  input: {
-    role: "camera-node" | "greenhouse-node";
-    nodeName: string;
-    coordinatorUrl: string;
-    spoolRoot?: string | null;
-    capabilities?: string[];
-  },
+  input: EdgeConfigConvergenceInput,
 ): Promise<EdgeConfigConvergenceResult> {
   validateSshHost(sshHost);
-  const capabilities = JSON.stringify(input.capabilities ?? ["camera"]);
+  const read = await readRemoteEdgeAgentConfig(sshHost);
+  const spoolRoot = input.spoolRoot ?? read.config.spoolRoot ?? read.config.spool_root ?? "";
+  const merged = mergeEdgeAgentConfig(read.config, {
+    role: input.role,
+    nodeName: input.nodeName,
+    coordinatorUrl: input.coordinatorUrl,
+    spoolRoot: typeof spoolRoot === "string" && spoolRoot.trim() ? spoolRoot.trim() : "",
+    cameraEnabled: input.cameraEnabled ?? (input.capabilities ?? ["camera"]).includes("camera"),
+    sensors: input.sensors,
+    power: input.power,
+    disableSensors: input.disableSensors,
+    disablePower: input.disablePower,
+  });
+  const payload = Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8").toString("base64");
   const script = String.raw`
 set -eu
 home_dir="${"${HOME:-}"}"
 if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
 config_dir="$home_dir/.config/plantlab"
 config_path="$config_dir/edge-agent.json"
-role=__ROLE__
-node_name=__NODE_NAME__
-coordinator_url=__COORDINATOR_URL__
 spool_root=__SPOOL_ROOT__
-capabilities_json=__CAPABILITIES__
-if [ -z "$coordinator_url" ]; then echo "coordinatorUrl is empty" >&2; exit 30; fi
+payload_b64=__PAYLOAD__
 if [ -z "$spool_root" ]; then spool_root="$home_dir/.local/state/plantlab-edge-agent"; fi
 mkdir -p "$config_dir" "$spool_root/spool/pending" "$spool_root/spool/uploading" "$spool_root/spool/acknowledged" "$spool_root/spool/failed" "$spool_root/logs"
 chmod 700 "$config_dir"
-python3 - "$config_path" "$role" "$node_name" "$coordinator_url" "$spool_root" "$capabilities_json" <<'PY'
-import json, os, sys
-path, role, node_name, coordinator_url, spool_root, capabilities_json = sys.argv[1:7]
+python3 - "$config_path" "$payload_b64" "$spool_root" <<'PY'
+import base64, json, os, sys
+path, payload_b64, spool_root = sys.argv[1:4]
+payload_bytes = base64.b64decode(payload_b64.encode("ascii"))
+payload = json.loads(payload_bytes.decode("utf-8"))
+if not payload.get("coordinatorUrl"):
+    raise SystemExit("coordinatorUrl is empty")
+if not payload.get("spoolRoot"):
+    payload["spoolRoot"] = spool_root
+    payload_bytes = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
 try:
-    capabilities = json.loads(capabilities_json)
+    with open(path, "rb") as f:
+        existing_bytes = f.read()
 except Exception:
-    capabilities = ["camera"]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        existing = json.load(f)
-except Exception:
-    existing = {}
-payload = {
-    "role": role,
-    "nodeName": node_name,
-    "coordinatorUrl": coordinator_url,
-    "spoolRoot": spool_root,
-    "capabilities": capabilities,
-    "heartbeatIntervalSeconds": int(existing.get("heartbeatIntervalSeconds", 30)),
-    "pollIntervalSeconds": int(existing.get("pollIntervalSeconds", 5)),
-    "maxSpoolBytes": int(existing.get("maxSpoolBytes", 536870912)),
-    "maxUploadBytes": int(existing.get("maxUploadBytes", 8388608)),
-}
-changed = existing != payload
+    existing_bytes = b""
+changed = existing_bytes != payload_bytes
 if changed:
     tmp = f"{path}.tmp-{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 with open(path, "r", encoding="utf-8") as f:
     parsed = json.load(f)
 if not parsed.get("coordinatorUrl"):
@@ -280,11 +427,8 @@ if not parsed.get("coordinatorUrl"):
 print(json.dumps({"changed": changed, "configPath": path, "spoolRoot": parsed.get("spoolRoot")}))
 PY
 `
-    .replace("__ROLE__", shellQuote(input.role))
-    .replace("__NODE_NAME__", shellQuote(input.nodeName))
-    .replace("__COORDINATOR_URL__", shellQuote(input.coordinatorUrl))
-    .replace("__SPOOL_ROOT__", shellQuote(input.spoolRoot ?? ""))
-    .replace("__CAPABILITIES__", shellQuote(capabilities));
+    .replace("__SPOOL_ROOT__", shellQuote(typeof merged.spoolRoot === "string" ? merged.spoolRoot : ""))
+    .replace("__PAYLOAD__", shellQuote(payload));
 
   const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 20_000 });
   if (result.status !== 0) {

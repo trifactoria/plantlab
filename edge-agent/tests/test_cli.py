@@ -27,6 +27,42 @@ def test_config_show_never_prints_the_credential(isolated_config, fake_coordinat
     assert "pln_validtoken" not in output
 
 
+def test_config_show_displays_greenhouse_sections_without_secrets(isolated_config, fake_coordinator, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url=fake_coordinator["url"],
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["camera", "temperature", "humidity", "relay", "fan"],
+            sensors=[
+                config.GreenhouseSensorConfig(
+                    key="greenhouse-ambient",
+                    name="Greenhouse ambient",
+                    type="dht22",
+                    gpio=4,
+                    placement="Top shelf",
+                    enabled=True,
+                )
+            ],
+            power=config.GreenhousePowerConfig(provider="kasa", host="192.168.1.72", outlets={"fans": "greenhouse-fans"}),
+        )
+    )
+    config.write_credential("pln_validtoken")
+    (config.CONFIG_DIR / "greenhouse.env").write_text('KASA_USERNAME="user"\nKASA_PASSWORD="secret"\n')
+
+    assert cli.main(["config", "show"]) == 0
+    output = capsys.readouterr().out
+    assert "Configured sensors: 1" in output
+    assert "greenhouse-ambient" in output
+    assert "BCM GPIO 4" in output
+    assert "Power provider: kasa" in output
+    assert "fans=greenhouse-fans" in output
+    assert "Greenhouse secret file: present" in output
+    assert "KASA_PASSWORD" not in output
+    assert 'KASA_PASSWORD="secret"' not in output
+
+
 def test_status_fails_when_coordinator_url_is_missing(isolated_config, capsys):
     config.write_config(
         config.EdgeAgentConfig(

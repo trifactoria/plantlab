@@ -6,7 +6,8 @@ import { computeNodeStatus, hasActiveCredential } from "../../lib/operations/nod
 import { probeRemoteCredential, rotateAndInstallCredential } from "../../lib/operations/credentialRepair";
 import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
 import { diagnoseEdgeAgent, type EdgeAgentDiagnostics } from "../../lib/operations/edgeAgentDiagnostics";
-import { verifyEdgeCommand } from "../../lib/operations/edgeAgentInstall";
+import { readRemoteEdgeAgentConfig, readRemoteGreenhouseSecretStatus, verifyEdgeCommand } from "../../lib/operations/edgeAgentInstall";
+import { redactedGreenhouseSummary } from "../../lib/operations/greenhouseConfig";
 import {
   diagnoseRemoteAgent,
   inspectRemoteHost,
@@ -584,6 +585,38 @@ async function runEdgeAgentDoctor(
     console.log(`Disk free: ${diagnostics.diskFree ?? "(unknown)"}`);
     console.log(`Memory: ${diagnostics.memoryTotalMb !== null ? `${diagnostics.memoryTotalMb} MB` : "(unknown)"}${diagnostics.memoryAvailableMb !== null ? ` (${diagnostics.memoryAvailableMb} MB available)` : ""}`);
     console.log(`Spool: ${diagnostics.spoolRoot ?? "(unknown)"}${diagnostics.spoolSizeBytes !== null ? ` (${formatBytes(diagnostics.spoolSizeBytes)})` : ""}`);
+  }
+  const greenhouseConfig = await readRemoteEdgeAgentConfig(sshHost).catch(() => null);
+  const greenhouseSecret = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => null);
+  if (greenhouseConfig?.config.role === "greenhouse-node") {
+    console.log("Greenhouse configuration:");
+    let summary: ReturnType<typeof redactedGreenhouseSummary> | null = null;
+    try {
+      summary = redactedGreenhouseSummary(greenhouseConfig.config, {
+        secretFileExists: greenhouseSecret?.exists ?? false,
+        pythonVersion: diagnostics?.pythonVersion ?? inspection.pythonVersion,
+      });
+    } catch (error) {
+      console.log(`  Config summary unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (summary) {
+    console.log(`  Role: ${summary.role ?? "(missing)"}`);
+    console.log(`  Declared/derived capabilities: ${summary.capabilities.join(", ") || "(none)"}`);
+    console.log(`  Sensors: ${summary.sensors.length}`);
+    for (const sensor of summary.sensors) {
+      console.log(`    - ${sensor.key}: ${sensor.name}, ${sensor.type}, BCM GPIO ${sensor.gpio}, ${sensor.placement ?? "no placement"}, ${sensor.enabled ? "enabled" : "disabled"}`);
+    }
+    if (summary.power) {
+      console.log(`  Power provider: ${summary.power.provider}`);
+      console.log(`  Power host: ${summary.power.host}`);
+      const outlets = Object.entries(summary.power.outlets);
+      console.log(`  Outlets: ${outlets.length > 0 ? outlets.map(([key, value]) => `${key}=${value}`).join(", ") : "(none)"}`);
+    } else {
+      console.log("  Power: not configured");
+    }
+    console.log(`  Greenhouse secret file: ${summary.greenhouseSecretFileExists ? "present" : "missing"}`);
+    if (summary.pythonKasaReadiness) console.log(`  Power readiness: ${summary.pythonKasaReadiness.status} - ${summary.pythonKasaReadiness.detail}`);
+    }
   }
   const edgeCommand = await verifyEdgeCommand(sshHost, inspection.remoteUser).catch(() => null);
   if (edgeCommand) {

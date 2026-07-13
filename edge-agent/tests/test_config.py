@@ -1,4 +1,5 @@
 from plantlab_edge_agent import config
+import pytest
 
 
 def test_read_config_returns_none_when_missing(isolated_config):
@@ -21,6 +22,121 @@ def test_write_then_read_config_round_trips(isolated_config):
     assert read_back.node_name == "greenhouse-zero"
     assert read_back.coordinator_url == "http://coordinator:3000"
     assert read_back.capabilities == ["camera"]
+    assert read_back.sensors == []
+    assert read_back.power is None
+
+
+def test_legacy_camera_only_config_loads(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        '{"role":"camera-node","nodeName":"cam","coordinatorUrl":"http://coordinator:3000","spoolRoot":"/tmp/spool","capabilities":["camera"]}\n'
+    )
+
+    read_back = config.read_config()
+
+    assert read_back is not None
+    assert read_back.role == "camera-node"
+    assert read_back.capabilities == ["camera"]
+    assert read_back.sensors == []
+    assert read_back.power is None
+
+
+def test_new_sensor_config_loads_and_derives_capabilities(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "sensors": [
+    {"key": "greenhouse-ambient", "name": "Greenhouse ambient", "type": "dht22", "gpio": 4, "placement": "Top shelf", "enabled": true}
+  ]
+}
+"""
+    )
+
+    read_back = config.read_config()
+
+    assert read_back is not None
+    assert read_back.sensors[0].key == "greenhouse-ambient"
+    assert read_back.sensors[0].gpio == 4
+    assert read_back.capabilities == ["camera", "temperature", "humidity"]
+
+
+def test_new_power_config_loads_and_derives_capabilities(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "power": {
+    "provider": "kasa",
+    "host": "192.168.1.72",
+    "outlets": {
+      "fans": "greenhouse-fans",
+      "water": "greenhouse-water",
+      "lights": "greenhouse-lights"
+    }
+  }
+}
+"""
+    )
+
+    read_back = config.read_config()
+
+    assert read_back is not None
+    assert read_back.power is not None
+    assert read_back.power.provider == "kasa"
+    assert read_back.power.outlets["fans"] == "greenhouse-fans"
+    assert read_back.capabilities == ["camera", "relay", "fan", "light", "pump"]
+
+
+def test_invalid_sensor_config_fails_clearly(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "sensors": [
+    {"key": "a", "name": "A", "type": "dht22", "gpio": 4, "enabled": true},
+    {"key": "b", "name": "B", "type": "dht22", "gpio": 4, "enabled": true}
+  ]
+}
+"""
+    )
+
+    with pytest.raises(config.ConfigError, match="Duplicate BCM GPIO assignment 4"):
+        config.read_config()
+
+
+def test_invalid_power_config_fails_clearly(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "power": {"provider": "kasa", "host": "192.168.1.72", "outlets": {"fans": ""}}
+}
+"""
+    )
+
+    with pytest.raises(config.ConfigError, match="power.outlets.fans"):
+        config.read_config()
 
 
 def test_validate_config_rejects_missing_coordinator_url(isolated_config):

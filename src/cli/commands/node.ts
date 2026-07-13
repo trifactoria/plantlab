@@ -1,5 +1,6 @@
 import os from "node:os";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import type { Command } from "commander";
 import { updateCameraInventory } from "../../lib/operations/agentProtocol";
 import { readNodeConfig } from "../../lib/operations/config";
@@ -12,9 +13,20 @@ import {
   edgeAgentInstallChangeStatus,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
+  readRemoteEdgeAgentConfig,
+  readRemoteGreenhouseSecretStatus,
   runEdgeAgentInstall,
   verifyEdgeCommand,
+  writeRemoteGreenhouseSecrets,
 } from "../../lib/operations/edgeAgentInstall";
+import {
+  deriveCapabilitiesFromEdgeConfig,
+  greenhouseConfigSummary,
+  pythonKasaReadiness,
+  redactedGreenhouseSummary,
+  type GreenhousePowerConfig,
+  type GreenhouseSensorConfig,
+} from "../../lib/operations/greenhouseConfig";
 import { diagnoseEdgeAgent } from "../../lib/operations/edgeAgentDiagnostics";
 import {
   diagnoseRemoteAgent,
@@ -459,6 +471,198 @@ async function promptEdgeAgentRole(sshHost: string, yes?: boolean): Promise<"cam
   }
 }
 
+type GreenhouseAttachSelection = {
+  cameraEnabled: boolean;
+  sensors?: GreenhouseSensorConfig[] | null;
+  power?: GreenhousePowerConfig | null;
+  disableSensors?: boolean;
+  disablePower?: boolean;
+  shouldWriteSecrets: boolean;
+  secrets?: { kasaUsername: string; kasaPassword: string };
+};
+
+async function promptGreenhouseAttachSelection(input: {
+  existingConfig: Record<string, unknown>;
+  secretFileExists: boolean;
+  pythonVersion?: string | null;
+  yes?: boolean;
+}): Promise<GreenhouseAttachSelection> {
+  const { existingConfig, secretFileExists, pythonVersion, yes } = input;
+  let summary: ReturnType<typeof greenhouseConfigSummary>;
+  try {
+    summary = greenhouseConfigSummary(existingConfig);
+  } catch (error) {
+    console.log(`Existing greenhouse configuration has validation errors: ${sanitizeError(error)}`);
+    summary = { sensors: [], power: null, capabilities: deriveCapabilitiesFromEdgeConfig(existingConfig) };
+  }
+  const existingCamera = summary.capabilities.includes("camera") || !existingConfig.role;
+  const hasExistingGreenhouseConfig = summary.sensors.length > 0 || summary.power !== null || existingConfig.role === "greenhouse-node";
+
+  if (hasExistingGreenhouseConfig) {
+    console.log("");
+    console.log("Existing greenhouse configuration:");
+    printGreenhouseSummary(existingConfig, secretFileExists, pythonVersion ?? null);
+  }
+
+  const cameraEnabled = await promptGreenhouseBoolean("Configure camera support? [Y/n] ", yes, existingCamera);
+  let sensors: GreenhouseSensorConfig[] | null | undefined;
+  let power: GreenhousePowerConfig | null | undefined;
+  let disableSensors = false;
+  let disablePower = false;
+
+  if (summary.sensors.length > 0) {
+    if (await promptGreenhouseBoolean("Reconfigure environmental sensors? [y/N] ", yes, false)) {
+      sensors = await promptSensorDefinitions(yes);
+    } else if (await promptGreenhouseBoolean("Disable configured environmental sensors? [y/N] ", yes, false)) {
+      disableSensors = true;
+    }
+  } else if (await promptGreenhouseBoolean("Configure environmental sensors? [y/N] ", yes, false)) {
+    sensors = await promptSensorDefinitions(yes);
+  }
+
+  if (summary.power) {
+    if (await promptGreenhouseBoolean("Reconfigure power control and future automation support? [y/N] ", yes, false)) {
+      power = await promptPowerConfig(yes);
+    } else if (await promptGreenhouseBoolean("Disable configured power control? [y/N] ", yes, false)) {
+      disablePower = true;
+    }
+  } else if (await promptGreenhouseBoolean("Configure power control and future automation support? [y/N] ", yes, false)) {
+    power = await promptPowerConfig(yes);
+  }
+
+  const powerWillBeConfigured = !disablePower && (power !== undefined ? power !== null : summary.power !== null);
+  let shouldWriteSecrets = false;
+  let secrets: { kasaUsername: string; kasaPassword: string } | undefined;
+  if (powerWillBeConfigured) {
+    const readiness = pythonKasaReadiness(pythonVersion);
+    console.log(readiness.detail);
+    const credentialsNeeded = !secretFileExists || power !== undefined;
+    if (credentialsNeeded && (await promptGreenhouseBoolean("Configure Kasa credentials now? [y/N] ", yes, false))) {
+      const kasaUsername = await promptSecretText("Kasa username: ");
+      const kasaPassword = await promptSecretText("Kasa password: ");
+      if (kasaUsername && kasaPassword) {
+        shouldWriteSecrets = true;
+        secrets = { kasaUsername, kasaPassword };
+      } else {
+        console.log("Kasa credentials were not written because one or both values were empty.");
+      }
+    } else if (secretFileExists && (await promptGreenhouseBoolean("Reconfigure Kasa credentials? [y/N] ", yes, false))) {
+      const kasaUsername = await promptSecretText("Kasa username: ");
+      const kasaPassword = await promptSecretText("Kasa password: ");
+      if (kasaUsername && kasaPassword) {
+        shouldWriteSecrets = true;
+        secrets = { kasaUsername, kasaPassword };
+      }
+    }
+  }
+
+  return { cameraEnabled, sensors, power, disableSensors, disablePower, shouldWriteSecrets, secrets };
+}
+
+function printGreenhouseSummary(config: Record<string, unknown>, secretFileExists: boolean, pythonVersion: string | null): void {
+  let summary: ReturnType<typeof redactedGreenhouseSummary>;
+  try {
+    summary = redactedGreenhouseSummary(config, { secretFileExists, pythonVersion });
+  } catch (error) {
+    console.log(`  Config summary unavailable: ${sanitizeError(error)}`);
+    return;
+  }
+  console.log(`  Role: ${summary.role ?? "(missing)"}`);
+  console.log(`  Capabilities: ${summary.capabilities.join(", ") || "(none)"}`);
+  console.log(`  Sensors: ${summary.sensors.length}`);
+  for (const sensor of summary.sensors) {
+    console.log(`    - ${sensor.key}: ${sensor.name}, ${sensor.type}, BCM GPIO ${sensor.gpio}, ${sensor.placement ?? "no placement"}, ${sensor.enabled ? "enabled" : "disabled"}`);
+  }
+  if (summary.power) {
+    console.log(`  Power: ${summary.power.provider} at ${summary.power.host}`);
+    const outlets = Object.entries(summary.power.outlets);
+    console.log(`  Outlets: ${outlets.length > 0 ? outlets.map(([key, value]) => `${key}=${value}`).join(", ") : "(none)"}`);
+  } else {
+    console.log("  Power: not configured");
+  }
+  console.log(`  Greenhouse secret file: ${secretFileExists ? "present" : "missing"}`);
+  if (summary.pythonKasaReadiness) console.log(`  Kasa readiness: ${summary.pythonKasaReadiness.status} (${summary.pythonKasaReadiness.detail})`);
+}
+
+async function promptSensorDefinitions(yes?: boolean): Promise<GreenhouseSensorConfig[]> {
+  if (yes || !process.stdin.isTTY) return [];
+  const sensors: GreenhouseSensorConfig[] = [];
+  do {
+    const key = await promptText("Sensor logical key: ");
+    const name = await promptText("Sensor display name: ");
+    const gpioText = await promptText("BCM GPIO number: ");
+    const gpio = Number(gpioText);
+    const placement = await promptText("Physical placement (optional): ", false);
+    const enabled = await promptGreenhouseBoolean("Enabled? [Y/n] ", false, true);
+    sensors.push({
+      key,
+      name,
+      type: "dht22",
+      gpio,
+      placement: placement || null,
+      enabled,
+    });
+  } while (await promptGreenhouseBoolean("Add another sensor? [y/N] ", false, false));
+  return sensors;
+}
+
+async function promptPowerConfig(yes?: boolean): Promise<GreenhousePowerConfig | null> {
+  if (yes || !process.stdin.isTTY) return null;
+  console.log("Provider: kasa");
+  const host = await promptText("Kasa host: ");
+  const fans = await promptText("Fans outlet alias (optional): ", false);
+  const water = await promptText("Water outlet alias (optional): ", false);
+  const lights = await promptText("Lights outlet alias (optional): ", false);
+  const outlets: GreenhousePowerConfig["outlets"] = {};
+  if (fans) outlets.fans = fans;
+  if (water) outlets.water = water;
+  if (lights) outlets.lights = lights;
+  return { provider: "kasa", host, outlets };
+}
+
+async function promptGreenhouseBoolean(question: string, yes: boolean | undefined, defaultYes: boolean): Promise<boolean> {
+  if (yes || !process.stdin.isTTY) return defaultYes;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(question)).trim().toLowerCase();
+    if (!answer) return defaultYes;
+    return answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptText(question: string, required = true): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (;;) {
+      const answer = (await rl.question(question)).trim();
+      if (answer || !required) return answer;
+      console.log("A value is required.");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptSecretText(question: string): Promise<string> {
+  if (!process.stdin.isTTY) return "";
+  const muted = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  process.stdout.write(question);
+  const rl = createInterface({ input: process.stdin, output: muted, terminal: true });
+  try {
+    const answer = (await rl.question("")).trim();
+    process.stdout.write("\n");
+    return answer;
+  } finally {
+    rl.close();
+  }
+}
+
 /**
  * The lightweight-agent counterpart of the main attach action's
  * register+converge+wait-heartbeat sequence (Parts 11-12) - installs Only
@@ -479,6 +683,37 @@ async function runEdgeAgentAttach(input: {
 
   const role = await promptEdgeAgentRole(sshHost, options.yes);
   steps.complete("Role selection", role);
+  let greenhouseSelection: GreenhouseAttachSelection | null = null;
+  let registerCapabilities = role === "camera-node" ? ["camera"] : ["camera"];
+  if (role === "greenhouse-node") {
+    const existingConfigResult = await readRemoteEdgeAgentConfig(sshHost).catch((error) => {
+      console.log(`Could not read existing greenhouse configuration; continuing with a fresh config view: ${sanitizeError(error)}`);
+      return { configPath: null, exists: false, config: {}, error: null };
+    });
+    if (existingConfigResult.error) {
+      console.log(`Existing edge-agent config could not be parsed and will be repaired: ${existingConfigResult.error}`);
+    }
+    const secretStatus = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => ({ path: null, exists: false, mode: null }));
+    greenhouseSelection = await promptGreenhouseAttachSelection({
+      existingConfig: existingConfigResult.config,
+      secretFileExists: secretStatus.exists,
+      pythonVersion: inspection.pythonVersion,
+      yes: options.yes,
+    });
+    const capabilityConfig: Record<string, unknown> = {
+      ...existingConfigResult.config,
+      role: "greenhouse-node",
+      nodeName: sshHost,
+      coordinatorUrl,
+      capabilities: greenhouseSelection.cameraEnabled ? ["camera"] : [],
+    };
+    if (greenhouseSelection.disableSensors) delete capabilityConfig.sensors;
+    else if (greenhouseSelection.sensors !== undefined && greenhouseSelection.sensors !== null) capabilityConfig.sensors = greenhouseSelection.sensors;
+    if (greenhouseSelection.disablePower) delete capabilityConfig.power;
+    else if (greenhouseSelection.power !== undefined) capabilityConfig.power = greenhouseSelection.power;
+    registerCapabilities = deriveCapabilitiesFromEdgeConfig(capabilityConfig);
+    steps.complete("Greenhouse configuration", `${registerCapabilities.join(", ") || "no"} capabilities selected.`);
+  }
   const sourceVersion = await localEdgeAgentVersion();
   const installedBefore = await readInstalledEdgeAgentVersion(sshHost);
 
@@ -533,6 +768,7 @@ async function runEdgeAgentAttach(input: {
     architecture: inspection.architecture,
     softwareVersion: null,
     coordinatorUrl,
+    capabilities: registerCapabilities,
   };
   const credentialInput = {
     sshHost,
@@ -546,6 +782,15 @@ async function runEdgeAgentAttach(input: {
     nodeName: sshHost,
     remoteUser: inspection.remoteUser,
     registerInput,
+    edgeConfig: greenhouseSelection
+      ? {
+          cameraEnabled: greenhouseSelection.cameraEnabled,
+          sensors: greenhouseSelection.sensors,
+          power: greenhouseSelection.power,
+          disableSensors: greenhouseSelection.disableSensors,
+          disablePower: greenhouseSelection.disablePower,
+        }
+      : { cameraEnabled: true },
     heartbeatTimeoutMs: options.timeoutMs,
   };
 
@@ -592,17 +837,33 @@ async function runEdgeAgentAttach(input: {
     console.log("✓ Agent restarted");
     console.log("✓ Authenticated heartbeat received");
   }
+  if (greenhouseSelection?.shouldWriteSecrets && greenhouseSelection.secrets) {
+    const secretWrite = await writeRemoteGreenhouseSecrets(sshHost, greenhouseSelection.secrets);
+    if (secretWrite.status !== 0) {
+      steps.fail("Greenhouse secrets", (secretWrite.stderr.trim() || "greenhouse.env write failed.").slice(0, 2000));
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    steps.complete("Greenhouse secrets", "~/.config/plantlab/greenhouse.env written with owner-only permissions.");
+    console.log("✓ Greenhouse secret file written");
+  }
   steps.complete("Heartbeat", "Agent heartbeat received");
 
-  console.log("Waiting for camera inventory...");
-  const inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, options.timeoutMs);
-  if (inventory.length === 0) {
-    steps.fail("Camera report", "No camera inventory was reported by the edge agent.");
-    printAttachIncomplete(steps, sshHost);
-    process.exitCode = 1;
-    return;
+  let inventory: Awaited<ReturnType<typeof waitForNodeInventory>> = [];
+  if (registerCapabilities.includes("camera")) {
+    console.log("Waiting for camera inventory...");
+    inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, options.timeoutMs);
+    if (inventory.length === 0) {
+      steps.fail("Camera report", "No camera inventory was reported by the edge agent.");
+      printAttachIncomplete(steps, sshHost);
+      process.exitCode = 1;
+      return;
+    }
+    steps.complete("Camera report", `${inventory.length} camera(s) detected from active agent heartbeat`);
+  } else {
+    steps.complete("Camera report", "Skipped; camera support is not enabled for this greenhouse node.");
   }
-  steps.complete("Camera report", `${inventory.length} camera(s) detected from active agent heartbeat`);
   await markNodeStatus(prisma, repair.node.id, "pending");
 
   const result = { inspection, node: repair.node, configured: true, credentialRotated: repair.rotated, runtime: "python-edge", cameras: inventory.length };
@@ -618,9 +879,10 @@ async function runEdgeAgentAttach(input: {
   console.log("Runtime: python-edge (PlantLab Edge Agent)");
   console.log(`Coordinator: ${coordinatorUrl}`);
   console.log(`Cameras detected: ${inventory.length}`);
+  if (role === "greenhouse-node") console.log(`Capabilities: ${registerCapabilities.join(", ") || "(none)"}`);
   console.log("Remote agent: healthy");
 
-  if (await confirmOptional("\nConfigure a camera now? [Y/n] ", options.yes, true)) {
+  if (registerCapabilities.includes("camera") && (await confirmOptional("\nConfigure a camera now? [Y/n] ", options.yes, true))) {
     const attached = await runCameraAttachFlow({ node: sshHost, yes: options.yes });
     console.log("");
     console.log("Camera attached.");

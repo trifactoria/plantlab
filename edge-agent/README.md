@@ -52,6 +52,69 @@ plantlab-edge version
 These commands use only Python and the copied `edge-agent/` package. They
 never print the node credential.
 
+## Greenhouse configuration foundations
+
+For `greenhouse-node` roles, `plantlab node attach <ssh-host>` can now
+persist optional greenhouse hardware configuration in:
+
+```text
+~/.config/plantlab/edge-agent.json
+```
+
+The supported stage-one sections are configuration only:
+
+```json
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "capabilities": ["camera", "temperature", "humidity", "relay", "fan", "light", "pump"],
+  "sensors": [
+    {
+      "key": "greenhouse-ambient",
+      "name": "Greenhouse ambient",
+      "type": "dht22",
+      "gpio": 4,
+      "placement": "Greenhouse ambient",
+      "enabled": true
+    }
+  ],
+  "power": {
+    "provider": "kasa",
+    "host": "192.168.1.72",
+    "outlets": {
+      "fans": "greenhouse-fans",
+      "water": "greenhouse-water",
+      "lights": "greenhouse-lights"
+    }
+  }
+}
+```
+
+GPIO values use BCM numbering, not physical header pin numbers. Sensor
+keys must be unique, GPIO assignments must be unique, and the only sensor
+driver type accepted in this stage is `dht22`.
+
+Kasa credentials are not stored in `edge-agent.json`. If configured, they
+belong in:
+
+```text
+~/.config/plantlab/greenhouse.env
+```
+
+with owner-only permissions. The current keys are:
+
+```dotenv
+KASA_USERNAME=
+KASA_PASSWORD=
+```
+
+This stage does not install `python-kasa`, read DHT22 sensors, connect to
+Kasa devices, upload sensor readings, or run automation rules. Planned Kasa
+runtime support requires Python 3.11 or newer; `plantlab doctor --node
+<ssh-host>` reports the remote Python readiness status when power control
+is configured.
+
 ## Layout
 
 ```
@@ -86,7 +149,6 @@ equivalent for the edge agent yet; see "Known limitations" below.
   appropriate if capture resolution is raised significantly.
 - No independent update mechanism yet (see above) - re-copying the
   directory and re-running `install.sh` is the only path today.
-- Sensor/relay capabilities are modeled (`capabilities.py`/the
-  coordinator's capability list) but not implemented - camera-only, by
-  design (see the task's explicit "do not implement sensor or relay
-  control yet").
+- Sensor/relay capabilities can be configured and reported for
+  `greenhouse-node`, but live DHT22 reads, Kasa communication, readings
+  upload, and automation rules are not implemented yet.

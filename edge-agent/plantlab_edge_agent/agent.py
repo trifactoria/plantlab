@@ -174,6 +174,12 @@ def run_loop(stop_check=lambda: False) -> None:
     spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
     spool.init()
     logger.info("PlantLab edge agent starting: coordinator=%s spool=%s", cfg.coordinator_url, cfg.spool_root)
+    if cfg.sensors or cfg.power:
+        logger.info(
+            "Greenhouse hardware config loaded: sensors=%d power=%s; live sensor and Kasa drivers are not enabled in this implementation stage.",
+            len(cfg.sensors),
+            cfg.power.provider if cfg.power else "not configured",
+        )
 
     stopping = {"value": False}
 

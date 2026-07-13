@@ -36,6 +36,7 @@ def _load_config_safely():
 
 def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
     token = config.read_credential()
+    greenhouse_secret_path = config.CONFIG_DIR / "greenhouse.env"
     return {
         "configPath": str(config.CONFIG_PATH),
         "credentialPath": str(config.CREDENTIAL_PATH),
@@ -50,6 +51,20 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
         "maxUploadBytes": cfg.max_upload_bytes if cfg else None,
         "credentialPresent": bool(token),
         "credentialLength": len(token) if token else 0,
+        "greenhouseSecretPath": str(greenhouse_secret_path),
+        "greenhouseSecretPresent": greenhouse_secret_path.exists(),
+        "sensors": [
+            {
+                "key": sensor.key,
+                "name": sensor.name,
+                "type": sensor.type,
+                "gpio": sensor.gpio,
+                "placement": sensor.placement,
+                "enabled": sensor.enabled,
+            }
+            for sensor in (cfg.sensors if cfg else [])
+        ],
+        "power": {"provider": cfg.power.provider, "host": cfg.power.host, "outlets": dict(cfg.power.outlets)} if cfg and cfg.power else None,
     }
 
 
@@ -189,6 +204,17 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"Coordinator URL: {summary['coordinatorUrl'] or '(missing)'}")
     print(f"Spool root: {summary['spoolRoot']}")
     print(f"Capabilities: {', '.join(summary['capabilities']) if summary['capabilities'] else '(none)'}")
+    print(f"Configured sensors: {len(summary['sensors'])}")
+    for sensor in summary["sensors"]:
+        print(f"  - {sensor['key']}: {sensor['name']}, {sensor['type']}, BCM GPIO {sensor['gpio']}, {sensor['placement'] or 'no placement'}, {'enabled' if sensor['enabled'] else 'disabled'}")
+    if summary["power"]:
+        print(f"Power provider: {summary['power']['provider']}")
+        print(f"Power host: {summary['power']['host']}")
+        outlets = summary["power"]["outlets"]
+        print(f"Power outlets: {', '.join(f'{key}={value}' for key, value in outlets.items()) if outlets else '(none)'}")
+    else:
+        print("Power: not configured")
+    print(f"Greenhouse secret file: {'present' if summary['greenhouseSecretPresent'] else 'missing'} ({summary['greenhouseSecretPath']})")
     print(f"Heartbeat interval: {summary['heartbeatIntervalSeconds'] or '(missing)'}")
     print(f"Poll interval: {summary['pollIntervalSeconds'] or '(missing)'}")
     print(f"Credential present: {'yes' if summary['credentialPresent'] else 'no'}")

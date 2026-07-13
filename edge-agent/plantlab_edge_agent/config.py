@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 CONFIG_DIR = Path(os.environ.get("PLANTLAB_EDGE_CONFIG_DIR", str(Path.home() / ".config" / "plantlab")))
@@ -31,12 +32,31 @@ class ConfigError(Exception):
 
 
 @dataclass
+class GreenhouseSensorConfig:
+    key: str
+    name: str
+    type: str
+    gpio: int
+    placement: Optional[str] = None
+    enabled: bool = True
+
+
+@dataclass
+class GreenhousePowerConfig:
+    provider: str
+    host: str
+    outlets: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class EdgeAgentConfig:
     role: str
     node_name: str
     coordinator_url: str
     spool_root: str
     capabilities: List[str]
+    sensors: List[GreenhouseSensorConfig] = field(default_factory=list)
+    power: Optional[GreenhousePowerConfig] = None
     heartbeat_interval_seconds: int = 30
     poll_interval_seconds: int = 5
     max_spool_bytes: int = 512 * 1024 * 1024  # 512MB - a Pi Zero's whole SD card is usually 8-32GB, but this stays conservative.
@@ -49,12 +69,28 @@ def read_config() -> Optional[EdgeAgentConfig]:
         return None
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         raw = json.load(f)
+    if not isinstance(raw, dict):
+        raise ConfigError("edge-agent.json must contain a JSON object.")
+    sensors = parse_sensors(raw.get("sensors"))
+    power = parse_power(raw.get("power"))
+    raw_capabilities = raw.get("capabilities", ["camera"])
+    if not isinstance(raw_capabilities, list):
+        raw_capabilities = []
+    role = raw.get("role", "greenhouse-node")
+    capabilities = derive_capabilities(
+        role=role,
+        current=[item for item in raw_capabilities if isinstance(item, str)],
+        sensors=sensors,
+        power=power,
+    )
     return EdgeAgentConfig(
-        role=raw.get("role", "greenhouse-node"),
+        role=role,
         node_name=raw.get("nodeName") or raw.get("node_name") or "",
         coordinator_url=raw.get("coordinatorUrl") or raw.get("coordinator_url") or "",
         spool_root=raw.get("spoolRoot") or raw.get("spool_root") or str(DEFAULT_SPOOL_ROOT),
-        capabilities=raw.get("capabilities", ["camera"]),
+        capabilities=capabilities,
+        sensors=sensors,
+        power=power,
         heartbeat_interval_seconds=int(raw.get("heartbeatIntervalSeconds", 30)),
         poll_interval_seconds=int(raw.get("pollIntervalSeconds", 5)),
         max_spool_bytes=int(raw.get("maxSpoolBytes", 512 * 1024 * 1024)),
@@ -63,7 +99,7 @@ def read_config() -> Optional[EdgeAgentConfig]:
 
 
 def config_to_payload(config: EdgeAgentConfig) -> dict:
-    return {
+    payload = {
         "role": config.role,
         "nodeName": config.node_name,
         "coordinatorUrl": config.coordinator_url,
@@ -74,6 +110,21 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "maxSpoolBytes": config.max_spool_bytes,
         "maxUploadBytes": config.max_upload_bytes,
     }
+    if config.sensors:
+        payload["sensors"] = [
+            {
+                "key": sensor.key,
+                "name": sensor.name,
+                "type": sensor.type,
+                "gpio": sensor.gpio,
+                "placement": sensor.placement,
+                "enabled": sensor.enabled,
+            }
+            for sensor in config.sensors
+        ]
+    if config.power:
+        payload["power"] = {"provider": config.power.provider, "host": config.power.host, "outlets": dict(config.power.outlets)}
+    return payload
 
 
 def write_config(config: EdgeAgentConfig) -> None:
@@ -84,7 +135,122 @@ def write_config(config: EdgeAgentConfig) -> None:
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp_path, CONFIG_PATH)
+
+
+def parse_sensors(raw) -> List[GreenhouseSensorConfig]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError("sensors must be an array.")
+    sensors: List[GreenhouseSensorConfig] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ConfigError(f"sensors[{index}] must be an object.")
+        key = _required_string(item.get("key"), f"sensors[{index}].key")
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]*$", key):
+            raise ConfigError(f"sensors[{index}].key must contain only letters, numbers, underscores, and hyphens.")
+        name = _required_string(item.get("name"), f"sensors[{index}].name")
+        sensor_type = _required_string(item.get("type"), f"sensors[{index}].type")
+        if sensor_type != "dht22":
+            raise ConfigError(f'Unsupported sensor type "{sensor_type}". Supported sensor types: dht22.')
+        gpio = item.get("gpio")
+        if not isinstance(gpio, int) or isinstance(gpio, bool) or gpio < 0 or gpio > 27:
+            raise ConfigError(f"sensors[{index}].gpio must be a BCM GPIO number from 0 to 27.")
+        if "enabled" in item and not isinstance(item.get("enabled"), bool):
+            raise ConfigError(f"sensors[{index}].enabled must be a boolean when present.")
+        placement_raw = item.get("placement")
+        placement = str(placement_raw).strip() if placement_raw is not None else None
+        sensors.append(
+            GreenhouseSensorConfig(
+                key=key,
+                name=name,
+                type=sensor_type,
+                gpio=gpio,
+                placement=placement or None,
+                enabled=item.get("enabled", True),
+            )
+        )
+    _validate_sensor_set(sensors)
+    return sensors
+
+
+def parse_power(raw) -> Optional[GreenhousePowerConfig]:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("power must be an object.")
+    if raw.get("enabled") is False:
+        return None
+    provider = _required_string(raw.get("provider"), "power.provider")
+    if provider != "kasa":
+        raise ConfigError(f'Unsupported power provider "{provider}". Supported providers: kasa.')
+    host = _required_string(raw.get("host"), "power.host")
+    outlets_raw = raw.get("outlets", {})
+    if not isinstance(outlets_raw, dict):
+        raise ConfigError("power.outlets must be an object.")
+    outlets: Dict[str, str] = {}
+    for key, value in outlets_raw.items():
+        if key not in ("fans", "water", "lights"):
+            raise ConfigError(f'Unsupported power outlet key "{key}". Supported keys: fans, water, lights.')
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"power.outlets.{key} must be a non-empty string when present.")
+        outlets[key] = value.strip()
+    return GreenhousePowerConfig(provider=provider, host=host, outlets=outlets)
+
+
+def derive_capabilities(
+    *,
+    role: str,
+    current: List[str],
+    sensors: List[GreenhouseSensorConfig],
+    power: Optional[GreenhousePowerConfig],
+) -> List[str]:
+    capabilities: List[str] = []
+    if "camera" in current:
+        capabilities.append("camera")
+    if role != "greenhouse-node":
+        return _unique_capabilities(capabilities)
+    if any(sensor.enabled and sensor.type == "dht22" for sensor in sensors):
+        capabilities.extend(["temperature", "humidity"])
+    if power:
+        capabilities.append("relay")
+        if power.outlets.get("fans"):
+            capabilities.append("fan")
+        if power.outlets.get("lights"):
+            capabilities.append("light")
+        if power.outlets.get("water"):
+            capabilities.append("pump")
+    return _unique_capabilities(capabilities)
+
+
+def _required_string(value, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{label} is required.")
+    return value.strip()
+
+
+def _validate_sensor_set(sensors: List[GreenhouseSensorConfig]) -> None:
+    keys = set()
+    gpios = set()
+    for sensor in sensors:
+        if sensor.key in keys:
+            raise ConfigError(f'Duplicate sensor key "{sensor.key}".')
+        keys.add(sensor.key)
+        if sensor.gpio in gpios:
+            raise ConfigError(f"Duplicate BCM GPIO assignment {sensor.gpio}.")
+        gpios.add(sensor.gpio)
+
+
+def _unique_capabilities(values: List[str]) -> List[str]:
+    valid = {"camera", "temperature", "humidity", "soil-moisture", "relay", "fan", "light", "pump", "microscope"}
+    result: List[str] = []
+    for value in values:
+        if value in valid and value not in result:
+            result.append(value)
+    return result
 
 
 def read_credential() -> Optional[str]:
@@ -117,6 +283,20 @@ def validate_config(config: EdgeAgentConfig) -> List[str]:
         problems.append("spoolRoot is missing.")
     if not config.capabilities:
         problems.append("capabilities is empty.")
+    try:
+        _validate_sensor_set(config.sensors)
+    except ConfigError as exc:
+        problems.append(str(exc))
+    for index, sensor in enumerate(config.sensors):
+        if sensor.type != "dht22":
+            problems.append(f'Unsupported sensor type "{sensor.type}". Supported sensor types: dht22.')
+        if not isinstance(sensor.gpio, int) or isinstance(sensor.gpio, bool) or sensor.gpio < 0 or sensor.gpio > 27:
+            problems.append(f"sensors[{index}].gpio must be a BCM GPIO number from 0 to 27.")
+    if config.power:
+        if config.power.provider != "kasa":
+            problems.append(f'Unsupported power provider "{config.power.provider}". Supported providers: kasa.')
+        if not config.power.host:
+            problems.append("power.host is required.")
     return problems
 
 
