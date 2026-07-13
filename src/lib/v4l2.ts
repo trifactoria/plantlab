@@ -4,6 +4,8 @@ import { readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { composeStableId, readUsbIdentity } from "./cameraIdentity";
+import { normalizeCameraFormats, normalizeCameraInputFormat, preferredCameraMode, type CameraFormat, type CameraFormatResolution } from "./cameraModes";
+export type { CameraFormat, CameraFormatResolution } from "./cameraModes";
 
 export type LocalCamera = {
   name: string;
@@ -51,18 +53,6 @@ export type CameraControl = {
    */
   inactive: boolean;
   options?: Array<{ value: number; label: string }>;
-};
-
-export type CameraFormatResolution = {
-  width: number;
-  height: number;
-  frameRates: string[];
-};
-
-export type CameraFormat = {
-  pixelFormat: string;
-  description: string;
-  resolutions: CameraFormatResolution[];
 };
 
 function execFileText(command: string, args: string[]) {
@@ -197,18 +187,12 @@ async function verifyCameraGroups(cameras: LocalCamera[]): Promise<LocalCamera[]
 
 type ProbeFormatCandidate = { pixelFormat: string; width: number; height: number };
 
-/** Prefers MJPEG at the first reported resolution (Part 5), always with a conservative 640x480 fallback candidate for devices with no reported formats or whose reported resolution doesn't actually work. */
+/** Prefers MJPEG at the highest reported resolution, always with a conservative 640x480 fallback candidate for devices with no reported formats or whose reported resolution doesn't actually work. */
 function buildProbeCandidates(formats: CameraFormat[]): ProbeFormatCandidate[] {
   const candidates: ProbeFormatCandidate[] = [];
-  const byMjpegFirst = [...formats].sort((a, b) => {
-    const aScore = /mjp/i.test(a.pixelFormat) ? 0 : 1;
-    const bScore = /mjp/i.test(b.pixelFormat) ? 0 : 1;
-    return aScore - bScore;
-  });
-  const preferred = byMjpegFirst.find((format) => format.resolutions.length > 0);
+  const preferred = preferredCameraMode(formats);
   if (preferred) {
-    const resolution = preferred.resolutions[0];
-    candidates.push({ pixelFormat: preferred.pixelFormat, width: resolution.width, height: resolution.height });
+    candidates.push({ pixelFormat: preferred.inputFormat, width: preferred.width, height: preferred.height });
   }
   const isConservativeFallbackDuplicate = candidates.some((c) => c.width === 640 && c.height === 480);
   if (!isConservativeFallbackDuplicate) {
@@ -267,7 +251,7 @@ function runProbeFfmpeg(device: string, candidate: ProbeFormatCandidate, outputP
     "-f",
     "v4l2",
     "-input_format",
-    candidate.pixelFormat.toLowerCase() === "mjpg" ? "mjpeg" : candidate.pixelFormat,
+    normalizeCameraInputFormat(candidate.pixelFormat),
     "-video_size",
     `${candidate.width}x${candidate.height}`,
     "-i",
@@ -438,6 +422,10 @@ export async function listCameraControls(device: string): Promise<CameraControl[
 
 export async function listCameraFormats(device: string): Promise<CameraFormat[]> {
   const output = await execFileText("v4l2-ctl", ["-d", device, "--list-formats-ext"]);
+  return parseCameraFormatsOutput(output);
+}
+
+export function parseCameraFormatsOutput(output: string): CameraFormat[] {
   const formats: CameraFormat[] = [];
   let currentFormat: CameraFormat | null = null;
   let currentResolution: CameraFormatResolution | null = null;
@@ -449,7 +437,7 @@ export async function listCameraFormats(device: string): Promise<CameraFormat[]>
 
     if (formatMatch) {
       currentFormat = {
-        pixelFormat: formatMatch[1].toLowerCase(),
+        pixelFormat: normalizeCameraInputFormat(formatMatch[1]),
         description: formatMatch[2].trim(),
         resolutions: [],
       };
@@ -473,7 +461,7 @@ export async function listCameraFormats(device: string): Promise<CameraFormat[]>
     }
   }
 
-  return formats;
+  return normalizeCameraFormats(formats);
 }
 
 function parseControlFlags(rawMeta: string) {

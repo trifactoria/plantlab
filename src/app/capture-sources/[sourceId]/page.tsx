@@ -12,7 +12,14 @@ export default async function CaptureSourcePage({ params }: PageProps) {
   const { sourceId } = await params;
   const source = await prisma.captureSource.findUnique({
     where: { id: sourceId },
-    include: { cameraProfile: true },
+    include: {
+      cameraProfile: true,
+      assignments: {
+        where: { active: true },
+        orderBy: { updatedAt: "desc" },
+        take: 1,
+      },
+    },
   });
 
   if (!source) {
@@ -25,6 +32,7 @@ export default async function CaptureSourcePage({ params }: PageProps) {
   });
 
   const production = !localCameraHardwareEnabled();
+  const assignment = source.assignments[0] ?? null;
 
   return (
     <main className="min-h-screen">
@@ -61,6 +69,9 @@ export default async function CaptureSourcePage({ params }: PageProps) {
                 flipHorizontal: source.flipHorizontal,
                 flipVertical: source.flipVertical,
                 active: source.active,
+                inputFormat: assignment?.inputFormat ?? source.cameraProfile?.inputFormat ?? "mjpeg",
+                rawWidth: assignment?.width ?? source.cameraProfile?.width ?? null,
+                rawHeight: assignment?.height ?? source.cameraProfile?.height ?? null,
                 photoIntervalMinutes: source.photoIntervalMinutes,
                 captureStartAt: source.captureStartAt.toISOString(),
                 timeZone: source.timeZone,

@@ -95,6 +95,74 @@ def test_capture_frame_succeeds_and_uses_conservative_default_resolution(tmp_pat
     assert output.stat().st_size > 0
 
 
+def test_parse_formats_output_preserves_mjpg_and_yuyv_families():
+    formats = camera._parse_formats_output(
+        "\n".join(
+            [
+                "[0]: 'MJPG' (Motion-JPEG)",
+                "  Size: Discrete 1280x720",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 960x540",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "[1]: 'YUYV' (YUYV 4:2:2)",
+                "  Size: Discrete 640x480",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+            ]
+        )
+    )
+
+    assert formats == [
+        {
+            "pixelFormat": "mjpeg",
+            "description": "Motion-JPEG",
+            "resolutions": [
+                {"width": 1280, "height": 720, "frameRates": ["30.000 fps"]},
+                {"width": 960, "height": 540, "frameRates": ["30.000 fps"]},
+            ],
+        },
+        {
+            "pixelFormat": "yuyv422",
+            "description": "YUYV 4:2:2",
+            "resolutions": [{"width": 640, "height": 480, "frameRates": ["30.000 fps"]}],
+        },
+    ]
+
+
+def test_build_probe_candidates_prefers_highest_mjpeg_mode():
+    formats = [
+        {
+            "pixelFormat": "mjpeg",
+            "description": "Motion-JPEG",
+            "resolutions": [
+                {"width": 1280, "height": 720, "frameRates": ["30.000 fps"]},
+                {"width": 1920, "height": 1080, "frameRates": ["30.000 fps"]},
+            ],
+        },
+        {
+            "pixelFormat": "yuyv422",
+            "description": "YUYV 4:2:2",
+            "resolutions": [{"width": 640, "height": 480, "frameRates": ["30.000 fps"]}],
+        },
+    ]
+
+    assert camera._build_probe_candidates(formats)[0] == ("mjpeg", 1920, 1080)
+
+
+def test_capture_frame_normalizes_yuyv_to_ffmpeg_yuyv422(tmp_path):
+    output = tmp_path / "out.jpg"
+    captured_args = []
+
+    def fake_run(args, **kwargs):
+        captured_args.extend(args)
+        output.write_bytes(b"\xff\xd8\xff")
+        return _completed(returncode=0)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        camera.capture_frame("/dev/video0", str(output), width=640, height=480, input_format="YUYV")
+
+    assert captured_args[captured_args.index("-input_format") + 1] == "yuyv422"
+
+
 def test_raspicam_tools_are_never_required_only_opportunistically_detected():
     with patch.object(camera, "command_exists", return_value=False):
         assert camera.raspicam_tools_available() is False  # must not raise even when absent

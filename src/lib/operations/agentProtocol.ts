@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import type { CameraFormat } from "../v4l2";
+import { normalizeCameraFormats, type CameraFormat } from "../cameraModes";
 import { authenticateNodeCredential, type AuthenticatedNode } from "./nodeCredentials";
 import { serializeCapabilities } from "./capabilities";
 
@@ -83,14 +83,14 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
           stableId,
           devicePath: camera.devicePath,
           name: camera.name ?? null,
-          formatsJson: JSON.stringify(camera.formats ?? []),
+          formatsJson: JSON.stringify(normalizeCameraFormats(camera.formats ?? [])),
           available: camera.available ?? true,
           lastSeenAt: now,
         },
         update: {
           devicePath: camera.devicePath,
           name: camera.name ?? null,
-          formatsJson: JSON.stringify(camera.formats ?? []),
+          formatsJson: JSON.stringify(normalizeCameraFormats(camera.formats ?? [])),
           available: camera.available ?? true,
           lastSeenAt: now,
         },

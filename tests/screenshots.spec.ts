@@ -73,7 +73,7 @@ for (const viewport of viewports) {
     await capture(page, `${prefix}-capture-sources-list`);
 
     await goto(page, `/capture-sources/${ids.captureSourceId}`);
-    await page.getByTestId("raw-resolution-select").selectOption({ label: "3840 x 2160 (15.000 fps)" });
+    await page.getByTestId("raw-resolution-select").selectOption({ label: "MJPEG - 3840x2160 - 15.000 fps" });
     await page.getByTestId("rotation-select").selectOption("90");
     await capture(page, `${prefix}-shelf-camera-4k-rotation-preview`);
 

@@ -9,6 +9,7 @@ import {
   initialScheduleValue,
   type CaptureScheduleValue,
 } from "@/components/CaptureScheduleFields";
+import { preferredCameraMode } from "@/lib/cameraModes";
 
 export function CaptureSourceForm() {
   const router = useRouter();
@@ -18,6 +19,7 @@ export function CaptureSourceForm() {
   const [cameraStableId, setCameraStableId] = useState<string | null>(null);
   const [width, setWidth] = useState("1920");
   const [height, setHeight] = useState("1080");
+  const [inputFormat, setInputFormat] = useState("mjpeg");
   const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
     initialScheduleValue({
       photoIntervalMinutes: 30,
@@ -40,6 +42,7 @@ export function CaptureSourceForm() {
         cameraDevice,
         cameraName,
         cameraStableId,
+        inputFormat,
         width: Number(width),
         height: Number(height),
         ...captureSchedulePayload(schedule),
@@ -78,6 +81,12 @@ export function CaptureSourceForm() {
         onCameraChange={(camera) => {
           setCameraName(camera?.name ?? null);
           setCameraStableId(camera?.stableId ?? null);
+          const preferred = preferredCameraMode(camera?.formats ?? []);
+          if (preferred) {
+            setInputFormat(preferred.inputFormat);
+            setWidth(String(preferred.width));
+            setHeight(String(preferred.height));
+          }
         }}
       />
 

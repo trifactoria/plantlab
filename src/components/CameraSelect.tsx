@@ -7,6 +7,11 @@ type Camera = {
   device: string;
   supportsCapture: boolean;
   stableId: string | null;
+  formats?: Array<{
+    pixelFormat: string;
+    description: string;
+    resolutions: Array<{ width: number; height: number; frameRates: string[] }>;
+  }>;
 };
 
 export function CameraSelect({

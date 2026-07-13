@@ -23,7 +23,7 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
-const { applyCameraControls, capsIndicateVideoCapture, groupPhysicalCameras, parseControlsOutput } = await import("../../src/lib/v4l2");
+const { applyCameraControls, capsIndicateVideoCapture, groupPhysicalCameras, parseCameraFormatsOutput, parseControlsOutput } = await import("../../src/lib/v4l2");
 
 const SAMPLE_OUTPUT = `
                      brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
@@ -93,6 +93,101 @@ describe("parseControlsOutput", () => {
     expect(autofocus.value).toBe(true);
     expect(autofocus.readOnly).toBe(false);
     expect(autofocus.inactive).toBe(false);
+  });
+});
+
+describe("parseCameraFormatsOutput", () => {
+  it("preserves greenhouse-zero MJPG and YUYV format-resolution families from recorded output", () => {
+    const formats = parseCameraFormatsOutput(`
+ioctl: VIDIOC_ENUM_FMT
+\tType: Video Capture
+
+\t[0]: 'MJPG' (Motion-JPEG, compressed)
+\t\tSize: Discrete 1920x1080
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 1280x720
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 800x600
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 640x480
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 640x360
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t[1]: 'YUYV' (YUYV 4:2:2)
+\t\tSize: Discrete 1920x1080
+\t\t\tInterval: Discrete 0.200s (5.000 fps)
+\t\tSize: Discrete 1280x720
+\t\t\tInterval: Discrete 0.100s (10.000 fps)
+\t\tSize: Discrete 800x600
+\t\t\tInterval: Discrete 0.050s (20.000 fps)
+\t\tSize: Discrete 640x480
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 640x360
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+`);
+
+    expect(formats.map((format) => format.pixelFormat)).toEqual(["mjpeg", "yuyv422"]);
+    expect(formats[0].resolutions.map((resolution) => `${resolution.width}x${resolution.height}`)).toEqual([
+      "1920x1080",
+      "1280x720",
+      "800x600",
+      "640x480",
+      "640x360",
+    ]);
+    expect(formats[0].resolutions[0].frameRates).toEqual(["30.000 fps"]);
+    expect(formats[1].resolutions.map((resolution) => `${resolution.width}x${resolution.height}`)).toEqual([
+      "1920x1080",
+      "1280x720",
+      "800x600",
+      "640x480",
+      "640x360",
+    ]);
+  });
+
+  it("preserves bokchoy MJPG and YUYV format-resolution families from recorded output", () => {
+    const formats = parseCameraFormatsOutput(`
+\t[0]: 'MJPG' (Motion-JPEG, compressed)
+\t\tSize: Discrete 1280x720
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 848x480
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 960x540
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t[1]: 'YUYV' (YUYV 4:2:2)
+\t\tSize: Discrete 640x480
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+\t\tSize: Discrete 320x240
+\t\t\tInterval: Discrete 0.033s (30.000 fps)
+`);
+
+    expect(formats).toMatchObject([
+      {
+        pixelFormat: "mjpeg",
+        resolutions: [
+          { width: 1280, height: 720, frameRates: ["30.000 fps"] },
+          { width: 848, height: 480, frameRates: ["30.000 fps"] },
+          { width: 960, height: 540, frameRates: ["30.000 fps"] },
+        ],
+      },
+      {
+        pixelFormat: "yuyv422",
+        resolutions: [
+          { width: 640, height: 480, frameRates: ["30.000 fps"] },
+          { width: 320, height: 240, frameRates: ["30.000 fps"] },
+        ],
+      },
+    ]);
+  });
+
+  it("normalizes JPEG aliases to mjpeg and YUYV to yuyv422", () => {
+    const formats = parseCameraFormatsOutput(`
+\t[0]: 'JPEG' (JPEG)
+\t\tSize: Discrete 640x480
+\t[1]: 'YUYV' (YUYV 4:2:2)
+\t\tSize: Discrete 640x480
+`);
+
+    expect(formats.map((format) => format.pixelFormat)).toEqual(["mjpeg", "yuyv422"]);
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { claimJob, completeJob, failJob, recordHeartbeat, updateCameraInventory } from "../../src/lib/operations/agentProtocol";
-import { attachNodeCamera } from "../../src/lib/operations/nodeCameras";
+import { claimJob, completeJob, failJob, nextQueuedJob, recordHeartbeat, serializeJobForAgent, updateCameraInventory } from "../../src/lib/operations/agentProtocol";
+import { attachNodeCamera, parseNodeCameraFormats } from "../../src/lib/operations/nodeCameras";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
 
@@ -11,7 +11,16 @@ async function makeNodeWithAssignment() {
       stableId: "usb-logitech-1",
       devicePath: "/dev/video4",
       name: "Logitech Camera",
-      formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      formats: [
+        {
+          pixelFormat: "mjpeg",
+          description: "Motion-JPEG",
+          resolutions: [
+            { width: 1280, height: 720, frameRates: ["30 fps"] },
+            { width: 1920, height: 1080, frameRates: ["30 fps"] },
+          ],
+        },
+      ],
     },
   ]);
   const attached = await attachNodeCamera(prisma, {
@@ -42,6 +51,48 @@ describe("agent protocol", () => {
     expect(node.lastHeartbeatAt).toBeTruthy();
     expect(node.cameras).toHaveLength(1);
     expect(node.cameras[0].devicePath).toBe("/dev/video8");
+  });
+
+  it("stores normalized structured camera inventory without dropping MJPEG or YUYV families", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-inventory", role: "greenhouse-node", rotateCredential: true });
+    const [camera] = await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-cam",
+        devicePath: "/dev/video0",
+        name: "Greenhouse Camera",
+        formats: [
+          {
+            pixelFormat: "MJPG",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
+              { width: 1280, height: 720, frameRates: ["30.000 fps"] },
+            ],
+          },
+          {
+            pixelFormat: "YUYV",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
+          },
+        ],
+      },
+    ]);
+
+    expect(parseNodeCameraFormats(camera)).toEqual([
+      {
+        pixelFormat: "mjpeg",
+        description: "Motion-JPEG",
+        resolutions: [
+          { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
+          { width: 1280, height: 720, frameRates: ["30.000 fps"] },
+        ],
+      },
+      {
+        pixelFormat: "yuyv422",
+        description: "YUYV 4:2:2",
+        resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
+      },
+    ]);
   });
 
   it("records runtime, protocol version, and reported capabilities from a heartbeat (Part 6/8/13)", async () => {
@@ -139,5 +190,65 @@ describe("agent protocol", () => {
     expect(rerun.createdAssignment).toBe(false);
     expect(rerun.assignment.width).toBe(1920);
     expect(assignments).toHaveLength(1);
+  });
+
+  it("rejects an attachment mode that crosses format-specific resolution families", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "bokchoy-invalid-mode", role: "camera-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-bokchoy",
+        devicePath: "/dev/video0",
+        name: "Bokchoy Camera",
+        formats: [
+          { pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] },
+          { pixelFormat: "yuyv422", description: "YUYV 4:2:2", resolutions: [{ width: 640, height: 480, frameRates: ["30 fps"] }] },
+        ],
+      },
+    ]);
+
+    await expect(
+      attachNodeCamera(prisma, {
+        nodeName: "bokchoy-invalid-mode",
+        stableId: "usb-bokchoy",
+        newCaptureSourceName: "Invalid Combo",
+        width: 640,
+        height: 480,
+        inputFormat: "mjpeg",
+      }),
+    ).rejects.toThrow(/does not advertise MJPEG 640x480/);
+  });
+
+  it("serializes the selected assignment mode unchanged into the agent job payload", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-job-mode", role: "greenhouse-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-job",
+        devicePath: "/dev/video0",
+        name: "Greenhouse Camera",
+        formats: [
+          { pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1920, height: 1080, frameRates: ["30 fps"] }] },
+          { pixelFormat: "yuyv422", description: "YUYV 4:2:2", resolutions: [{ width: 640, height: 480, frameRates: ["30 fps"] }] },
+        ],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName: "greenhouse-job-mode",
+      stableId: "usb-greenhouse-job",
+      newCaptureSourceName: "Greenhouse Job Camera",
+      width: 1920,
+      height: 1080,
+      inputFormat: "mjpeg",
+    });
+    await prisma.agentCaptureJob.create({
+      data: {
+        nodeId: registered.node.id,
+        assignmentId: attached.assignment.id,
+        captureSourceId: attached.captureSource.id,
+      },
+    });
+
+    const payload = serializeJobForAgent(await nextQueuedJob(prisma, registered.node.id));
+
+    expect(payload?.settings).toEqual({ width: 1920, height: 1080, inputFormat: "mjpeg" });
   });
 });

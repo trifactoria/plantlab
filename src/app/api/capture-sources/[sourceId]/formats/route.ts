@@ -5,6 +5,7 @@ import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { testCameraMockModeEnabled } from "@/lib/testProjectSafety";
 import { listCameraFormats } from "@/lib/v4l2";
+import { parseNodeCameraFormats } from "@/lib/operations/nodeCameras";
 
 export const runtime = "nodejs";
 
@@ -19,10 +20,25 @@ export async function GET(_request: Request, context: Context) {
   }
 
   const { sourceId } = await context.params;
-  const source = await prisma.captureSource.findUnique({ where: { id: sourceId } });
+  const source = await prisma.captureSource.findUnique({
+    where: { id: sourceId },
+    include: {
+      assignments: {
+        where: { active: true },
+        include: { nodeCamera: true },
+        orderBy: { updatedAt: "desc" },
+        take: 1,
+      },
+    },
+  });
 
   if (!source) {
     return notFound("Capture source not found");
+  }
+
+  const remoteAssignment = source.assignments[0];
+  if (remoteAssignment) {
+    return NextResponse.json({ formats: parseNodeCameraFormats(remoteAssignment.nodeCamera) });
   }
 
   const device = process.env.CAMERA_DEVICE || source.cameraDevice;
@@ -31,7 +47,7 @@ export async function GET(_request: Request, context: Context) {
     return NextResponse.json({
       formats: [
         {
-          pixelFormat: "mjpg",
+          pixelFormat: "mjpeg",
           description: "Motion-JPEG",
           resolutions: [
             { width: 3840, height: 2160, frameRates: ["15.000 fps"] },
@@ -40,7 +56,7 @@ export async function GET(_request: Request, context: Context) {
           ],
         },
         {
-          pixelFormat: "yuyv",
+          pixelFormat: "yuyv422",
           description: "YUYV 4:2:2",
           resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
         },

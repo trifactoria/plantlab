@@ -137,6 +137,52 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await page.getByRole("button", { name: "Cancel" }).click();
 });
 
+test("shelf camera mode picker preserves advertised format-resolution tuples", async ({ page }) => {
+  await mockCameraApis(page);
+  await page.route("**/api/capture-sources/*/formats**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        formats: [
+          {
+            pixelFormat: "mjpeg",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 3840, height: 2160, frameRates: ["15.000 fps"] },
+              { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
+            ],
+          },
+          {
+            pixelFormat: "yuyv422",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
+          },
+        ],
+      }),
+    });
+  });
+  const ids = await seedVisualData();
+  await page.request.patch(`/api/capture-sources/${ids.captureSourceId}`, {
+    data: {
+      width: 640,
+      height: 480,
+      assignmentWidth: 640,
+      assignmentHeight: 480,
+      inputFormat: "yuyv422",
+    },
+  });
+
+  await goto(page, `/capture-sources/${ids.captureSourceId}`);
+  await expect(page.getByTestId("raw-resolution-select").locator("option", { hasText: "MJPEG - 1920x1080 - 30.000 fps" })).toHaveCount(1);
+  const shelfModes = await page.getByTestId("raw-resolution-select").locator("option").allTextContents();
+
+  expect(shelfModes).toContain("MJPEG - 1920x1080 - 30.000 fps");
+  expect(shelfModes).toContain("YUYV - 640x480 - 30.000 fps");
+  expect(shelfModes).not.toContain("MJPEG - 640x480 - 30.000 fps");
+  await expect(page.getByTestId("preferred-mode-repair")).toContainText("Preferred verified mode is available: MJPEG - 3840x2160 - 15.000 fps");
+});
+
 test("repeated grid entry remembers timestamp/tags and proposes the next name, scoped per project", async ({ page }) => {
   await mockCameraApis(page);
   const ids = await seedVisualData();

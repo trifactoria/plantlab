@@ -3,6 +3,8 @@ import { badRequest, notFound, optionalString, readJson, requiredPositiveInt } f
 import { isValidRotation } from "@/lib/orientation";
 import { prisma } from "@/lib/prisma";
 import { requireValidTimeZone } from "@/lib/timezone";
+import { normalizeCameraInputFormat } from "@/lib/cameraModes";
+import { cameraSupportsMode, parseNodeCameraFormats } from "@/lib/operations/nodeCameras";
 
 export const runtime = "nodejs";
 
@@ -77,7 +79,63 @@ export async function PATCH(request: Request, context: Context) {
         body.captureWindowEndMinutes === null ? null : Number(body.captureWindowEndMinutes);
     }
 
-    const source = await prisma.captureSource.update({ where: { id: sourceId }, data });
+    const source = await prisma.$transaction(async (tx) => {
+      const updated = await tx.captureSource.update({ where: { id: sourceId }, data });
+      const width = body?.assignmentWidth !== undefined ? requiredPositiveInt(body.assignmentWidth, "assignmentWidth") : undefined;
+      const height = body?.assignmentHeight !== undefined ? requiredPositiveInt(body.assignmentHeight, "assignmentHeight") : undefined;
+      const inputFormat = body?.inputFormat !== undefined ? normalizeCameraInputFormat(String(body.inputFormat)) : undefined;
+
+      if (width !== undefined || height !== undefined || inputFormat !== undefined) {
+        const activeAssignments = await tx.nodeCameraAssignment.findMany({
+          where: { captureSourceId: sourceId, active: true },
+          include: { nodeCamera: true },
+        });
+        for (const assignment of activeAssignments) {
+          const nextWidth = width ?? assignment.width;
+          const nextHeight = height ?? assignment.height;
+          const nextFormat = inputFormat ?? assignment.inputFormat;
+          const camera = { ...assignment.nodeCamera, formats: parseNodeCameraFormats(assignment.nodeCamera) };
+          if (camera.formats.length > 0 && !cameraSupportsMode(camera, { inputFormat: nextFormat, width: nextWidth, height: nextHeight })) {
+            throw new Error(`Camera does not advertise ${nextFormat.toUpperCase()} ${nextWidth}x${nextHeight}. Refresh inventory and choose a listed mode.`);
+          }
+        }
+
+        const assignmentUpdate = await tx.nodeCameraAssignment.updateMany({
+          where: { captureSourceId: sourceId, active: true },
+          data: {
+            ...(width !== undefined ? { width } : {}),
+            ...(height !== undefined ? { height } : {}),
+            ...(inputFormat !== undefined ? { inputFormat } : {}),
+          },
+        });
+
+        if (updated.cameraProfileId && inputFormat !== undefined) {
+          await tx.cameraProfile.update({
+            where: { id: updated.cameraProfileId },
+            data: {
+              inputFormat,
+              ...(width !== undefined ? { width } : {}),
+              ...(height !== undefined ? { height } : {}),
+            },
+          });
+        } else if (assignmentUpdate.count === 0 && inputFormat !== undefined) {
+          const profile = await tx.cameraProfile.create({
+            data: {
+              name: `${updated.name} mode`,
+              cameraDevice: updated.cameraDevice,
+              cameraName: updated.cameraName,
+              cameraStableId: updated.cameraStableId,
+              width: width ?? updated.width,
+              height: height ?? updated.height,
+              inputFormat,
+            },
+          });
+          return tx.captureSource.update({ where: { id: sourceId }, data: { cameraProfileId: profile.id } });
+        }
+      }
+
+      return updated;
+    });
     return NextResponse.json(source);
   } catch (error) {
     return badRequest(error instanceof Error ? error.message : "Could not update capture source");

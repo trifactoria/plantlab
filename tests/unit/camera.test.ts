@@ -49,6 +49,12 @@ describe("buildFfmpegArgs", () => {
     expect(args[args.indexOf("-input_format") + 1]).toBe("yuyv422");
   });
 
+  it("normalizes YUYV to ffmpeg's yuyv422 input format", () => {
+    const args = buildFfmpegArgs({ ...baseSettings, inputFormat: "YUYV" }, "/tmp/out.jpg");
+
+    expect(args[args.indexOf("-input_format") + 1]).toBe("yuyv422");
+  });
+
   it("encodes the requested device and resolution", () => {
     const args = buildFfmpegArgs(baseSettings, "/tmp/out.jpg");
 

@@ -11,6 +11,7 @@ import { ensureDirectoryExists } from "./projectPaths.server";
 import { prisma } from "./prisma";
 import { testCameraMockModeEnabled, testCaptureMockModeEnabled } from "./testProjectSafety";
 import { applyCameraControls } from "./v4l2";
+import { normalizeCameraInputFormat } from "./cameraModes";
 
 export type CameraSettings = {
   device: string;
@@ -76,7 +77,7 @@ function warmupSeconds() {
 }
 
 function ffmpegInputFormat(format: string) {
-  return format.toLowerCase() === "mjpg" ? "mjpeg" : format;
+  return normalizeCameraInputFormat(format);
 }
 
 export async function applyProfileSettings(settings: CameraSettings) {

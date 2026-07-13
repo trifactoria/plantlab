@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { CaptureSource, NodeCamera, NodeCameraAssignment, PlantLabNode, PrismaClient } from "@prisma/client";
+import { findCameraMode, normalizeCameraFormats, normalizeCameraInputFormat, preferredCameraMode } from "../cameraModes";
 import { resolveCaptureSourcesDataDir } from "../paths.server";
 import type { CameraFormat } from "../v4l2";
 
@@ -13,7 +14,7 @@ export function parseNodeCameraFormats(camera: Pick<NodeCamera, "formatsJson">):
   if (!camera.formatsJson) return [];
   try {
     const parsed = JSON.parse(camera.formatsJson);
-    return Array.isArray(parsed) ? (parsed as CameraFormat[]) : [];
+    return Array.isArray(parsed) ? normalizeCameraFormats(parsed as CameraFormat[]) : [];
   } catch {
     return [];
   }
@@ -54,6 +55,11 @@ export async function attachNodeCamera(
   const camera = await prisma.nodeCamera.findUniqueOrThrow({
     where: { nodeId_stableId: { nodeId: node.id, stableId: input.stableId } },
   });
+  const cameraWithFormats: NodeCameraWithFormats = { ...camera, formats: parseNodeCameraFormats(camera) };
+  const inputFormat = normalizeCameraInputFormat(input.inputFormat);
+  if (cameraWithFormats.formats.length > 0 && !cameraSupportsMode(cameraWithFormats, { inputFormat, width: input.width, height: input.height })) {
+    throw new Error(`Camera does not advertise ${inputFormat.toUpperCase()} ${input.width}x${input.height}. Refresh inventory and choose a listed mode.`);
+  }
 
   let createdCaptureSource = false;
   let captureSource: CaptureSource;
@@ -110,7 +116,7 @@ export async function attachNodeCamera(
           name: captureSource.name,
           width: input.width,
           height: input.height,
-          inputFormat: input.inputFormat ?? "mjpeg",
+          inputFormat,
           active: true,
         },
       })
@@ -122,7 +128,7 @@ export async function attachNodeCamera(
           name: captureSource.name,
           width: input.width,
           height: input.height,
-          inputFormat: input.inputFormat ?? "mjpeg",
+          inputFormat,
         },
       });
 
@@ -141,20 +147,13 @@ export async function attachNodeCamera(
  * empty formats fell back to 1920x1080 and the capture failed outright.
  */
 export function firstSupportedMode(camera: NodeCameraWithFormats): { width: number; height: number; inputFormat: string } {
-  const byMjpegFirst = [...camera.formats].sort((a, b) => {
-    const aScore = /mjp/i.test(a.pixelFormat) ? 0 : 1;
-    const bScore = /mjp/i.test(b.pixelFormat) ? 0 : 1;
-    return aScore - bScore;
-  });
-  for (const format of byMjpegFirst) {
-    const resolution = format.resolutions[0];
-    if (resolution) {
-      return {
-        width: resolution.width,
-        height: resolution.height,
-        inputFormat: format.pixelFormat || "mjpeg",
-      };
-    }
+  const preferred = preferredCameraMode(camera.formats);
+  if (preferred) {
+    return { width: preferred.width, height: preferred.height, inputFormat: preferred.inputFormat };
   }
   return { width: 640, height: 480, inputFormat: "mjpeg" };
+}
+
+export function cameraSupportsMode(camera: NodeCameraWithFormats, mode: { inputFormat: string; width: number; height: number }) {
+  return Boolean(findCameraMode(camera.formats, mode.inputFormat, mode.width, mode.height));
 }

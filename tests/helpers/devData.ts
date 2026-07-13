@@ -575,12 +575,17 @@ export async function mockCameraApis(page: Page) {
       body: JSON.stringify({
         formats: [
           {
-            pixelFormat: "mjpg",
+            pixelFormat: "mjpeg",
             description: "Motion-JPEG",
             resolutions: [
               { width: 3840, height: 2160, frameRates: ["15.000 fps"] },
               { width: 1920, height: 1080, frameRates: ["30.000 fps"] },
             ],
+          },
+          {
+            pixelFormat: "yuyv422",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
           },
         ],
       }),

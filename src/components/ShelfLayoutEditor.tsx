@@ -8,6 +8,7 @@ import {
   initialScheduleValue,
   type CaptureScheduleValue,
 } from "@/components/CaptureScheduleFields";
+import { flattenCameraModes, formatLabel, normalizeCameraInputFormat, preferredCameraMode, type CameraMode } from "@/lib/cameraModes";
 import { isValidRotation, transformedDimensions, type Rotation } from "@/lib/orientation";
 import { findOverlappingPairs, pixelDimensionsForRect, type NormalizedRect } from "@/lib/viewportGeometry";
 import { formatDateTime } from "@/lib/format";
@@ -52,6 +53,9 @@ type SourceProps = {
   flipHorizontal: boolean;
   flipVertical: boolean;
   active: boolean;
+  inputFormat: string;
+  rawWidth: number | null;
+  rawHeight: number | null;
   photoIntervalMinutes: number;
   captureStartAt: string;
   timeZone: string;
@@ -72,8 +76,11 @@ export function ShelfLayoutEditor({
   const dragRef = useRef<{ x: number; y: number } | null>(null);
 
   const [formats, setFormats] = useState<CameraFormat[]>([]);
-  const [selectedFormat, setSelectedFormat] = useState("mjpeg");
-  const [selectedRawResolution, setSelectedRawResolution] = useState("1920x1080");
+  const sourceInputFormat = normalizeCameraInputFormat(source.inputFormat);
+  const sourceRaw = transformedDimensions(source.width, source.height, isValidRotation(source.rotation) ? source.rotation : 0);
+  const initialRawWidth = source.rawWidth ?? sourceRaw.width;
+  const initialRawHeight = source.rawHeight ?? sourceRaw.height;
+  const [selectedModeKey, setSelectedModeKey] = useState(`${sourceInputFormat}:${initialRawWidth}x${initialRawHeight}`);
   const [rotation, setRotation] = useState<Rotation>(isValidRotation(source.rotation) ? source.rotation : 0);
   const [flipHorizontal, setFlipHorizontal] = useState(source.flipHorizontal);
   const [flipVertical, setFlipVertical] = useState(source.flipVertical);
@@ -109,25 +116,36 @@ export function ShelfLayoutEditor({
   const [testCaptureError, setTestCaptureError] = useState<string | null>(null);
   const [testCaptureResults, setTestCaptureResults] = useState<FanOutProjectResult[] | null>(null);
 
-  const selectedFormatData = formats.find((format) => format.pixelFormat === selectedFormat);
+  const modes = flattenCameraModes(formats);
+  const [selectedFormat, selectedResolution = ""] = selectedModeKey.split(":");
+  const [selectedRawWidth, selectedRawHeight] = selectedResolution.split("x").map(Number);
+  const selectedMode = modes.find((mode) => modeKey(mode) === selectedModeKey) ?? null;
+  const preferredMode = preferredCameraMode(formats);
+  const sourceModeKey = `${sourceInputFormat}:${initialRawWidth}x${initialRawHeight}`;
+  const repairMode = preferredMode && modeKey(preferredMode) !== sourceModeKey ? preferredMode : null;
   const assignableProjects = projects.filter((project) => !project.isTestProject);
+
+  function modeKey(mode: Pick<CameraMode, "inputFormat" | "width" | "height">) {
+    return `${mode.inputFormat}:${mode.width}x${mode.height}`;
+  }
+
+  function modeLabel(mode: CameraMode) {
+    const fps = mode.frameRates.length > 0 ? ` - ${mode.frameRates.join(", ")}` : "";
+    return `${formatLabel(mode.inputFormat)} - ${mode.width}x${mode.height}${fps}`;
+  }
 
   async function loadFormats() {
     const response = await fetch(`/api/capture-sources/${source.id}/formats`);
     const payload = (await response.json()) as { formats?: CameraFormat[] };
     const nextFormats = payload.formats ?? [];
     setFormats(nextFormats);
-
-    const mjpeg = nextFormats.find((format) => format.pixelFormat === "mjpg" || format.pixelFormat === "mjpeg");
-    const preferred = mjpeg ?? nextFormats[0];
-    if (preferred) {
-      setSelectedFormat(preferred.pixelFormat);
-      const raw = transformedDimensions(source.width, source.height, isValidRotation(source.rotation) ? source.rotation : 0);
-      const match = preferred.resolutions.find((r) => r.width === raw.width && r.height === raw.height);
-      const chosen = match ?? preferred.resolutions[0];
-      if (chosen) {
-        setSelectedRawResolution(`${chosen.width}x${chosen.height}`);
-      }
+    const nextModes = flattenCameraModes(nextFormats);
+    const saved = nextModes.find(
+      (mode) => mode.inputFormat === sourceInputFormat && mode.width === initialRawWidth && mode.height === initialRawHeight,
+    );
+    const fallback = saved ?? preferredCameraMode(nextFormats) ?? nextModes[0];
+    if (fallback) {
+      setSelectedModeKey(modeKey(fallback));
     }
   }
 
@@ -144,12 +162,14 @@ export function ShelfLayoutEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source.id]);
 
-  async function saveSettings() {
+  async function saveSettings(modeOverride?: CameraMode) {
     setSavingSettings(true);
     setSettingsError(null);
     setSettingsMessage(null);
 
-    const [rawWidth, rawHeight] = selectedRawResolution.split("x").map(Number);
+    const rawWidth = modeOverride?.width ?? selectedRawWidth;
+    const rawHeight = modeOverride?.height ?? selectedRawHeight;
+    const inputFormat = modeOverride?.inputFormat ?? selectedFormat;
     const working = transformedDimensions(rawWidth || source.width, rawHeight || source.height, rotation);
 
     const response = await fetch(`/api/capture-sources/${source.id}`, {
@@ -158,6 +178,9 @@ export function ShelfLayoutEditor({
       body: JSON.stringify({
         width: working.width,
         height: working.height,
+        assignmentWidth: rawWidth,
+        assignmentHeight: rawHeight,
+        inputFormat,
         rotation,
         flipHorizontal,
         flipVertical,
@@ -173,6 +196,7 @@ export function ShelfLayoutEditor({
       return;
     }
 
+    if (modeOverride) setSelectedModeKey(modeKey(modeOverride));
     setSettingsMessage(`Saved. Working frame is now ${working.width} x ${working.height}.`);
     router.refresh();
   }
@@ -313,35 +337,24 @@ export function ShelfLayoutEditor({
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Capability and Orientation</h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <label className="field">
-            Input format
-            <select className="input" value={selectedFormat} onChange={(event) => setSelectedFormat(event.target.value)}>
-              {formats.length === 0 ? (
-                <option value={selectedFormat}>{selectedFormat}</option>
-              ) : (
-                formats.map((format) => (
-                  <option key={format.pixelFormat} value={format.pixelFormat}>
-                    {format.pixelFormat.toUpperCase()} - {format.description}
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
-          <label className="field">
-            Raw resolution (before rotation)
+          <label className="field sm:col-span-2">
+            Capture mode
             <select
               className="input"
               data-testid="raw-resolution-select"
-              value={selectedRawResolution}
-              onChange={(event) => setSelectedRawResolution(event.target.value)}
+              value={selectedModeKey}
+              onChange={(event) => setSelectedModeKey(event.target.value)}
             >
-              {(selectedFormatData?.resolutions ?? [{ width: source.width, height: source.height, frameRates: [] }]).map(
-                (resolution) => (
-                  <option key={`${resolution.width}x${resolution.height}`} value={`${resolution.width}x${resolution.height}`}>
-                    {resolution.width} x {resolution.height}
-                    {resolution.frameRates.length > 0 ? ` (${resolution.frameRates.join(", ")})` : ""}
+              {modes.length === 0 ? (
+                <option value={selectedModeKey}>
+                  {formatLabel(selectedFormat)} - {selectedRawWidth || source.width}x{selectedRawHeight || source.height}
+                </option>
+              ) : (
+                modes.map((mode) => (
+                  <option key={modeKey(mode)} value={modeKey(mode)}>
+                    {modeLabel(mode)}
                   </option>
-                ),
+                ))
               )}
             </select>
           </label>
@@ -372,11 +385,23 @@ export function ShelfLayoutEditor({
         </div>
         <p className="mt-3 text-sm text-stone-600" data-testid="transformed-dimensions">
           {(() => {
-            const [rawWidth, rawHeight] = selectedRawResolution.split("x").map(Number);
+            const rawWidth = selectedMode?.width ?? selectedRawWidth;
+            const rawHeight = selectedMode?.height ?? selectedRawHeight;
             const working = transformedDimensions(rawWidth || source.width, rawHeight || source.height, rotation);
             return `Transformed working frame: ${working.width} x ${working.height}`;
           })()}
         </p>
+        {repairMode ? (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950" data-testid="preferred-mode-repair">
+            <p>
+              Preferred verified mode is available: {modeLabel(repairMode)}. Current saved mode is{" "}
+              {formatLabel(sourceInputFormat)} - {initialRawWidth}x{initialRawHeight}.
+            </p>
+            <button type="button" className="button-secondary mt-2" onClick={() => saveSettings(repairMode)} disabled={savingSettings}>
+              Use Preferred Mode
+            </button>
+          </div>
+        ) : null}
 
         <label className="mt-4 flex items-center gap-2 text-sm font-medium text-stone-800">
           <input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} />
@@ -392,7 +417,7 @@ export function ShelfLayoutEditor({
 
         {settingsError ? <p className="mt-3 text-sm font-medium text-red-700">{settingsError}</p> : null}
         {settingsMessage ? <p className="mt-3 text-sm font-medium text-emerald-700">{settingsMessage}</p> : null}
-        <button type="button" className="button mt-4" onClick={saveSettings} disabled={savingSettings}>
+        <button type="button" className="button mt-4" onClick={() => saveSettings()} disabled={savingSettings}>
           {savingSettings ? "Saving..." : "Save Shelf Camera Settings"}
         </button>
       </div>

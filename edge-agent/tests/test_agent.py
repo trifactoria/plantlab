@@ -22,13 +22,14 @@ def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_c
     cfg = _make_config(tmp_path, fake_coordinator["url"])
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
 
-    fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:1:2:3", verified_capture=True)
+    formats = [{"pixelFormat": "mjpeg", "description": "Motion-JPEG", "resolutions": [{"width": 1280, "height": 720, "frameRates": ["30.000 fps"]}]}]
+    fake_camera = camera.CameraInfo(device="/dev/video0", name="Test Cam", stable_id="usb:1:2:3", verified_capture=True, formats=formats)
     with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
         agent.run_heartbeat_and_inventory(cfg, client)
 
     state = fake_coordinator["state"]
     assert len(state.heartbeats) == 1
-    assert state.camera_reports == [[{"stableId": "usb:1:2:3", "devicePath": "/dev/video0", "name": "Test Cam", "available": True, "formats": []}]]
+    assert state.camera_reports == [[{"stableId": "usb:1:2:3", "devicePath": "/dev/video0", "name": "Test Cam", "available": True, "formats": formats}]]
 
 
 def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(tmp_path, fake_coordinator):

@@ -34,7 +34,7 @@ class CameraInfo:
     name: Optional[str]
     stable_id: Optional[str]
     supports_capture: bool = True
-    formats: List[str] = field(default_factory=list)
+    formats: List[Dict[str, object]] = field(default_factory=list)
     alternate_devices: List[str] = field(default_factory=list)
     # Part 5: whether a real, short ffmpeg one-frame capture actually
     # succeeded on this device - never assume reported V4L2 capabilities
@@ -85,7 +85,7 @@ def discover_cameras(probe_capture: bool = True) -> List[CameraInfo]:
         name = _v4l2_card_name(device)
         stable_id = _stable_id_for_device(device)
         supports_capture = _supports_capture(device)
-        formats = _format_lines(device) if supports_capture else []
+        formats = _list_camera_formats(device) if supports_capture else []
         cameras.append(CameraInfo(device=device, name=name, stable_id=stable_id, supports_capture=supports_capture, formats=formats))
 
     return _verify_camera_groups(cameras) if probe_capture else _group_physical_cameras(cameras)
@@ -205,11 +205,59 @@ def _supports_capture(device: str) -> bool:
     return _caps_indicate_video_capture(result.stdout)
 
 
-def _format_lines(device: str) -> List[str]:
+def _normalize_input_format(input_format: str) -> str:
+    normalized = (input_format or "").strip().lower()
+    if normalized in ("mjpg", "mjpeg", "jpeg"):
+        return "mjpeg"
+    if normalized in ("yuyv", "yuyv422"):
+        return "yuyv422"
+    return normalized or "mjpeg"
+
+
+def _list_camera_formats(device: str) -> List[Dict[str, object]]:
     result = subprocess.run(["v4l2-ctl", "--device", device, "--list-formats-ext"], capture_output=True, text=True, timeout=5)
     if result.returncode != 0:
         return []
-    return [line.strip() for line in result.stdout.splitlines() if "Size: Discrete" in line or re.search(r"\[\d+\]:", line)]
+    return _parse_formats_output(result.stdout)
+
+
+def _parse_formats_output(output: str) -> List[Dict[str, object]]:
+    formats: List[Dict[str, object]] = []
+    current_format: Optional[Dict[str, object]] = None
+    current_resolution: Optional[Dict[str, object]] = None
+
+    for line in output.splitlines():
+        format_match = re.search(r"\[\d+\]:\s+'([^']+)'\s+\(([^)]+)\)", line)
+        if format_match:
+            pixel_format = _normalize_input_format(format_match.group(1))
+            current_format = next((fmt for fmt in formats if fmt.get("pixelFormat") == pixel_format), None)
+            if current_format is None:
+                current_format = {"pixelFormat": pixel_format, "description": format_match.group(2).strip(), "resolutions": []}
+                formats.append(current_format)
+            current_resolution = None
+            continue
+
+        size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
+        if size_match and current_format is not None:
+            resolutions = current_format["resolutions"]
+            assert isinstance(resolutions, list)
+            width = int(size_match.group(1))
+            height = int(size_match.group(2))
+            current_resolution = next((res for res in resolutions if res.get("width") == width and res.get("height") == height), None)
+            if current_resolution is None:
+                current_resolution = {"width": width, "height": height, "frameRates": []}
+                resolutions.append(current_resolution)
+            continue
+
+        interval_match = re.search(r"Interval:\s+Discrete\s+[^()]*\(([^)]+)\)", line)
+        if interval_match and current_resolution is not None:
+            frame_rates = current_resolution["frameRates"]
+            assert isinstance(frame_rates, list)
+            rate = interval_match.group(1).strip()
+            if rate not in frame_rates:
+                frame_rates.append(rate)
+
+    return formats
 
 
 def _stable_id_for_device(device: str) -> Optional[str]:
@@ -228,36 +276,46 @@ def _stable_id_for_device(device: str) -> Optional[str]:
     return None
 
 
-def _build_probe_candidates(format_lines: List[str]) -> List[Tuple[str, int, int]]:
-    """Parses the same raw lines _format_lines() already collects (no extra v4l2-ctl call) into (pixel_format, width, height) candidates - prefers MJPEG's first reported resolution (Part 5), always with a conservative 640x480 fallback for devices with no reported formats or whose reported resolution doesn't actually work."""
-    parsed: List[Tuple[str, int, int]] = []
-    current_format: Optional[str] = None
-    for line in format_lines:
-        format_match = re.search(r"\[\d+\]:\s+'([^']+)'", line)
-        if format_match:
-            current_format = format_match.group(1)
+def _build_probe_candidates(formats: List[Dict[str, object]]) -> List[Tuple[str, int, int]]:
+    """Builds tuple-preserving probe candidates from parsed V4L2 formats - prefers MJPEG at the highest reported resolution, then falls back conservatively only if needed."""
+    parsed: List[Tuple[str, int, int, List[str]]] = []
+    for fmt in formats:
+        pixel_format = _normalize_input_format(str(fmt.get("pixelFormat") or ""))
+        resolutions = fmt.get("resolutions")
+        if not isinstance(resolutions, list):
             continue
-        size_match = re.search(r"Size:\s+Discrete\s+(\d+)x(\d+)", line)
-        if size_match and current_format:
-            parsed.append((current_format, int(size_match.group(1)), int(size_match.group(2))))
+        for resolution in resolutions:
+            if not isinstance(resolution, dict):
+                continue
+            width = resolution.get("width")
+            height = resolution.get("height")
+            frame_rates = resolution.get("frameRates")
+            if isinstance(width, int) and isinstance(height, int):
+                parsed.append((pixel_format, width, height, frame_rates if isinstance(frame_rates, list) else []))
 
     candidates: List[Tuple[str, int, int]] = []
-    mjpeg = [p for p in parsed if "mjp" in p[0].lower()]
-    preferred = (mjpeg or parsed)[:1]
-    candidates.extend(preferred)
+    preferred = sorted(
+        parsed,
+        key=lambda item: (
+            0 if item[0] == "mjpeg" else 1,
+            -(item[1] * item[2]),
+            0 if any(re.search(r"(?:^|\D)30(?:\.0+)?\s*fps", str(rate), re.I) for rate in item[3]) else 1,
+        ),
+    )[:1]
+    candidates.extend((pixel_format, width, height) for pixel_format, width, height, _ in preferred)
     if not any(w == CONSERVATIVE_FALLBACK_WIDTH and h == CONSERVATIVE_FALLBACK_HEIGHT for _, w, h in candidates):
-        candidates.append(("MJPG", CONSERVATIVE_FALLBACK_WIDTH, CONSERVATIVE_FALLBACK_HEIGHT))
+        candidates.append(("mjpeg", CONSERVATIVE_FALLBACK_WIDTH, CONSERVATIVE_FALLBACK_HEIGHT))
     return candidates
 
 
-def _probe_device_capture(device: str, format_lines: List[str]) -> Tuple[bool, str, Optional[Dict[str, object]]]:
+def _probe_device_capture(device: str, formats: List[Dict[str, object]]) -> Tuple[bool, str, Optional[Dict[str, object]]]:
     """Tries each candidate format/resolution in order, stopping at the first real success (Part 5 point 4 plus point 8's 640x480 fallback)."""
-    candidates = _build_probe_candidates(format_lines)
+    candidates = _build_probe_candidates(formats)
     last_detail = "No capture candidates were available to probe."
     for pixel_format, width, height in candidates:
         ok, detail = _attempt_one_frame_capture(device, pixel_format, width, height)
         if ok:
-            return True, detail, {"pixelFormat": pixel_format, "width": width, "height": height}
+            return True, detail, {"pixelFormat": _normalize_input_format(pixel_format), "width": width, "height": height}
         last_detail = detail
     return False, last_detail, None
 
@@ -336,7 +394,4 @@ def capture_frame(device: str, output_path: str, width: int = DEFAULT_WIDTH, hei
 
 
 def _ffmpeg_input_format(input_format: str) -> str:
-    normalized = (input_format or "mjpeg").lower()
-    if normalized in ("mjpeg", "yuyv422", "yuyv"):
-        return "mjpeg" if normalized == "mjpeg" else "yuyv422"
-    return "mjpeg"
+    return _normalize_input_format(input_format)

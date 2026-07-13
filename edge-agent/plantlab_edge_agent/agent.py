@@ -64,7 +64,7 @@ def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtoc
                 # devices (each its own stable-ID group) show up as if they
                 # were selectable cameras.
                 "available": c.verified_capture is True,
-                "formats": [],
+                "formats": c.formats,
             }
             for c in cameras
         ]
