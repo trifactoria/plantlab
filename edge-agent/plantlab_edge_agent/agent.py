@@ -21,6 +21,7 @@ import uuid
 
 from . import camera, config
 from .protocol import AgentProtocolClient, ProtocolError
+from .sensors.runtime import EnvironmentalSensorManager
 from .spool import Spool
 
 logger = logging.getLogger("plantlab_edge_agent")
@@ -44,10 +45,17 @@ def load_client_and_config() -> tuple[config.EdgeAgentConfig, AgentProtocolClien
     return cfg, AgentProtocolClient(cfg.coordinator_url, token)
 
 
-def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient) -> None:
+def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager | None = None) -> None:
     info = _platform_info()
     try:
-        client.heartbeat(info["hostname"], cfg.role, info["operating_system"], info["architecture"], cfg.capabilities)
+        client.heartbeat(
+            info["hostname"],
+            cfg.role,
+            info["operating_system"],
+            info["architecture"],
+            cfg.capabilities,
+            environment=sensors.health(cfg).to_heartbeat_payload() if sensors else None,
+        )
     except ProtocolError as exc:
         logger.warning("Heartbeat failed: %s", exc)
 
@@ -123,14 +131,14 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
         logger.error("Capture job %s failed: %s", job.id, exc)
 
 
-def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient) -> bool:
+def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager | None = None) -> bool:
     try:
         refresh = client.camera_inventory_refresh_request()
     except ProtocolError as exc:
         logger.warning("Inventory refresh check failed: %s", exc)
         return False
     if refresh.get("requested"):
-        run_heartbeat_and_inventory(cfg, client)
+        run_heartbeat_and_inventory(cfg, client, sensors)
         return True
     return False
 
@@ -167,12 +175,41 @@ def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sp
             logger.warning("Capture upload failed: job=%s error=%s", active.job_id, exc)
 
 
+def sample_environment(cfg: config.EdgeAgentConfig, sensors: EnvironmentalSensorManager, spool: Spool) -> None:
+    events = sensors.sample_due()
+    if not events:
+        return
+    inserted = spool.record_environment_events([event.to_wire() for event in events])
+    if inserted:
+        logger.info("Environmental telemetry spooled: %d event(s)", inserted)
+
+
+def process_environment_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager, spool: Spool) -> None:
+    if not sensors.upload_due():
+        return
+    due = spool.due_environment_events(limit=50)
+    if not due:
+        return
+    event_ids = [record.event_id for record in due]
+    try:
+        response = client.post_environment(cfg.node_name, [record.payload() for record in due])
+        acknowledged = response.get("acceptedEventIds") if isinstance(response, dict) else None
+        ack_ids = [event_id for event_id in acknowledged if isinstance(event_id, str)] if isinstance(acknowledged, list) else event_ids
+        spool.mark_environment_acknowledged(ack_ids)
+        sensors.mark_uploaded()
+        logger.info("Environmental telemetry uploaded: %d event(s)", len(ack_ids))
+    except ProtocolError as exc:
+        spool.mark_environment_failed(event_ids, str(exc))
+        logger.warning("Environmental telemetry upload failed: %s", exc)
+
+
 def run_loop(stop_check=lambda: False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg, client = load_client_and_config()
 
     spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
     spool.init()
+    sensors = EnvironmentalSensorManager.from_config(cfg)
     logger.info("PlantLab edge agent starting: coordinator=%s spool=%s", cfg.coordinator_url, cfg.spool_root)
     if cfg.sensors or cfg.power:
         logger.info(
@@ -180,6 +217,8 @@ def run_loop(stop_check=lambda: False) -> None:
             len(cfg.sensors),
             cfg.power.provider if cfg.power else "not configured",
         )
+    if cfg.sensors and not sensors.runtimes:
+        logger.info("No enabled greenhouse environmental sensors are configured.")
 
     stopping = {"value": False}
 
@@ -194,14 +233,17 @@ def run_loop(stop_check=lambda: False) -> None:
         while not stopping["value"] and not stop_check():
             now = time.monotonic()
             if now - last_heartbeat >= cfg.heartbeat_interval_seconds:
-                run_heartbeat_and_inventory(cfg, client)
+                run_heartbeat_and_inventory(cfg, client, sensors)
                 last_heartbeat = now
-            elif maybe_refresh_inventory(cfg, client):
+            elif maybe_refresh_inventory(cfg, client, sensors):
                 last_heartbeat = now
+            sample_environment(cfg, sensors, spool)
             poll_and_run_job(cfg, client, spool)
             process_uploads(cfg, client, spool)
+            process_environment_uploads(cfg, client, sensors, spool)
             try:
                 spool.cleanup_acknowledged(ACK_RETAIN_SECONDS)
+                spool.cleanup_acknowledged_environment(ACK_RETAIN_SECONDS)
             except Exception:
                 pass
             time.sleep(cfg.poll_interval_seconds)

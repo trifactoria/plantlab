@@ -1,0 +1,21 @@
+{
+  "events": [
+    {
+      "eventId": "fixture-hard-temp-1",
+      "sensor": {
+        "key": "greenhouse-ambient",
+        "name": "Greenhouse ambient",
+        "type": "dht22",
+        "gpio": 4,
+        "placement": "Top shelf",
+        "enabled": true
+      },
+      "capturedAt": "2026-07-13T15:30:00.000Z",
+      "classification": "accepted",
+      "temperatureC": 81,
+      "humidityPct": 67.2,
+      "diagnosticCode": null,
+      "diagnosticMessage": null
+    }
+  ]
+}

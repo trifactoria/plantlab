@@ -109,11 +109,36 @@ KASA_USERNAME=
 KASA_PASSWORD=
 ```
 
-This stage does not install `python-kasa`, read DHT22 sensors, connect to
-Kasa devices, upload sensor readings, or run automation rules. Planned Kasa
-runtime support requires Python 3.11 or newer; `plantlab doctor --node
-<ssh-host>` reports the remote Python readiness status when power control
-is configured.
+This stage does not install `python-kasa`, read live DHT22 sensors, use
+GPIO, connect to Kasa devices, or run automation rules. Planned Kasa runtime
+support requires Python 3.11 or newer; `plantlab doctor --node <ssh-host>`
+reports the remote Python readiness status when power control is configured.
+
+## Mock environmental telemetry
+
+Configured greenhouse sensors are loaded into a hardware-independent runtime.
+By default, no live DHT22 driver is installed, so enabled sensors report
+`driver-unavailable` diagnostics instead of crashing the agent.
+
+For development and tests, opt into deterministic mock readings:
+
+```sh
+PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock plantlab-edge service restart
+```
+
+Mock samples use Celsius and percent relative humidity. The validation
+pipeline rejects missing/non-finite values, rejects values outside hard
+physical bounds (`-40..80C`, `0..100%` humidity), marks values outside
+plausible greenhouse bounds (`0..50C`, `5..100%`) as `suspect`, and marks
+large sudden deltas as `suspect` until a following sample confirms the new
+baseline. Isolated spikes become `rejected`. Sensors with no recent accepted
+reading become `stale`.
+
+Environmental events are stored in the same local SQLite spool used by
+camera captures. Uploads are batched to `POST /api/agents/environment`,
+acknowledged events are retained briefly and then cleaned up, and failed
+uploads retry with backoff. Repeated identical diagnostics are rate-limited
+so a broken sensor does not fill the spool every polling cycle.
 
 ## Layout
 
@@ -150,5 +175,6 @@ equivalent for the edge agent yet; see "Known limitations" below.
 - No independent update mechanism yet (see above) - re-copying the
   directory and re-running `install.sh` is the only path today.
 - Sensor/relay capabilities can be configured and reported for
-  `greenhouse-node`, but live DHT22 reads, Kasa communication, readings
-  upload, and automation rules are not implemented yet.
+  `greenhouse-node`, and mock environmental readings can be uploaded for
+  development. Live DHT22 reads, Kasa communication, outlet control, and
+  automation rules are not implemented yet.

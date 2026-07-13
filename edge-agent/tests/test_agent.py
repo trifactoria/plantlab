@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from plantlab_edge_agent import agent, camera, config
 from plantlab_edge_agent.protocol import AgentProtocolClient
+from plantlab_edge_agent.sensors.runtime import EnvironmentalSensorManager
 from plantlab_edge_agent.spool import Spool
 
 
@@ -217,5 +218,61 @@ def test_process_uploads_retries_a_failed_upload_with_durable_backoff(tmp_path, 
         # The file itself must still exist - a failed upload never loses the capture.
         remaining_path = spool._db.execute("SELECT localFilePath FROM spool_records WHERE jobId = ?", ("job-2",)).fetchone()[0]
         assert Path(remaining_path).exists()
+    finally:
+        spool.close()
+
+
+def test_mock_environment_sample_spools_and_uploads_through_protocol(tmp_path, fake_coordinator, monkeypatch):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    cfg.capabilities = ["temperature", "humidity"]
+    cfg.sensors = [
+        config.GreenhouseSensorConfig(
+            key="greenhouse-ambient",
+            name="Greenhouse ambient",
+            type="dht22",
+            gpio=4,
+            placement="Top shelf",
+            enabled=True,
+        )
+    ]
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "mock")
+    sensors = EnvironmentalSensorManager.from_config(cfg)
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
+    spool.init()
+    try:
+        agent.sample_environment(cfg, sensors, spool)
+        due = spool.due_environment_events()
+        assert len(due) == 1
+        payload = due[0].payload()
+        assert payload["sensor"]["key"] == "greenhouse-ambient"
+        assert payload["classification"] == "accepted"
+
+        agent.process_environment_uploads(cfg, client, sensors, spool)
+
+        assert spool.due_environment_events() == []
+        row = spool._db.execute("SELECT state FROM environment_events WHERE eventId = ?", (payload["eventId"],)).fetchone()
+        assert row[0] == "acknowledged"
+        [batch] = fake_coordinator["state"].environment_batches
+        assert batch["nodeName"] == "greenhouse-zero"
+        assert batch["events"][0]["eventId"] == payload["eventId"]
+    finally:
+        spool.close()
+
+
+def test_environment_upload_failure_is_retained_for_retry(tmp_path, monkeypatch):
+    cfg = _make_config(tmp_path, "http://127.0.0.1:1")
+    cfg.sensors = [config.GreenhouseSensorConfig(key="greenhouse-ambient", name="Greenhouse ambient", type="dht22", gpio=4, enabled=True)]
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "mock")
+    sensors = EnvironmentalSensorManager.from_config(cfg)
+    spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
+    spool.init()
+    try:
+        agent.sample_environment(cfg, sensors, spool)
+        [record] = spool.due_environment_events()
+        agent.process_environment_uploads(cfg, AgentProtocolClient("http://127.0.0.1:1", "pln_validtoken"), sensors, spool)
+
+        row = spool._db.execute("SELECT state, attemptCount FROM environment_events WHERE eventId = ?", (record.event_id,)).fetchone()
+        assert row == ("failed", 1)
     finally:
         spool.close()

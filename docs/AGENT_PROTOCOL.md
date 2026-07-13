@@ -50,12 +50,22 @@ Request body:
   "softwareVersion": "0.3.1",
   "runtime": "python-edge",
   "protocolVersion": "1",
-  "capabilities": ["camera"]
+  "capabilities": ["camera"],
+  "environment": {
+    "configuredSensorCount": 1,
+    "enabledSensorCount": 1,
+    "acceptedSensorCount": 1,
+    "staleSensorCount": 0,
+    "failedSensorCount": 0,
+    "lastEnvironmentUploadAt": "2026-07-13T15:30:00Z"
+  }
 }
 ```
 All fields optional except that omitting everything still records a
 heartbeat timestamp. `capabilities` replaces (not merges) whatever the node
 previously reported - see `src/lib/operations/capabilities.ts`.
+`environment` is aggregate health only; full environmental telemetry uses
+the endpoint below.
 
 ### `POST /api/agents/credential-check`
 
@@ -73,6 +83,113 @@ Reports the node's current camera inventory.
 ```
 Response includes any active `NodeCameraAssignment`s so the agent knows
 what capture settings apply to which physical camera.
+
+### `POST /api/agents/environment`
+
+Reports bounded batches of greenhouse environmental telemetry from an
+authenticated node. The Python edge agent can produce this with mock sensor
+drivers in development; live DHT22/GPIO support is intentionally not part of
+this stage.
+
+Request body:
+```json
+{
+  "nodeName": "greenhouse-zero",
+  "events": [
+    {
+      "eventId": "greenhouse-ambient:2026-07-13T15:30:00.000Z:accepted",
+      "sensor": {
+        "key": "greenhouse-ambient",
+        "name": "Greenhouse ambient",
+        "type": "dht22",
+        "gpio": 4,
+        "placement": "Top shelf",
+        "enabled": true
+      },
+      "capturedAt": "2026-07-13T15:30:00.000Z",
+      "classification": "accepted",
+      "temperatureC": 24.3,
+      "humidityPct": 67.2,
+      "diagnosticCode": null,
+      "diagnosticMessage": null
+    }
+  ]
+}
+```
+
+Canonical units are Celsius, percent relative humidity, and UTC ISO-8601
+timestamps. Fahrenheit is presentation-only.
+
+Classifications are:
+
+- `accepted` - stored as normal history in `SensorReading`.
+- `suspect` - diagnostic only; used for plausible-range or sudden-change
+  values awaiting confirmation.
+- `rejected` - diagnostic only; hard invalid values or isolated spikes.
+- `failed` - diagnostic only; driver read failure.
+- `stale` - diagnostic only; no recent accepted reading.
+- `driver-unavailable` - diagnostic only; configured sensor has no runtime
+  driver available.
+
+The coordinator authenticates with the same bearer credential as other
+agent endpoints, verifies that `nodeName` matches the authenticated node,
+limits the batch to 100 events, checks string lengths, rejects malformed
+timestamps, rejects unknown classifications, enforces finite numeric values,
+and independently applies hard physical bounds of `-40..80C` and `0..100%`
+humidity. The node owns the richer local validation state machine; the
+coordinator enforces safety and storage invariants.
+
+Accepted readings are stored in `SensorReading`. Non-accepted events are
+stored in `SensorDiagnostic`, so suspect/rejected values never pollute
+normal environmental history. Sensor metadata is upserted into `NodeSensor`
+by `(nodeId, key)` on every event; sensors are node-owned and not coupled to
+projects in this stage. Retries are idempotent per authenticated node using
+`(nodeId, eventId)`.
+
+Response:
+```json
+{
+  "status": "ok",
+  "acceptedEventIds": ["greenhouse-ambient:2026-07-13T15:30:00.000Z:accepted"],
+  "duplicateEventIds": [],
+  "storedReadings": 1,
+  "storedDiagnostics": 0
+}
+```
+
+The batch is processed in a Prisma transaction after request validation. An
+invalid batch is rejected before any rows are written.
+
+### `GET /api/nodes/{nodeName}/environment`
+
+Coordinator-side retrieval boundary for future UI work. Returns the latest
+environmental sensor status stored for one node:
+
+```json
+{
+  "node": { "id": "...", "name": "greenhouse-zero", "role": "greenhouse-node" },
+  "sensors": [
+    {
+      "key": "greenhouse-ambient",
+      "name": "Greenhouse ambient",
+      "type": "dht22",
+      "gpio": 4,
+      "placement": "Top shelf",
+      "enabled": true,
+      "latestClassification": "accepted",
+      "latestTemperatureC": 24.3,
+      "latestHumidityPct": 67.2,
+      "lastAttemptAt": "2026-07-13T15:30:00.000Z",
+      "lastAcceptedAt": "2026-07-13T15:30:00.000Z",
+      "stale": false,
+      "consecutiveFailures": 0,
+      "consecutiveRejects": 0,
+      "lastDiagnosticCode": null,
+      "lastDiagnosticMessage": null
+    }
+  ]
+}
+```
 
 ### `GET /api/agents/jobs/next`
 

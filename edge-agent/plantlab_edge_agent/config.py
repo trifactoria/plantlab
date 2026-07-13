@@ -59,6 +59,8 @@ class EdgeAgentConfig:
     power: Optional[GreenhousePowerConfig] = None
     heartbeat_interval_seconds: int = 30
     poll_interval_seconds: int = 5
+    sensor_sample_interval_seconds: int = 15
+    environment_upload_interval_seconds: int = 45
     max_spool_bytes: int = 512 * 1024 * 1024  # 512MB - a Pi Zero's whole SD card is usually 8-32GB, but this stays conservative.
     max_upload_bytes: int = 8 * 1024 * 1024  # A single frame should be a few hundred KB at 720p JPEG; 8MB is a generous cap, not a target.
 
@@ -93,6 +95,8 @@ def read_config() -> Optional[EdgeAgentConfig]:
         power=power,
         heartbeat_interval_seconds=int(raw.get("heartbeatIntervalSeconds", 30)),
         poll_interval_seconds=int(raw.get("pollIntervalSeconds", 5)),
+        sensor_sample_interval_seconds=int(raw.get("sensorSampleIntervalSeconds", 15)),
+        environment_upload_interval_seconds=int(raw.get("environmentUploadIntervalSeconds", 45)),
         max_spool_bytes=int(raw.get("maxSpoolBytes", 512 * 1024 * 1024)),
         max_upload_bytes=int(raw.get("maxUploadBytes", 8 * 1024 * 1024)),
     )
@@ -107,6 +111,8 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "capabilities": config.capabilities,
         "heartbeatIntervalSeconds": config.heartbeat_interval_seconds,
         "pollIntervalSeconds": config.poll_interval_seconds,
+        "sensorSampleIntervalSeconds": config.sensor_sample_interval_seconds,
+        "environmentUploadIntervalSeconds": config.environment_upload_interval_seconds,
         "maxSpoolBytes": config.max_spool_bytes,
         "maxUploadBytes": config.max_upload_bytes,
     }
@@ -283,6 +289,10 @@ def validate_config(config: EdgeAgentConfig) -> List[str]:
         problems.append("spoolRoot is missing.")
     if not config.capabilities:
         problems.append("capabilities is empty.")
+    if config.sensor_sample_interval_seconds < 1:
+        problems.append("sensorSampleIntervalSeconds must be positive.")
+    if config.environment_upload_interval_seconds < 1:
+        problems.append("environmentUploadIntervalSeconds must be positive.")
     try:
         _validate_sensor_set(config.sensors)
     except ConfigError as exc:

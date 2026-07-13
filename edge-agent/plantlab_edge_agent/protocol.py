@@ -143,21 +143,24 @@ class AgentProtocolClient:
     def _url(self, path: str) -> str:
         return f"{self.coordinator_url}{path}"
 
-    def heartbeat(self, hostname: str, role: str, operating_system: str, architecture: str, capabilities: List[str]) -> dict:
+    def heartbeat(self, hostname: str, role: str, operating_system: str, architecture: str, capabilities: List[str], environment: Optional[dict] = None) -> dict:
+        body = {
+            "hostname": hostname,
+            "role": role,
+            "operatingSystem": operating_system,
+            "architecture": architecture,
+            "softwareVersion": AGENT_VERSION,
+            "runtime": AGENT_RUNTIME,
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": capabilities,
+        }
+        if environment is not None:
+            body["environment"] = environment
         return request_json(
             self._url("/api/agents/heartbeat"),
             self.token,
             method="POST",
-            body={
-                "hostname": hostname,
-                "role": role,
-                "operatingSystem": operating_system,
-                "architecture": architecture,
-                "softwareVersion": AGENT_VERSION,
-                "runtime": AGENT_RUNTIME,
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": capabilities,
-            },
+            body=body,
         )
 
     def credential_check(self) -> dict:
@@ -165,6 +168,9 @@ class AgentProtocolClient:
 
     def post_camera_inventory(self, cameras: List[dict]) -> dict:
         return request_json(self._url("/api/agents/cameras"), self.token, method="POST", body={"cameras": cameras})
+
+    def post_environment(self, node_name: str, events: List[dict]) -> dict:
+        return request_json(self._url("/api/agents/environment"), self.token, method="POST", body={"nodeName": node_name, "events": events}, timeout=20)
 
     def camera_inventory_refresh_request(self) -> dict:
         return request_json(self._url("/api/agents/cameras/refresh"), self.token, method="GET")

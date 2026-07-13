@@ -133,3 +133,62 @@ def test_has_room_for_respects_a_bounded_max_spool_size(tmp_path):
         assert spool.has_room_for(50) is True
     finally:
         spool.close()
+
+
+def test_environment_events_survive_restart_and_acknowledge(tmp_path):
+    event = {
+        "eventId": "env-spool-1",
+        "sensor": {"key": "ambient", "name": "Ambient", "type": "dht22", "gpio": 4, "placement": None, "enabled": True},
+        "capturedAt": "2026-07-13T15:30:00Z",
+        "classification": "accepted",
+        "temperatureC": 24.0,
+        "humidityPct": 60.0,
+        "diagnosticCode": None,
+        "diagnosticMessage": None,
+    }
+
+    spool = Spool(str(tmp_path))
+    spool.init()
+    try:
+        assert spool.record_environment_events([event]) == 1
+    finally:
+        spool.close()
+
+    reopened = Spool(str(tmp_path))
+    reopened.init()
+    try:
+        [record] = reopened.due_environment_events()
+        assert record.event_id == "env-spool-1"
+        assert record.payload()["temperatureC"] == 24.0
+
+        reopened.mark_environment_acknowledged(["env-spool-1"])
+        assert reopened.due_environment_events() == []
+    finally:
+        reopened.close()
+
+
+def test_environment_retry_backoff_and_cleanup(tmp_path):
+    spool = Spool(str(tmp_path))
+    spool.init()
+    try:
+        event = {
+            "eventId": "env-spool-2",
+            "sensor": {"key": "ambient", "name": "Ambient", "type": "dht22", "gpio": 4, "placement": None, "enabled": True},
+            "capturedAt": "2020-01-01T00:00:00Z",
+            "classification": "failed",
+            "temperatureC": None,
+            "humidityPct": None,
+            "diagnosticCode": "driver-read-failed",
+            "diagnosticMessage": "Sensor driver read failed.",
+        }
+        spool.record_environment_events([event])
+
+        spool.mark_environment_failed(["env-spool-2"], "offline")
+        assert spool.due_environment_events() == []
+        row = spool._db.execute("SELECT state, attemptCount, lastError FROM environment_events WHERE eventId = ?", ("env-spool-2",)).fetchone()
+        assert row == ("failed", 1, "offline")
+
+        spool.mark_environment_acknowledged(["env-spool-2"])
+        assert spool.cleanup_acknowledged_environment(retain_seconds=60) == 1
+    finally:
+        spool.close()

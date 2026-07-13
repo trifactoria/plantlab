@@ -42,6 +42,7 @@ class _FakeCoordinatorState:
         self.completed = []
         self.failed = []
         self.ingested = []
+        self.environment_batches = []
         self.next_job_queue = []
 
     def authorized(self, headers) -> bool:
@@ -89,6 +90,22 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             self.state.camera_reports.append(body.get("cameras", []))
             self._send_json(200, {"status": "ok", "cameras": len(body.get("cameras", [])), "assignments": []})
+            return
+
+        if self.path == "/api/agents/environment":
+            body = self._read_json_body()
+            events = body.get("events", [])
+            self.state.environment_batches.append(body)
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "acceptedEventIds": [event.get("eventId") for event in events if isinstance(event, dict) and event.get("eventId")],
+                    "duplicateEventIds": [],
+                    "storedReadings": len([event for event in events if isinstance(event, dict) and event.get("classification") == "accepted"]),
+                    "storedDiagnostics": len([event for event in events if isinstance(event, dict) and event.get("classification") != "accepted"]),
+                },
+            )
             return
 
         if self.path.startswith("/api/agents/jobs/") and self.path.endswith("/claim"):

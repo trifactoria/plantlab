@@ -1,0 +1,24 @@
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "capabilities": ["temperature", "humidity"],
+  "sensors": [
+    {
+      "key": "greenhouse-ambient",
+      "name": "Greenhouse ambient",
+      "type": "dht22",
+      "gpio": 4,
+      "placement": "Top shelf",
+      "enabled": true
+    },
+    {
+      "key": "propagation-tray",
+      "name": "Propagation tray",
+      "type": "dht22",
+      "gpio": 17,
+      "placement": "Propagation tray",
+      "enabled": true
+    }
+  ]
+}

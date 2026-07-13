@@ -158,6 +158,8 @@ export function mergeEdgeAgentConfig(existing: Record<string, unknown>, input: E
     spoolRoot: input.spoolRoot,
     heartbeatIntervalSeconds: intOrDefault(existing.heartbeatIntervalSeconds, 30),
     pollIntervalSeconds: intOrDefault(existing.pollIntervalSeconds, 5),
+    sensorSampleIntervalSeconds: intOrDefault(existing.sensorSampleIntervalSeconds, 15),
+    environmentUploadIntervalSeconds: intOrDefault(existing.environmentUploadIntervalSeconds, 45),
     maxSpoolBytes: intOrDefault(existing.maxSpoolBytes, 536870912),
     maxUploadBytes: intOrDefault(existing.maxUploadBytes, 8388608),
   };

@@ -1,0 +1,24 @@
+{
+  "largeSuspectJump": [
+    { "temperatureC": 24.0, "humidityPct": 60.0, "seconds": 0 },
+    { "temperatureC": 34.0, "humidityPct": 60.0, "seconds": 1 }
+  ],
+  "confirmedJump": [
+    { "temperatureC": 24.0, "humidityPct": 60.0, "seconds": 0 },
+    { "temperatureC": 34.0, "humidityPct": 80.0, "seconds": 1 },
+    { "temperatureC": 34.8, "humidityPct": 82.0, "seconds": 2 }
+  ],
+  "isolatedSpike": [
+    { "temperatureC": 24.0, "humidityPct": 60.0, "seconds": 0 },
+    { "temperatureC": 36.0, "humidityPct": 90.0, "seconds": 1 },
+    { "temperatureC": 24.5, "humidityPct": 61.0, "seconds": 2 }
+  ],
+  "repeatedDriverFailure": [
+    { "classification": "failed", "diagnosticCode": "driver-read-failed", "seconds": 0 },
+    { "classification": "failed", "diagnosticCode": "driver-read-failed", "seconds": 10 }
+  ],
+  "staleTransition": [
+    { "temperatureC": 24.0, "humidityPct": 60.0, "seconds": 0 },
+    { "classification": "stale", "diagnosticCode": "stale", "seconds": 60 }
+  ]
+}

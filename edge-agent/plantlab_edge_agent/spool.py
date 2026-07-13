@@ -46,6 +46,23 @@ class SpoolRecord:
     state: str
 
 
+@dataclass
+class EnvironmentSpoolRecord:
+    event_id: str
+    payload_json: str
+    captured_at: str
+    byte_size: int
+    attempt_count: int
+    next_retry_at: Optional[str]
+    last_error: Optional[str]
+    state: str
+
+    def payload(self) -> dict:
+        import json
+
+        return json.loads(self.payload_json)
+
+
 class Spool:
     def __init__(self, root: str, max_spool_bytes: int = 512 * 1024 * 1024):
         self.root = Path(root)
@@ -77,6 +94,22 @@ class Spool:
             """
         )
         self._db.execute("CREATE INDEX IF NOT EXISTS spool_records_state_nextRetryAt_idx ON spool_records(state, nextRetryAt)")
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS environment_events (
+                eventId TEXT PRIMARY KEY,
+                payloadJson TEXT NOT NULL,
+                capturedAt TEXT NOT NULL,
+                byteSize INTEGER NOT NULL,
+                attemptCount INTEGER NOT NULL DEFAULT 0,
+                nextRetryAt TEXT,
+                lastError TEXT,
+                state TEXT NOT NULL
+            )
+            """
+        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS environment_events_state_nextRetryAt_idx ON environment_events(state, nextRetryAt)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS environment_events_capturedAt_idx ON environment_events(capturedAt)")
         self._db.commit()
 
     def close(self) -> None:
@@ -98,11 +131,85 @@ class Spool:
                 for entry in d.iterdir():
                     if entry.is_file():
                         total += entry.stat().st_size
+        if self._db is not None:
+            row = self._db.execute("SELECT COALESCE(SUM(byteSize), 0) FROM environment_events WHERE state != 'acknowledged'").fetchone()
+            total += int(row[0] or 0)
         return total
 
     def has_room_for(self, estimated_bytes: int) -> bool:
         """Part 14 "cap upload and spool size" - a bounded disk-usage guard checked before capturing a new frame, not just cleaned up after the fact."""
         return self.spool_size_bytes() + estimated_bytes <= self.max_spool_bytes
+
+    def record_environment_events(self, events: List[dict]) -> int:
+        """Persist unsent environmental telemetry. If bounded storage is full,
+        the newest event is skipped rather than deleting unacknowledged data.
+        Diagnostic deduplication happens before this point in sensors/runtime.py.
+        """
+        assert self._db is not None
+        import json
+
+        inserted = 0
+        for event in events:
+            event_id = str(event.get("eventId") or "")
+            captured_at = str(event.get("capturedAt") or "")
+            if not event_id or not captured_at:
+                continue
+            payload_json = json.dumps(event, sort_keys=True, separators=(",", ":"))
+            byte_size = len(payload_json.encode("utf-8"))
+            if not self.has_room_for(byte_size):
+                continue
+            cursor = self._db.execute(
+                """
+                INSERT OR IGNORE INTO environment_events
+                  (eventId, payloadJson, capturedAt, byteSize, attemptCount, nextRetryAt, lastError, state)
+                VALUES (?, ?, ?, ?, 0, NULL, NULL, 'pending')
+                """,
+                (event_id, payload_json, captured_at, byte_size),
+            )
+            if cursor.rowcount > 0:
+                inserted += 1
+        self._db.commit()
+        return inserted
+
+    def due_environment_events(self, limit: int = 50) -> List[EnvironmentSpoolRecord]:
+        assert self._db is not None
+        now = _now_iso()
+        rows = self._db.execute(
+            """
+            SELECT eventId, payloadJson, capturedAt, byteSize, attemptCount, nextRetryAt, lastError, state
+            FROM environment_events
+            WHERE state = 'pending' OR (state = 'failed' AND (nextRetryAt IS NULL OR nextRetryAt <= ?))
+            ORDER BY capturedAt ASC
+            LIMIT ?
+            """,
+            (now, limit),
+        ).fetchall()
+        return [EnvironmentSpoolRecord(*row) for row in rows]
+
+    def mark_environment_acknowledged(self, event_ids: List[str]) -> None:
+        assert self._db is not None
+        if not event_ids:
+            return
+        self._db.executemany("UPDATE environment_events SET state = 'acknowledged', lastError = NULL WHERE eventId = ?", [(event_id,) for event_id in event_ids])
+        self._db.commit()
+
+    def mark_environment_failed(self, event_ids: List[str], error_message: str) -> None:
+        assert self._db is not None
+        if not event_ids:
+            return
+        rows = self._db.execute(
+            f"SELECT eventId, attemptCount FROM environment_events WHERE eventId IN ({','.join('?' for _ in event_ids)})",
+            event_ids,
+        ).fetchall()
+        for event_id, attempt_count_raw in rows:
+            attempt_count = int(attempt_count_raw or 0) + 1
+            backoff = min(BASE_BACKOFF_SECONDS * (2 ** min(attempt_count, MAX_ATTEMPTS_BEFORE_MAX_BACKOFF)), MAX_BACKOFF_SECONDS)
+            next_retry_at = _iso_from_epoch(time.time() + backoff)
+            self._db.execute(
+                "UPDATE environment_events SET state = 'failed', attemptCount = ?, nextRetryAt = ?, lastError = ? WHERE eventId = ?",
+                (attempt_count, next_retry_at, error_message[:2000], event_id),
+            )
+        self._db.commit()
 
     def record_captured(
         self,
@@ -187,6 +294,13 @@ class Spool:
             removed += 1
         self._db.commit()
         return removed
+
+    def cleanup_acknowledged_environment(self, retain_seconds: int) -> int:
+        assert self._db is not None
+        cutoff = _iso_from_epoch(time.time() - retain_seconds)
+        result = self._db.execute("DELETE FROM environment_events WHERE state = 'acknowledged' AND capturedAt <= ?", (cutoff,))
+        self._db.commit()
+        return result.rowcount
 
 
 def _sha256_file(path: str) -> str:

@@ -79,7 +79,7 @@ model CaptureSource {
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
 
-  cameraProfile  CameraProfile?    @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+  cameraProfile  CameraProfile?         @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
   sourceCaptures SourceCapture[]
   viewports      ProjectViewport[]
   nodeCameras    NodeCamera[]
@@ -431,36 +431,112 @@ model ServiceStatus {
 // deployment metadata only; it never stores the canonical project database
 // path, raw credentials, or local photo paths from the node.
 model PlantLabNode {
-  id              String    @id @default(cuid())
-  name            String    @unique
-  hostname        String?
-  role            String
-  status          String    @default("enrolled")
-  operatingSystem String?
-  architecture    String?
-  softwareVersion String?
-  coordinatorUrl  String?
-  lastHeartbeatAt DateTime?
+  id                          String    @id @default(cuid())
+  name                        String    @unique
+  hostname                    String?
+  role                        String
+  status                      String    @default("enrolled")
+  operatingSystem             String?
+  architecture                String?
+  softwareVersion             String?
+  coordinatorUrl              String?
+  lastHeartbeatAt             DateTime?
   /// JSON array of capability strings - see src/lib/operations/capabilities.ts. Additive; never role-exclusive.
-  capabilitiesJson String   @default("[]")
+  capabilitiesJson            String    @default("[]")
   /// "node" (full TypeScript agent) or "python-edge" (lightweight edge agent) - see edge-agent/. Null until the first heartbeat reports it.
-  runtime         String?
+  runtime                     String?
   /// The agent protocol version this node last reported - see docs/AGENT_PROTOCOL.md.
-  protocolVersion String?
+  protocolVersion             String?
   /// Last time this node sent a camera inventory report to the coordinator.
-  lastInventoryAt DateTime?
+  lastInventoryAt             DateTime?
   /// Set by the coordinator CLI/UI to ask the agent to send inventory immediately on its next poll.
   inventoryRefreshRequestedAt DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
 
-  credentials NodeCredential[]
-  cameras     NodeCamera[]
-  assignments NodeCameraAssignment[]
-  jobs        AgentCaptureJob[]
+  credentials       NodeCredential[]
+  cameras           NodeCamera[]
+  sensors           NodeSensor[]
+  sensorReadings    SensorReading[]
+  sensorDiagnostics SensorDiagnostic[]
+  assignments       NodeCameraAssignment[]
+  jobs              AgentCaptureJob[]
 
   @@index([role])
   @@index([lastHeartbeatAt])
+}
+
+model NodeSensor {
+  id                    String    @id @default(cuid())
+  nodeId                String
+  key                   String
+  name                  String
+  type                  String
+  gpio                  Int?
+  placement             String?
+  enabled               Boolean   @default(true)
+  firstSeenAt           DateTime  @default(now())
+  lastSeenAt            DateTime  @default(now())
+  lastAttemptAt         DateTime?
+  lastAcceptedAt        DateTime?
+  latestClassification  String?
+  latestTemperatureC    Float?
+  latestHumidityPct     Float?
+  consecutiveFailures   Int       @default(0)
+  consecutiveRejects    Int       @default(0)
+  lastDiagnosticCode    String?
+  lastDiagnosticMessage String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  node        PlantLabNode       @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  readings    SensorReading[]
+  diagnostics SensorDiagnostic[]
+
+  @@unique([nodeId, key])
+  @@index([nodeId])
+  @@index([lastSeenAt])
+  @@index([latestClassification])
+}
+
+model SensorReading {
+  id           String   @id @default(cuid())
+  sensorId     String
+  nodeId       String
+  eventId      String
+  capturedAt   DateTime
+  temperatureC Float
+  humidityPct  Float
+  receivedAt   DateTime @default(now())
+
+  sensor NodeSensor   @relation(fields: [sensorId], references: [id], onDelete: Restrict)
+  node   PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, eventId])
+  @@index([sensorId, capturedAt])
+  @@index([nodeId, capturedAt])
+}
+
+model SensorDiagnostic {
+  id             String   @id @default(cuid())
+  sensorId       String
+  nodeId         String
+  eventId        String
+  capturedAt     DateTime
+  classification String
+  temperatureC   Float?
+  humidityPct    Float?
+  code           String?
+  message        String?
+  receivedAt     DateTime @default(now())
+
+  sensor NodeSensor   @relation(fields: [sensorId], references: [id], onDelete: Restrict)
+  node   PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, eventId])
+  @@index([sensorId, capturedAt])
+  @@index([nodeId, capturedAt])
+  @@index([classification])
 }
 
 model NodeCredential {
@@ -478,28 +554,28 @@ model NodeCredential {
 }
 
 model NodeCamera {
-  id              String   @id @default(cuid())
-  nodeId          String
-  stableId        String
-  legacyStableId  String?
-  devicePath      String
-  name            String?
-  vendorId        String?
-  productId       String?
-  serial          String?
-  physicalPath    String?
-  usbPath         String?
-  usbPort         String?
+  id                   String   @id @default(cuid())
+  nodeId               String
+  stableId             String
+  legacyStableId       String?
+  devicePath           String
+  name                 String?
+  vendorId             String?
+  productId            String?
+  serial               String?
+  physicalPath         String?
+  usbPath              String?
+  usbPort              String?
   alternateDevicesJson String?
-  formatsJson     String?
-  available       Boolean  @default(true)
-  lastSeenAt      DateTime @default(now())
-  captureSourceId String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  formatsJson          String?
+  available            Boolean  @default(true)
+  lastSeenAt           DateTime @default(now())
+  captureSourceId      String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
-  node          PlantLabNode            @relation(fields: [nodeId], references: [id], onDelete: Cascade)
-  captureSource CaptureSource?          @relation(fields: [captureSourceId], references: [id], onDelete: SetNull)
+  node          PlantLabNode           @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource?         @relation(fields: [captureSourceId], references: [id], onDelete: SetNull)
   assignments   NodeCameraAssignment[]
 
   @@unique([nodeId, stableId])

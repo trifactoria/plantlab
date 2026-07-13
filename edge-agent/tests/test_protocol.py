@@ -5,13 +5,21 @@ from plantlab_edge_agent.protocol import AgentProtocolClient, PROTOCOL_VERSION, 
 
 def test_heartbeat_reports_runtime_and_protocol_version(fake_coordinator):
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
-    client.heartbeat("greenhouse-zero", "greenhouse-node", "Raspberry Pi OS Lite", "armv6l", ["camera"])
+    client.heartbeat(
+        "greenhouse-zero",
+        "greenhouse-node",
+        "Raspberry Pi OS Lite",
+        "armv6l",
+        ["camera"],
+        environment={"configuredSensorCount": 1, "enabledSensorCount": 1},
+    )
 
     [sent] = fake_coordinator["state"].heartbeats
     assert sent["runtime"] == "python-edge"
     assert sent["protocolVersion"] == PROTOCOL_VERSION
     assert sent["capabilities"] == ["camera"]
     assert sent["hostname"] == "greenhouse-zero"
+    assert sent["environment"] == {"configuredSensorCount": 1, "enabledSensorCount": 1}
 
 
 def test_unauthenticated_request_raises_protocol_error(fake_coordinator):
@@ -32,6 +40,25 @@ def test_camera_inventory_round_trip(fake_coordinator):
     result = client.post_camera_inventory([{"stableId": "s1", "devicePath": "/dev/video0", "available": True, "formats": []}])
     assert result["cameras"] == 1
     assert fake_coordinator["state"].camera_reports == [[{"stableId": "s1", "devicePath": "/dev/video0", "available": True, "formats": []}]]
+
+
+def test_environment_telemetry_round_trip(fake_coordinator):
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    event = {
+        "eventId": "env-1",
+        "sensor": {"key": "ambient", "name": "Ambient", "type": "dht22", "gpio": 4, "placement": "Top shelf", "enabled": True},
+        "capturedAt": "2026-07-13T15:30:00Z",
+        "classification": "accepted",
+        "temperatureC": 24.1,
+        "humidityPct": 61.5,
+        "diagnosticCode": None,
+        "diagnosticMessage": None,
+    }
+
+    result = client.post_environment("greenhouse-zero", [event])
+
+    assert result["acceptedEventIds"] == ["env-1"]
+    assert fake_coordinator["state"].environment_batches == [{"nodeName": "greenhouse-zero", "events": [event]}]
 
 
 def test_next_job_returns_none_when_queue_is_empty(fake_coordinator):
