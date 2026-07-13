@@ -457,8 +457,82 @@ describe("agent protocol", () => {
       },
     });
 
-    const payload = serializeJobForAgent(await nextQueuedJob(prisma, registered.node.id));
+    const payload = await serializeJobForAgent(prisma, await nextQueuedJob(prisma, registered.node.id));
 
     expect(payload?.settings).toEqual({ width: 1920, height: 1080, inputFormat: "mjpeg" });
+  });
+
+  it("resolves the current device path from latest NodeCamera inventory by stable ID immediately before dispatch", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-job-device-move", role: "greenhouse-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:32e6:9221:serial:path:1.3",
+        devicePath: "/dev/video0",
+        name: "Greenhouse Camera 1.3",
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName: "greenhouse-job-device-move",
+      stableId: "usb:32e6:9221:serial:path:1.3",
+      newCaptureSourceName: "Greenhouse Stable Camera",
+      width: 1280,
+      height: 720,
+      inputFormat: "mjpeg",
+    });
+    await prisma.agentCaptureJob.create({
+      data: {
+        nodeId: registered.node.id,
+        assignmentId: attached.assignment.id,
+        captureSourceId: attached.captureSource.id,
+      },
+    });
+
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:32e6:9221:serial:path:1.3",
+        devicePath: "/dev/video2",
+        name: "Greenhouse Camera 1.3",
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+
+    const payload = await serializeJobForAgent(prisma, await nextQueuedJob(prisma, registered.node.id));
+
+    expect(attached.captureSource.cameraDevice).toBe("/dev/video0");
+    expect(payload?.camera).toMatchObject({
+      stableId: "usb:32e6:9221:serial:path:1.3",
+      devicePath: "/dev/video2",
+    });
+  });
+
+  it("does not dispatch a queued job when the assigned stable camera is not available in current inventory", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-job-unavailable", role: "greenhouse-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:missing-camera",
+        devicePath: "/dev/video0",
+        name: "Missing Camera",
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName: "greenhouse-job-unavailable",
+      stableId: "usb:missing-camera",
+      newCaptureSourceName: "Unavailable Camera",
+      width: 1280,
+      height: 720,
+      inputFormat: "mjpeg",
+    });
+    await prisma.agentCaptureJob.create({
+      data: {
+        nodeId: registered.node.id,
+        assignmentId: attached.assignment.id,
+        captureSourceId: attached.captureSource.id,
+      },
+    });
+    await prisma.nodeCamera.update({ where: { id: attached.camera.id }, data: { available: false, devicePath: "/dev/video0" } });
+
+    await expect(serializeJobForAgent(prisma, await nextQueuedJob(prisma, registered.node.id))).resolves.toBeNull();
   });
 });

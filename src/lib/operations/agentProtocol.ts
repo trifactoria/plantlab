@@ -246,6 +246,22 @@ export async function nextQueuedJob(prisma: PrismaClient, nodeId: string) {
   });
 }
 
+export type AgentCaptureJobPayload = {
+  id: string;
+  captureSourceId: string;
+  assignmentId: string;
+  camera: {
+    stableId: string;
+    devicePath: string;
+    name: string | null;
+  };
+  settings: {
+    width: number;
+    height: number;
+    inputFormat: string;
+  };
+};
+
 export async function claimJob(prisma: PrismaClient, nodeId: string, jobId: string, captureId: string) {
   const updated = await prisma.agentCaptureJob.updateMany({
     where: { id: jobId, nodeId, status: "queued" },
@@ -293,8 +309,16 @@ export async function completeJob(prisma: PrismaClient, nodeId: string, jobId: s
   return { ok: true as const, sourceCapture };
 }
 
-export function serializeJobForAgent(job: Awaited<ReturnType<typeof nextQueuedJob>>) {
+export async function serializeJobForAgent(prisma: PrismaClient, job: Awaited<ReturnType<typeof nextQueuedJob>>): Promise<AgentCaptureJobPayload | null> {
   if (!job) {
+    return null;
+  }
+  const assignmentStableId = job.assignment.nodeCamera.stableId;
+  const currentCamera = await prisma.nodeCamera.findUnique({
+    where: { nodeId_stableId: { nodeId: job.nodeId, stableId: assignmentStableId } },
+    select: { stableId: true, devicePath: true, name: true, available: true },
+  });
+  if (!currentCamera?.available) {
     return null;
   }
 
@@ -303,9 +327,9 @@ export function serializeJobForAgent(job: Awaited<ReturnType<typeof nextQueuedJo
     captureSourceId: job.captureSourceId,
     assignmentId: job.assignmentId,
     camera: {
-      stableId: job.assignment.nodeCamera.stableId,
-      devicePath: job.assignment.nodeCamera.devicePath,
-      name: job.assignment.nodeCamera.name,
+      stableId: currentCamera.stableId,
+      devicePath: currentCamera.devicePath,
+      name: currentCamera.name,
     },
     settings: {
       width: job.assignment.width,

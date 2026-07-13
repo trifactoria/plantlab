@@ -7,5 +7,5 @@ export async function GET(request: Request) {
   if (auth instanceof Response) return auth;
 
   const job = await nextQueuedJob(prisma, auth.node.id);
-  return NextResponse.json({ job: serializeJobForAgent(job) });
+  return NextResponse.json({ job: await serializeJobForAgent(prisma, job) });
 }
