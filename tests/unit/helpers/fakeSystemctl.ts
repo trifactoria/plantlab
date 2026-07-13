@@ -10,9 +10,10 @@ import path from "node:path";
  * plain marker files in a scratch directory - no real systemd/dbus
  * involved.
  *
- * Supports exactly what convergeNodeRole()/systemdUnits.ts actually call:
- * `is-enabled`, `mask`, `unmask`, `enable --now <units...>`,
- * `disable --now <units...>`, `daemon-reload`, `show <units...> -p ...`.
+ * Supports exactly what convergeNodeRole()/systemdUnits.ts and the edge
+ * attach lifecycle helpers call: `cat`, `is-enabled`, `is-active`, `mask`,
+ * `unmask`, `enable --now <units...>`, `disable --now <units...>`,
+ * `daemon-reload`, `status`, and `show <units...> -p ...`.
  */
 export type FakeSystemctl = {
   binDir: string;
@@ -42,6 +43,15 @@ action="$1"; shift
 case "$action" in
   daemon-reload)
     exit 0
+    ;;
+  cat)
+    u="$1"
+    if [ -f "$STATE/$u.masked" ] || [ -f "$STATE/$u.enabled" ] || [ -f "$STATE/$u.active" ]; then
+      printf '[Unit]\nDescription=%s\n' "$u"
+      exit 0
+    fi
+    echo "No files found for $u." >&2
+    exit 1
     ;;
   mask)
     for u in "$@"; do touch "$STATE/$u.masked"; rm -f "$STATE/$u.enabled" "$STATE/$u.active"; done
@@ -93,6 +103,15 @@ case "$action" in
   restart)
     for u in "$@"; do touch "$STATE/$u.enabled" "$STATE/$u.active"; done
     exit 0
+    ;;
+  status)
+    u="$1"
+    if [ -f "$STATE/$u.active" ]; then
+      printf '%s active (running)\n' "$u"
+      exit 0
+    fi
+    printf '%s inactive\n' "$u"
+    exit 3
     ;;
   show)
     units=""

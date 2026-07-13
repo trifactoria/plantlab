@@ -212,9 +212,10 @@ async function installEdgeAgentCredential(input: {
   credential: string | null;
   /** Restart plantlab-edge-agent.service even when no new credential is being written - e.g. doctor's "Restart edge agent?" repair item, independent of whether rotation was needed. */
   forceRestart?: boolean;
+  deferRestart?: boolean;
 }): Promise<{ ok: boolean; steps: ConvergenceStep[] }> {
   if (!input.credential) {
-    if (!input.forceRestart) {
+    if (!input.forceRestart || input.deferRestart) {
       return { ok: true, steps: [{ name: "credential-write", status: "skipped", detail: "No new credential to install." }] };
     }
     const restartOnlyScript = "systemctl --user daemon-reload >/dev/null 2>&1 || true\nsystemctl --user restart plantlab-edge-agent.service\n";
@@ -256,6 +257,9 @@ env_mode="$(stat -c '%a' "$env_path")"
 if [ "$env_mode" != "600" ]; then echo "Credential file mode is $env_mode, expected 600" >&2; exit 21; fi
 dir_mode="$(stat -c '%a' "$env_dir")"
 if [ "$dir_mode" != "700" ]; then echo "Credential directory mode is $dir_mode, expected 700" >&2; exit 22; fi
+if [ "${input.deferRestart ? "1" : "0"}" = "1" ]; then
+  exit 0
+fi
 systemctl --user daemon-reload >/dev/null 2>&1 || true
 systemctl --user restart plantlab-edge-agent.service
 `;
@@ -269,10 +273,12 @@ systemctl --user restart plantlab-edge-agent.service
   }
   return {
     ok: true,
-    steps: [
-      { name: "credential-write", status: "completed", detail: "Credential written to the edge agent's env file (0600)." },
-      { name: "agent-restart", status: "completed", detail: "plantlab-edge-agent.service restarted." },
-    ],
+    steps: input.deferRestart
+      ? [{ name: "credential-write", status: "completed", detail: "Credential written to the edge agent's env file (0600); restart deferred." }]
+      : [
+          { name: "credential-write", status: "completed", detail: "Credential written to the edge agent's env file (0600)." },
+          { name: "agent-restart", status: "completed", detail: "plantlab-edge-agent.service restarted." },
+        ],
   };
 }
 
@@ -293,6 +299,8 @@ export type CredentialInstallInput = {
   forceRestart?: boolean;
   /** Optional greenhouse hardware config collected by the edge attach flow. Omitted fields are preserved by convergeEdgeAgentConfig(). */
   edgeConfig?: Partial<Omit<EdgeConfigConvergenceInput, "role" | "nodeName" | "coordinatorUrl">>;
+  /** Edge attach can stop the service, write config/credentials/secrets, then start once after verification. */
+  deferEdgeRestart?: boolean;
 };
 
 /**
@@ -367,6 +375,7 @@ export async function rotateAndInstallCredential(
         sshHost: input.sshHost,
         credential: registered.credential || null,
         forceRestart: forceRestart || configConvergence.status === "UPDATED",
+        deferRestart: input.deferEdgeRestart,
       });
       steps.push(...install.steps);
       installOk = install.ok;

@@ -378,6 +378,34 @@ describe("credentialRepair", () => {
       expect(await fake.isActive("plantlab-edge-agent.service")).toBe(true);
     }, 15_000);
 
+    it("can defer the edge-agent restart so attach can write all files before starting the service once", async () => {
+      await setUp();
+      const preRegistered = await registerOrRotateNode(prisma, { name: "greenhouse-defer-restart", role: "greenhouse-node", rotateCredential: true });
+
+      const result = await rotateAndInstallCredential(prisma, {
+        sshHost: "greenhouse-defer-restart",
+        repoPath: "~/plantlab-edge-agent",
+        coordinatorUrl: server.url,
+        role: "greenhouse-node",
+        runtime: "python-edge",
+        nodeName: "greenhouse-defer-restart",
+        registerInput: { name: "greenhouse-defer-restart", role: "greenhouse-node" },
+        heartbeatTimeoutMs: 8000,
+        rotate: true,
+        waitForHeartbeat: false,
+        deferEdgeRestart: true,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.node?.id).toBe(preRegistered.node.id);
+      expect(result.steps.find((s) => s.name === "credential-write")?.detail).toMatch(/restart deferred/i);
+      expect(result.steps.find((s) => s.name === "agent-restart")).toBeUndefined();
+      expect(await fake.isActive("plantlab-edge-agent.service")).toBe(false);
+
+      const content = await import("node:fs/promises").then((fs) => fs.readFile(credentialPath(remoteHome.home), "utf8"));
+      expect(content).toContain("PLANTLAB_NODE_CREDENTIAL=pln_");
+    }, 15_000);
+
     it("a follow-up probe against the edge agent's credential reports valid", async () => {
       await setUp();
       const preRegistered = await registerOrRotateNode(prisma, { name: "greenhouse-followup", role: "greenhouse-node", rotateCredential: true });

@@ -1,23 +1,29 @@
 import os from "node:os";
 import { createInterface } from "node:readline/promises";
-import { Writable } from "node:stream";
 import type { Command } from "commander";
 import { updateCameraInventory } from "../../lib/operations/agentProtocol";
 import { readNodeConfig } from "../../lib/operations/config";
 import { createManualCaptureJob, waitForJobCompletion } from "../../lib/operations/manualCapture";
 import { markNodeStatus } from "../../lib/operations/nodeCredentials";
-import { ensureValidNodeCredential, rotateAndInstallCredential, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
+import { ensureValidNodeCredential, rotateAndInstallCredential, waitForNodeHeartbeat, type CredentialProbeStatus } from "../../lib/operations/credentialRepair";
 import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
 import {
   copyEdgeAgentDirectory,
+  edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectEdgeAgentService,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteEdgeAgentConfig,
   readRemoteGreenhouseSecretStatus,
+  reconcileEdgeAgentInstall,
   runEdgeAgentInstall,
+  startEdgeAgentService,
+  stopEdgeAgentService,
   verifyEdgeCommand,
   writeRemoteGreenhouseSecrets,
+  type EdgeAttachTimeoutPolicy,
+  type EdgeInstallReconciliation,
 } from "../../lib/operations/edgeAgentInstall";
 import {
   deriveCapabilitiesFromEdgeConfig,
@@ -39,6 +45,7 @@ import { prisma } from "../../lib/prisma";
 import type { CameraFormat } from "../../lib/v4l2";
 import { runCameraAttachFlow } from "./camera";
 import { readSshConfigHosts } from "../sshConfig";
+import { parseStrictMenuChoice } from "../promptValidation";
 
 async function printLocalNodeInfo(): Promise<void> {
   const config = await readNodeConfig();
@@ -453,9 +460,18 @@ Examples:
     );
 }
 
-async function promptEdgeAgentRole(sshHost: string, yes?: boolean): Promise<"camera-node" | "greenhouse-node"> {
-  const recommended: "camera-node" | "greenhouse-node" = /greenhouse/i.test(sshHost) ? "greenhouse-node" : "camera-node";
+async function promptEdgeAgentRole(
+  sshHost: string,
+  yes?: boolean,
+  existingRole?: string | null,
+): Promise<"camera-node" | "greenhouse-node"> {
+  const existing = existingRole === "greenhouse-node" || existingRole === "camera-node" ? existingRole : null;
+  const recommended: "camera-node" | "greenhouse-node" = existing ?? (/greenhouse/i.test(sshHost) ? "greenhouse-node" : "camera-node");
   console.log("");
+  if (existing) {
+    console.log(`Existing node role: ${existing}`);
+    console.log("");
+  }
   console.log("Select role:");
   console.log("");
   console.log(`1) Camera node${recommended === "camera-node" ? " (recommended)" : ""}`);
@@ -463,9 +479,13 @@ async function promptEdgeAgentRole(sshHost: string, yes?: boolean): Promise<"cam
   if (yes || !process.stdin.isTTY) return recommended;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await rl.question(`\nRole [1-2, default ${recommended === "greenhouse-node" ? "2" : "1"}]: `)).trim();
-    if (!answer) return recommended;
-    return answer === "2" ? "greenhouse-node" : "camera-node";
+    const fallback = recommended === "greenhouse-node" ? 2 : 1;
+    for (;;) {
+      const answer = await rl.question(`\nRole [1-2, default ${fallback}]: `);
+      const choice = parseStrictMenuChoice(answer, 2, fallback);
+      if (choice !== null) return choice === 2 ? "greenhouse-node" : "camera-node";
+      console.log("Please enter 1 or 2.");
+    }
   } finally {
     rl.close();
   }
@@ -538,21 +558,11 @@ async function promptGreenhouseAttachSelection(input: {
     console.log(readiness.detail);
     const credentialsNeeded = !secretFileExists || power !== undefined;
     if (credentialsNeeded && (await promptGreenhouseBoolean("Configure Kasa credentials now? [y/N] ", yes, false))) {
-      const kasaUsername = await promptSecretText("Kasa username: ");
-      const kasaPassword = await promptSecretText("Kasa password: ");
-      if (kasaUsername && kasaPassword) {
-        shouldWriteSecrets = true;
-        secrets = { kasaUsername, kasaPassword };
-      } else {
-        console.log("Kasa credentials were not written because one or both values were empty.");
-      }
+      secrets = await promptKasaCredentials();
+      shouldWriteSecrets = Boolean(secrets);
     } else if (secretFileExists && (await promptGreenhouseBoolean("Reconfigure Kasa credentials? [y/N] ", yes, false))) {
-      const kasaUsername = await promptSecretText("Kasa username: ");
-      const kasaPassword = await promptSecretText("Kasa password: ");
-      if (kasaUsername && kasaPassword) {
-        shouldWriteSecrets = true;
-        secrets = { kasaUsername, kasaPassword };
-      }
+      secrets = await promptKasaCredentials();
+      shouldWriteSecrets = Boolean(secrets);
     }
   }
 
@@ -590,8 +600,7 @@ async function promptSensorDefinitions(yes?: boolean): Promise<GreenhouseSensorC
   do {
     const key = await promptText("Sensor logical key: ");
     const name = await promptText("Sensor display name: ");
-    const gpioText = await promptText("BCM GPIO number: ");
-    const gpio = Number(gpioText);
+    const gpio = await promptBcmGpio();
     const placement = await promptText("Physical placement (optional): ", false);
     const enabled = await promptGreenhouseBoolean("Enabled? [Y/n] ", false, true);
     sensors.push({
@@ -604,6 +613,14 @@ async function promptSensorDefinitions(yes?: boolean): Promise<GreenhouseSensorC
     });
   } while (await promptGreenhouseBoolean("Add another sensor? [y/N] ", false, false));
   return sensors;
+}
+
+async function promptBcmGpio(): Promise<number> {
+  for (;;) {
+    const gpioText = await promptText("BCM GPIO number: ");
+    if (/^(?:[0-9]|1[0-9]|2[0-7])$/.test(gpioText)) return Number(gpioText);
+    console.log("Please enter a BCM GPIO number from 0 to 27.");
+  }
 }
 
 async function promptPowerConfig(yes?: boolean): Promise<GreenhousePowerConfig | null> {
@@ -645,21 +662,21 @@ async function promptText(question: string, required = true): Promise<string> {
   }
 }
 
-async function promptSecretText(question: string): Promise<string> {
-  if (!process.stdin.isTTY) return "";
-  const muted = new Writable({
-    write(_chunk, _encoding, callback) {
-      callback();
-    },
-  });
-  process.stdout.write(question);
-  const rl = createInterface({ input: process.stdin, output: muted, terminal: true });
-  try {
-    const answer = (await rl.question("")).trim();
-    process.stdout.write("\n");
-    return answer;
-  } finally {
-    rl.close();
+async function promptKasaCredentials(): Promise<{ kasaUsername: string; kasaPassword: string } | undefined> {
+  if (!process.stdin.isTTY) return undefined;
+  for (;;) {
+    // Deliberately visible during this development-stage trusted-home-network
+    // flow. Harden this later before treating Kasa credentials as production
+    // secret entry UX.
+    const kasaUsername = await promptText("Kasa username: ");
+    const kasaPassword = await promptText("Kasa password: ");
+    console.log("");
+    console.log(`Kasa username: ${kasaUsername}`);
+    console.log(`Kasa password: ${kasaPassword}`);
+    if (await promptGreenhouseBoolean("Use these Kasa credentials? [Y/n] ", false, true)) {
+      return { kasaUsername, kasaPassword };
+    }
+    console.log("Re-enter Kasa credentials.");
   }
 }
 
@@ -680,28 +697,51 @@ async function runEdgeAgentAttach(input: {
   steps: AttachSteps;
 }): Promise<void> {
   const { sshHost, inspection, coordinatorUrl, options, steps } = input;
+  const timeoutPolicy = edgeAttachTimeoutPolicy(inspection);
+  const heartbeatTimeoutMs = options.timeoutMs !== 45_000 ? options.timeoutMs : timeoutPolicy.heartbeatMs;
+  const inventoryTimeoutMs = options.timeoutMs !== 45_000 ? options.timeoutMs : timeoutPolicy.inventoryMs;
+  if (timeoutPolicy.lowResource) {
+    console.log("Low-resource edge node detected; using extended installation timeouts.");
+  }
 
-  const role = await promptEdgeAgentRole(sshHost, options.yes);
+  const existingConfigResult = await readRemoteEdgeAgentConfig(sshHost).catch((error) => {
+    console.log(`Could not read existing edge-agent configuration; continuing with a fresh config view: ${sanitizeError(error)}`);
+    return { configPath: null, exists: false, config: {} as Record<string, unknown>, error: null };
+  });
+  if (existingConfigResult.error) {
+    console.log(`Existing edge-agent config could not be parsed and will be repaired: ${existingConfigResult.error}`);
+  }
+  const existingConfig = existingConfigResult.config as Record<string, unknown>;
+  const existingRole = typeof existingConfig.role === "string" ? existingConfig.role : inspection.role;
+  const role = await promptEdgeAgentRole(sshHost, options.yes, existingRole);
+  if ((existingRole === "greenhouse-node" || existingRole === "camera-node") && existingRole !== role) {
+    if (!(await confirmOrYes(`Change node role from ${existingRole} to ${role}? [y/N] `, options.yes, false))) {
+      steps.fail("Role selection", "Role change was not confirmed.");
+      printAttachIncomplete(steps, sshHost);
+      process.exitCode = 1;
+      return;
+    }
+  }
   steps.complete("Role selection", role);
   let greenhouseSelection: GreenhouseAttachSelection | null = null;
   let registerCapabilities = role === "camera-node" ? ["camera"] : ["camera"];
   if (role === "greenhouse-node") {
-    const existingConfigResult = await readRemoteEdgeAgentConfig(sshHost).catch((error) => {
-      console.log(`Could not read existing greenhouse configuration; continuing with a fresh config view: ${sanitizeError(error)}`);
-      return { configPath: null, exists: false, config: {}, error: null };
-    });
-    if (existingConfigResult.error) {
-      console.log(`Existing edge-agent config could not be parsed and will be repaired: ${existingConfigResult.error}`);
-    }
-    const secretStatus = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => ({ path: null, exists: false, mode: null }));
+    const secretStatus = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => ({
+      path: null,
+      exists: false,
+      mode: null,
+      owner: null,
+      hasKasaUsername: false,
+      hasKasaPassword: false,
+    }));
     greenhouseSelection = await promptGreenhouseAttachSelection({
-      existingConfig: existingConfigResult.config,
+      existingConfig,
       secretFileExists: secretStatus.exists,
       pythonVersion: inspection.pythonVersion,
       yes: options.yes,
     });
     const capabilityConfig: Record<string, unknown> = {
-      ...existingConfigResult.config,
+      ...existingConfig,
       role: "greenhouse-node",
       nodeName: sshHost,
       coordinatorUrl,
@@ -716,28 +756,92 @@ async function runEdgeAgentAttach(input: {
   }
   const sourceVersion = await localEdgeAgentVersion();
   const installedBefore = await readInstalledEdgeAgentVersion(sshHost);
+  const serviceState = await inspectEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => {
+    console.log(`Could not inspect existing edge-agent service state: ${sanitizeError(error)}`);
+    return null;
+  });
+  let stoppedExistingService = false;
+  let serviceStarted = false;
+  const restoreStoppedService = async () => {
+    if (stoppedExistingService && serviceState?.active && !serviceStarted) {
+      console.log("Restoring previously running edge agent service...");
+      await startEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => {
+        console.error(`WARN: could not restore plantlab-edge-agent.service: ${sanitizeError(error)}`);
+      });
+    }
+  };
+
+  if (serviceState?.active) {
+    console.log("Stopping existing edge agent...");
+    const stop = await stopEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => ({
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
+      status: 124,
+    }));
+    if (stop.status !== 0) {
+      steps.fail("Service stop", (stop.stderr.trim() || "Timed out stopping plantlab-edge-agent.service.").slice(0, 2000));
+      printAttachIncomplete(steps, sshHost);
+      process.exitCode = 1;
+      return;
+    }
+    stoppedExistingService = true;
+    steps.complete("Service stop", "Existing plantlab-edge-agent.service stopped.");
+    console.log("Existing edge agent stopped.");
+  } else {
+    steps.complete("Service stop", serviceState?.exists ? "Service exists and was not active." : "Service not installed yet.");
+  }
 
   console.log(`\nCopying edge agent to ${sshHost}...`);
-  const copyResult = await copyEdgeAgentDirectory(sshHost);
+  const copyResult = await copyEdgeAgentDirectory(sshHost, { timeoutMs: timeoutPolicy.copyMs }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    status: 124,
+  }));
   if (copyResult.status !== 0) {
     steps.fail("Copy edge agent", (copyResult.stderr.trim() || "scp failed.").slice(0, 2000));
+    await restoreStoppedService();
     printAttachIncomplete(steps, sshHost);
     process.exitCode = 1;
     return;
   }
   steps.complete("Copy edge agent", `edge-agent/ copied to ~/plantlab-edge-agent on ${sshHost}.`);
+  console.log("Files copied.");
 
-  console.log("Running install.sh...");
-  const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName: sshHost, coordinatorUrl });
+  console.log(timeoutPolicy.lowResource ? "Running remote install on low-resource node..." : "Running install.sh...");
+  const installStartedAt = Date.now();
+  let installTimedOut = false;
+  const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName: sshHost, coordinatorUrl }, { timeoutMs: timeoutPolicy.installMs }).catch((error) => {
+    installTimedOut = isTimeoutError(error);
+    return { stdout: "", stderr: error instanceof Error ? error.message : String(error), status: 124 };
+  });
   if (installResult.status !== 0) {
-    steps.fail("Install edge agent", (installResult.stderr.trim() || installResult.stdout.trim() || "install.sh failed.").slice(0, 2000));
-    printAttachIncomplete(steps, sshHost);
-    process.exitCode = 1;
-    return;
+    if (installTimedOut) {
+      console.log(`Edge-agent install did not finish within ${Math.round(timeoutPolicy.installMs / 1000)} seconds.`);
+      console.log("Checking whether installation completed remotely...");
+      const reconciled = await waitForInstallReconciliation(sshHost, sourceVersion, timeoutPolicy);
+      if (reconciled.status !== "completed") {
+        steps.fail("Install edge agent", `${reconciled.status}: ${reconciled.detail}`);
+        printInstallReconciliation(reconciled);
+        await restoreStoppedService();
+        printAttachIncomplete(steps, sshHost);
+        process.exitCode = 1;
+        return;
+      }
+      steps.complete("Install edge agent", `Completed after local timeout: ${reconciled.detail}`);
+    } else {
+      steps.fail("Install edge agent", (installResult.stderr.trim() || installResult.stdout.trim() || "install.sh failed.").slice(0, 2000));
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost);
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    console.log(`Remote install completed in ${Math.round((Date.now() - installStartedAt) / 1000)} seconds.`);
   }
   const installedAfter = await readInstalledEdgeAgentVersion(sshHost);
   if (sourceVersion.contentHash && installedAfter?.contentHash && sourceVersion.contentHash !== installedAfter.contentHash) {
     steps.fail("Install edge agent", `FAILED: source edge-agent hash ${sourceVersion.contentHash} but installed hash is ${installedAfter.contentHash}.`);
+    await restoreStoppedService();
     printAttachIncomplete(steps, sshHost);
     process.exitCode = 1;
     return;
@@ -791,10 +895,11 @@ async function runEdgeAgentAttach(input: {
           disablePower: greenhouseSelection.disablePower,
         }
       : { cameraEnabled: true },
-    heartbeatTimeoutMs: options.timeoutMs,
+    heartbeatTimeoutMs,
+    waitForHeartbeat: false,
+    deferEdgeRestart: true,
   };
 
-  const heartbeatSince = new Date();
   let probeStatus: CredentialProbeStatus | null = null;
   const repair = options.rotateCredential
     ? await rotateAndInstallCredential(prisma, { ...credentialInput, rotate: true })
@@ -820,12 +925,14 @@ async function runEdgeAgentAttach(input: {
   }
 
   if (!repair.node) {
+    await restoreStoppedService();
     printAttachIncomplete(steps, sshHost);
     process.exitCode = 1;
     return;
   }
   if (!repair.ok) {
     await printEdgeAgentDiagnosis(sshHost);
+    await restoreStoppedService();
     printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
     process.exitCode = 1;
     return;
@@ -834,28 +941,66 @@ async function runEdgeAgentAttach(input: {
   if (repair.rotated) {
     console.log("✓ Previous credential revoked");
     console.log("✓ New credential installed securely");
-    console.log("✓ Agent restarted");
-    console.log("✓ Authenticated heartbeat received");
   }
   if (greenhouseSelection?.shouldWriteSecrets && greenhouseSelection.secrets) {
+    console.log("Writing Kasa credentials...");
     const secretWrite = await writeRemoteGreenhouseSecrets(sshHost, greenhouseSelection.secrets);
     if (secretWrite.status !== 0) {
       steps.fail("Greenhouse secrets", (secretWrite.stderr.trim() || "greenhouse.env write failed.").slice(0, 2000));
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    const secretStatus = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => null);
+    if (!secretStatus?.exists || secretStatus.mode !== "600" || !secretStatus.hasKasaUsername || !secretStatus.hasKasaPassword) {
+      steps.fail("Greenhouse secrets", "Kasa credential file verification failed after write.");
+      await restoreStoppedService();
       printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
       process.exitCode = 1;
       return;
     }
     steps.complete("Greenhouse secrets", "~/.config/plantlab/greenhouse.env written with owner-only permissions.");
-    console.log("✓ Greenhouse secret file written");
+    console.log("Credential file verified.");
   }
+
+  console.log("Starting edge agent...");
+  const heartbeatSince = new Date();
+  const serviceStart = await startEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    status: 124,
+  }));
+  if (serviceStart.status !== 0) {
+    steps.fail("Service start", (serviceStart.stderr.trim() || "Timed out starting plantlab-edge-agent.service.").slice(0, 2000));
+    await restoreStoppedService();
+    printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+    process.exitCode = 1;
+    return;
+  }
+  serviceStarted = true;
+  steps.complete("Service start", "plantlab-edge-agent.service started.");
+
+  const heartbeat = await waitForNodeHeartbeat(prisma, repair.node.id, heartbeatSince, heartbeatTimeoutMs);
+  if (!heartbeat) {
+    steps.fail("Heartbeat", `No authenticated heartbeat received within ${Math.round(heartbeatTimeoutMs / 1000)} seconds.`);
+    await printEdgeAgentDiagnosis(sshHost);
+    printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log("Heartbeat received.");
   steps.complete("Heartbeat", "Agent heartbeat received");
 
   let inventory: Awaited<ReturnType<typeof waitForNodeInventory>> = [];
   if (registerCapabilities.includes("camera")) {
-    console.log("Waiting for camera inventory...");
-    inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, options.timeoutMs);
+    console.log(timeoutPolicy.lowResource ? "Waiting for camera inventory from low-resource node..." : "Waiting for camera inventory...");
+    inventory = await waitForNodeInventory(repair.node.id, heartbeatSince, inventoryTimeoutMs, {
+      progressMs: 30_000,
+      progressMessage: timeoutPolicy.lowResource ? "Still waiting; the node is healthy and enumerating video devices." : "Still waiting for camera inventory...",
+    });
     if (inventory.length === 0) {
-      steps.fail("Camera report", "No camera inventory was reported by the edge agent.");
+      steps.fail("Camera report", `No camera inventory was reported by the edge agent within ${Math.round(inventoryTimeoutMs / 1000)} seconds.`);
       printAttachIncomplete(steps, sshHost);
       process.exitCode = 1;
       return;
@@ -880,6 +1025,10 @@ async function runEdgeAgentAttach(input: {
   console.log(`Coordinator: ${coordinatorUrl}`);
   console.log(`Cameras detected: ${inventory.length}`);
   if (role === "greenhouse-node") console.log(`Capabilities: ${registerCapabilities.join(", ") || "(none)"}`);
+  if (role === "greenhouse-node") {
+    const secretStatus = await readRemoteGreenhouseSecretStatus(sshHost).catch(() => null);
+    console.log(`Kasa credential file: ${secretStatus?.exists ? "present" : "missing"}`);
+  }
   console.log("Remote agent: healthy");
 
   if (registerCapabilities.includes("camera") && (await confirmOptional("\nConfigure a camera now? [Y/n] ", options.yes, true))) {
@@ -1034,8 +1183,15 @@ class AttachSteps {
 const ATTACH_STEP_ORDER = [
   "Inspection",
   "Coordinator discovery",
-  "Role confirmation",
+  "Role selection",
+  "Greenhouse configuration",
+  "Service stop",
+  "Copy edge agent",
+  "Install edge agent",
+  "Edge command",
   "Credential",
+  "Greenhouse secrets",
+  "Service start",
   "Heartbeat",
   "Camera report",
 ] as const;
@@ -1083,6 +1239,52 @@ function sanitizeText(value: string): string {
   return value.replace(/pln_[A-Za-z0-9_-]+/g, "pln_[redacted]");
 }
 
+function isTimeoutError(error: unknown): boolean {
+  return /timed out|timeout/i.test(error instanceof Error ? error.message : String(error));
+}
+
+async function waitForInstallReconciliation(
+  sshHost: string,
+  sourceVersion: Awaited<ReturnType<typeof localEdgeAgentVersion>>,
+  timeoutPolicy: EdgeAttachTimeoutPolicy,
+): Promise<EdgeInstallReconciliation> {
+  const started = Date.now();
+  let lastProgressAt = started;
+  let last = await reconcileEdgeAgentInstall(sshHost, sourceVersion, { timeoutMs: timeoutPolicy.ordinarySshMs });
+  while (last.status === "still-running" && Date.now() - started < timeoutPolicy.installMs) {
+    const now = Date.now();
+    if (now - lastProgressAt >= 30_000) {
+      console.log(`Remote install still running after ${Math.round((now - started) / 1000)} seconds...`);
+      lastProgressAt = now;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    last = await reconcileEdgeAgentInstall(sshHost, sourceVersion, { timeoutMs: timeoutPolicy.ordinarySshMs });
+  }
+  return last;
+}
+
+function printInstallReconciliation(reconciled: EdgeInstallReconciliation): void {
+  console.error("");
+  console.error("Remote install reconciliation:");
+  console.error(`- Status: ${reconciled.status}`);
+  console.error(`- Detail: ${sanitizeText(reconciled.detail)}`);
+  console.error(`- plantlab-edge executable: ${reconciled.executableExists ? "present" : "missing"}`);
+  console.error(`- edge-agent config: ${reconciled.configExists ? "present" : "missing"}`);
+  console.error(`- systemd unit: ${reconciled.unitExists ? "present" : "missing"}`);
+  if (reconciled.installedVersion) {
+    console.error(
+      `- Installed version: ${reconciled.installedVersion.version ?? "(unknown)"} ${reconciled.installedVersion.contentHash?.slice(0, 12) ?? "(no hash)"}`,
+    );
+  }
+  if (reconciled.service) {
+    console.error(`- Service: ${reconciled.service.activeState ?? "(unknown)"}; enabled=${reconciled.service.enabledState ?? "(unknown)"}`);
+  }
+  if (reconciled.journal.length > 0) {
+    console.error("Recent service output:");
+    for (const line of reconciled.journal.slice(-6)) console.error(`  ${sanitizeText(line)}`);
+  }
+}
+
 async function printAgentDiagnosis(sshHost: string, repoPath: string): Promise<void> {
   try {
     const diagnostics = await diagnoseRemoteAgent(sshHost, repoPath);
@@ -1127,11 +1329,22 @@ function describeCredentialProbeStatus(status: CredentialProbeStatus): string {
   }
 }
 
-async function waitForNodeInventory(nodeId: string, since: Date, timeoutMs: number) {
+async function waitForNodeInventory(
+  nodeId: string,
+  since: Date,
+  timeoutMs: number,
+  options: { progressMs?: number; progressMessage?: string } = {},
+) {
   const started = Date.now();
+  let lastProgressAt = started;
   while (Date.now() - started < timeoutMs) {
     const cameras = await prisma.nodeCamera.findMany({ where: { nodeId, lastSeenAt: { gte: since } }, orderBy: { name: "asc" } });
     if (cameras.length > 0) return cameras;
+    const now = Date.now();
+    if (options.progressMs && options.progressMessage && now - lastProgressAt >= options.progressMs) {
+      console.log(options.progressMessage);
+      lastProgressAt = now;
+    }
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
   return [];

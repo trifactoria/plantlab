@@ -32,6 +32,57 @@ if (typeof window !== "undefined") {
 
 const REMOTE_EDGE_AGENT_DIR = "plantlab-edge-agent";
 
+export type EdgeAttachTimeoutPolicy = {
+  lowResource: boolean;
+  ordinarySshMs: number;
+  serviceMs: number;
+  copyMs: number;
+  installMs: number;
+  heartbeatMs: number;
+  inventoryMs: number;
+};
+
+export type EdgeTimeoutInspection = {
+  architecture?: string | null;
+  armVersion?: number | string | null;
+  memoryAvailableMb?: number | null;
+  memoryTotalMb?: number | null;
+  fullAgentSupported?: boolean | null;
+};
+
+export function edgeAttachTimeoutPolicy(inspection: EdgeTimeoutInspection, env: NodeJS.ProcessEnv = process.env): EdgeAttachTimeoutPolicy {
+  const armVersion =
+    typeof inspection.armVersion === "number"
+      ? inspection.armVersion
+      : typeof inspection.armVersion === "string" && /^\d+$/.test(inspection.armVersion)
+        ? Number(inspection.armVersion)
+        : null;
+  const lowResource =
+    (typeof armVersion === "number" && armVersion <= 6) ||
+    /armv6/i.test(inspection.architecture ?? "") ||
+    (typeof inspection.memoryAvailableMb === "number" && inspection.memoryAvailableMb > 0 && inspection.memoryAvailableMb < 256) ||
+    (typeof inspection.memoryTotalMb === "number" && inspection.memoryTotalMb > 0 && inspection.memoryTotalMb < 768) ||
+    inspection.fullAgentSupported === false;
+  const defaults = lowResource
+    ? { ordinarySshMs: 20_000, serviceMs: 60_000, copyMs: 120_000, installMs: 180_000, heartbeatMs: 120_000, inventoryMs: 180_000 }
+    : { ordinarySshMs: 15_000, serviceMs: 45_000, copyMs: 90_000, installMs: 120_000, heartbeatMs: 60_000, inventoryMs: 90_000 };
+  return {
+    lowResource,
+    ordinarySshMs: envTimeout(env.PLANTLAB_SSH_COMMAND_TIMEOUT_MS, defaults.ordinarySshMs),
+    serviceMs: envTimeout(env.PLANTLAB_EDGE_SERVICE_TIMEOUT_MS, defaults.serviceMs),
+    copyMs: envTimeout(env.PLANTLAB_EDGE_COPY_TIMEOUT_MS, defaults.copyMs),
+    installMs: envTimeout(env.PLANTLAB_EDGE_INSTALL_TIMEOUT_MS, defaults.installMs),
+    heartbeatMs: envTimeout(env.PLANTLAB_EDGE_HEARTBEAT_TIMEOUT_MS, defaults.heartbeatMs),
+    inventoryMs: envTimeout(env.PLANTLAB_EDGE_INVENTORY_TIMEOUT_MS, defaults.inventoryMs),
+  };
+}
+
+function envTimeout(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1_000 ? Math.floor(parsed) : fallback;
+}
+
 export function localEdgeAgentDir(): string {
   return path.join(process.cwd(), "edge-agent");
 }
@@ -126,17 +177,17 @@ printf '%s\n' "$json"
 }
 
 /** Copies edge-agent/ over SSH via scp (rsync isn't guaranteed present on Raspberry Pi OS Lite; scp ships with openssh-client, which SSH access itself already requires). */
-export async function copyEdgeAgentDirectory(sshHost: string): Promise<CommandResult> {
+export async function copyEdgeAgentDirectory(sshHost: string, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
   validateSshHost(sshHost);
   // Clean slate first so a re-copy is a true mirror, never a stale merge -
   // safe because this only ever touches the *code* directory, never
   // config/credential/spool (see module doc comment).
-  const cleanResult = await runRemoteShell(sshHost, `rm -rf ~/${REMOTE_EDGE_AGENT_DIR}`, [], { timeoutMs: 15_000 });
+  const cleanResult = await runRemoteShell(sshHost, `rm -rf ~/${REMOTE_EDGE_AGENT_DIR}`, [], { timeoutMs: Math.min(options.timeoutMs ?? 15_000, 60_000) });
   if (cleanResult.status !== 0) {
     return cleanResult;
   }
   return runLocalCommand("scp", ["-r", "-o", "BatchMode=yes", localEdgeAgentDir(), `${sshHost}:${REMOTE_EDGE_AGENT_DIR}`], {
-    timeoutMs: 60_000,
+    timeoutMs: options.timeoutMs ?? 60_000,
   });
 }
 
@@ -148,7 +199,7 @@ export type EdgeAgentInstallInput = {
 };
 
 /** Runs install.sh remotely - non-interactive by construction (install.sh never prompts; role/node-name/coordinator-url are passed as env vars). Never creates a credential - see install.sh's own doc comment. */
-export async function runEdgeAgentInstall(sshHost: string, input: EdgeAgentInstallInput): Promise<CommandResult> {
+export async function runEdgeAgentInstall(sshHost: string, input: EdgeAgentInstallInput, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
   validateSshHost(sshHost);
   const source = await localEdgeAgentVersion();
   const env = [
@@ -160,7 +211,199 @@ export async function runEdgeAgentInstall(sshHost: string, input: EdgeAgentInsta
     source.commit ? `PLANTLAB_EDGE_SOURCE_COMMIT=${shellQuote(source.commit)}` : "",
   ].filter(Boolean);
   const script = `cd ~/${REMOTE_EDGE_AGENT_DIR} && ${env.join(" ")} sh install.sh`;
-  return runRemoteShell(sshHost, script, [], { timeoutMs: 120_000 });
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 120_000 });
+}
+
+export type EdgeAgentServiceState = {
+  exists: boolean;
+  enabled: boolean;
+  active: boolean;
+  enabledState: string | null;
+  activeState: string | null;
+};
+
+export async function inspectEdgeAgentService(sshHost: string, options: { timeoutMs?: number } = {}): Promise<EdgeAgentServiceState> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+unit=plantlab-edge-agent.service
+exists=false
+if systemctl --user cat "$unit" >/dev/null 2>&1; then exists=true; fi
+enabled_state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+active_state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+printf 'EXISTS=%s\n' "$exists"
+printf 'ENABLED=%s\n' "$enabled_state"
+printf 'ACTIVE=%s\n' "$active_state"
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 30_000 });
+  if (result.status !== 0) {
+    throw new Error((result.stderr.trim() || result.stdout.trim() || "Could not inspect plantlab-edge-agent.service.").slice(0, 2000));
+  }
+  const exists = /^EXISTS=true$/m.test(result.stdout);
+  const enabledState = /^ENABLED=(.*)$/m.exec(result.stdout)?.[1]?.trim() || null;
+  const activeState = /^ACTIVE=(.*)$/m.exec(result.stdout)?.[1]?.trim() || null;
+  return {
+    exists,
+    enabled: enabledState === "enabled",
+    active: activeState === "active",
+    enabledState,
+    activeState,
+  };
+}
+
+export async function stopEdgeAgentService(sshHost: string, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  const waitSeconds = Math.max(1, Math.ceil((options.timeoutMs ?? 30_000) / 1000));
+  const script = String.raw`
+set -u
+unit=plantlab-edge-agent.service
+if ! systemctl --user cat "$unit" >/dev/null 2>&1; then
+  echo "service missing"
+  exit 0
+fi
+if [ "$(systemctl --user is-active "$unit" 2>/dev/null || true)" != "active" ]; then
+  echo "service already inactive"
+  exit 0
+fi
+systemctl --user stop "$unit"
+i=0
+while [ "$i" -lt __WAIT_SECONDS__ ]; do
+  state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+  if [ "$state" != "active" ] && [ "$state" != "activating" ]; then
+    echo "service stopped"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+echo "Timed out waiting for plantlab-edge-agent.service to stop." >&2
+exit 124
+`.replace("__WAIT_SECONDS__", String(waitSeconds));
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 30_000 });
+}
+
+export async function startEdgeAgentService(sshHost: string, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  const waitSeconds = Math.max(1, Math.ceil((options.timeoutMs ?? 30_000) / 1000));
+  const script = String.raw`
+set -u
+unit=plantlab-edge-agent.service
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+systemctl --user enable --now "$unit"
+i=0
+while [ "$i" -lt __WAIT_SECONDS__ ]; do
+  state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+  if [ "$state" = "active" ]; then
+    echo "service active"
+    exit 0
+  fi
+  if [ "$state" = "failed" ]; then
+    systemctl --user status "$unit" --no-pager 2>/dev/null | tail -n 20 >&2 || true
+    exit 1
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+echo "Timed out waiting for plantlab-edge-agent.service to start." >&2
+exit 124
+`.replace("__WAIT_SECONDS__", String(waitSeconds));
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 30_000 });
+}
+
+export type EdgeInstallReconciliation = {
+  status: "completed" | "still-running" | "partially-completed" | "failed" | "unknown";
+  detail: string;
+  executableExists: boolean;
+  installedVersion: EdgeAgentVersionInfo | null;
+  configExists: boolean;
+  unitExists: boolean;
+  service: EdgeAgentServiceState | null;
+  journal: string[];
+};
+
+export async function reconcileEdgeAgentInstall(
+  sshHost: string,
+  source: EdgeAgentVersionInfo | null = null,
+  options: { timeoutMs?: number } = {},
+): Promise<EdgeInstallReconciliation> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+wrapper_path="$home_dir/.local/bin/plantlab-edge"
+config_path="$home_dir/.config/plantlab/edge-agent.json"
+unit=plantlab-edge-agent.service
+running=false
+pgrep -af 'plantlab-edge-agent.*/install.sh|plantlab-edge-agent/install.sh|sh install.sh' >/dev/null 2>&1 && running=true
+wrapper=false; [ -x "$wrapper_path" ] && wrapper=true
+config=false; [ -f "$config_path" ] && config=true
+unit_exists=false; systemctl --user cat "$unit" >/dev/null 2>&1 && unit_exists=true
+recent="$(journalctl --user -u "$unit" -n 12 --no-pager 2>/dev/null || true)"
+python3 - "$running" "$wrapper" "$config" "$unit_exists" "$recent" <<'PY'
+import json, sys
+running, wrapper, config, unit_exists, recent = sys.argv[1:6]
+print(json.dumps({
+  "running": running == "true",
+  "wrapper": wrapper == "true",
+  "config": config == "true",
+  "unit": unit_exists == "true",
+  "journal": recent.splitlines()[-12:],
+}))
+PY
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 20_000 }).catch((error) => ({
+    status: 255,
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+  }));
+  if (result.status !== 0) {
+    return {
+      status: "unknown",
+      detail: (result.stderr.trim() || "Could not inspect remote install state.").slice(0, 2000),
+      executableExists: false,
+      installedVersion: null,
+      configExists: false,
+      unitExists: false,
+      service: null,
+      journal: [],
+    };
+  }
+  let parsed: { running?: boolean; wrapper?: boolean; config?: boolean; unit?: boolean; journal?: string[] } = {};
+  try {
+    parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
+  } catch {
+    parsed = {};
+  }
+  const [installedVersion, service] = await Promise.all([
+    readInstalledEdgeAgentVersion(sshHost),
+    inspectEdgeAgentService(sshHost, { timeoutMs: options.timeoutMs }).catch(() => null),
+  ]);
+  const hashMatches = Boolean(source?.contentHash && installedVersion?.contentHash && source.contentHash === installedVersion.contentHash);
+  const completed = Boolean(parsed.wrapper && parsed.unit && (!source?.contentHash || hashMatches));
+  let status: EdgeInstallReconciliation["status"];
+  if (completed) status = "completed";
+  else if (parsed.running) status = "still-running";
+  else if (parsed.wrapper || parsed.config || parsed.unit) status = "partially-completed";
+  else status = parsed.journal?.some((line) => /failed|fatal|error/i.test(line)) ? "failed" : "unknown";
+  return {
+    status,
+    detail:
+      status === "completed"
+        ? "Edge-agent installation completed remotely."
+        : status === "still-running"
+          ? "Remote install process is still running."
+          : status === "partially-completed"
+            ? "Remote install has partial artifacts but is not fully verified."
+            : status === "failed"
+              ? "Remote install appears to have failed."
+              : "Remote install status is unknown.",
+    executableExists: parsed.wrapper === true,
+    installedVersion,
+    configExists: parsed.config === true,
+    unitExists: parsed.unit === true,
+    service,
+    journal: Array.isArray(parsed.journal) ? parsed.journal.slice(-12) : [],
+  };
 }
 
 export type EdgeCommandVerification = {
@@ -269,6 +512,9 @@ export type GreenhouseSecretStatus = {
   path: string | null;
   exists: boolean;
   mode: string | null;
+  owner: string | null;
+  hasKasaUsername: boolean;
+  hasKasaPassword: boolean;
 };
 
 export async function readRemoteGreenhouseSecretStatus(sshHost: string): Promise<GreenhouseSecretStatus> {
@@ -280,10 +526,20 @@ if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)
 secret_path="$home_dir/.config/plantlab/greenhouse.env"
 exists=false; [ -f "$secret_path" ] && exists=true
 mode=""; [ -e "$secret_path" ] && mode="$(stat -c '%a' "$secret_path" 2>/dev/null || true)"
-python3 - "$secret_path" "$exists" "$mode" <<'PY'
+owner=""; [ -e "$secret_path" ] && owner="$(stat -c '%U' "$secret_path" 2>/dev/null || true)"
+has_username=false; [ -f "$secret_path" ] && grep -q '^KASA_USERNAME=' "$secret_path" 2>/dev/null && has_username=true
+has_password=false; [ -f "$secret_path" ] && grep -q '^KASA_PASSWORD=' "$secret_path" 2>/dev/null && has_password=true
+python3 - "$secret_path" "$exists" "$mode" "$owner" "$has_username" "$has_password" <<'PY'
 import json, sys
-path, exists, mode = sys.argv[1:4]
-print(json.dumps({"path": path, "exists": exists == "true", "mode": mode or None}))
+path, exists, mode, owner, has_username, has_password = sys.argv[1:7]
+print(json.dumps({
+    "path": path,
+    "exists": exists == "true",
+    "mode": mode or None,
+    "owner": owner or None,
+    "hasKasaUsername": has_username == "true",
+    "hasKasaPassword": has_password == "true",
+}))
 PY
 `;
   const result = await runRemoteShell(sshHost, script, [], { timeoutMs: 15_000 });
@@ -295,6 +551,9 @@ PY
     path: typeof parsed.path === "string" ? parsed.path : null,
     exists: parsed.exists === true,
     mode: typeof parsed.mode === "string" ? parsed.mode : null,
+    owner: typeof parsed.owner === "string" ? parsed.owner : null,
+    hasKasaUsername: parsed.hasKasaUsername === true,
+    hasKasaPassword: parsed.hasKasaPassword === true,
   };
 }
 

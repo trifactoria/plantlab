@@ -5,14 +5,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   copyEdgeAgentDirectory,
   convergeEdgeAgentConfig,
+  edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectEdgeAgentService,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteGreenhouseSecretStatus,
+  reconcileEdgeAgentInstall,
   runEdgeAgentInstall,
+  startEdgeAgentService,
+  stopEdgeAgentService,
   writeRemoteGreenhouseSecrets,
 } from "../../src/lib/operations/edgeAgentInstall";
 import { createFakeRemoteHome, createFakeSsh, type FakeSsh } from "./helpers/fakeSsh";
+import { createFakeSystemctl, prependPath, type FakeSystemctl } from "./helpers/fakeSystemctl";
 
 async function exists(file: string) {
   return access(file).then(() => true, () => false);
@@ -190,9 +196,117 @@ describe("edge-agent install mirror", () => {
     const status = await readRemoteGreenhouseSecretStatus("greenhouse-zero");
     expect(status.exists).toBe(true);
     expect(status.mode).toBe("600");
+    expect(status.owner).toBeTruthy();
+    expect(status.hasKasaUsername).toBe(true);
+    expect(status.hasKasaPassword).toBe(true);
     const content = await readFile(path.join(remoteHome.home, ".config", "plantlab", "greenhouse.env"), "utf8");
     expect(content).toContain('KASA_USERNAME="user@example.com"');
     expect(content).toContain('KASA_PASSWORD="secret"');
     expect(JSON.stringify(status)).not.toContain("secret");
+  });
+
+  it("selects extended attach timeouts for ARMv6 and low-memory nodes with environment overrides", () => {
+    expect(edgeAttachTimeoutPolicy({ architecture: "x64", memoryTotalMb: 4096, memoryAvailableMb: 2048, fullAgentSupported: true }).lowResource).toBe(false);
+
+    const armv6 = edgeAttachTimeoutPolicy({ architecture: "armv6l", armVersion: 6, memoryTotalMb: 512, memoryAvailableMb: 160, fullAgentSupported: false });
+    expect(armv6.lowResource).toBe(true);
+    expect(armv6.installMs).toBe(180_000);
+    expect(armv6.inventoryMs).toBe(180_000);
+
+    const overridden = edgeAttachTimeoutPolicy(
+      { architecture: "armv6l", armVersion: 6 },
+      {
+        PLANTLAB_EDGE_INSTALL_TIMEOUT_MS: "240000",
+        PLANTLAB_EDGE_HEARTBEAT_TIMEOUT_MS: "bad",
+        PLANTLAB_EDGE_INVENTORY_TIMEOUT_MS: "999",
+      } as unknown as NodeJS.ProcessEnv,
+    );
+    expect(overridden.installMs).toBe(240_000);
+    expect(overridden.heartbeatMs).toBe(120_000);
+    expect(overridden.inventoryMs).toBe(180_000);
+  });
+
+  it("stops and starts only plantlab-edge-agent.service through the service lifecycle helpers", async () => {
+    const fakeSystemctl = await createFakeSystemctl();
+    const restore = prependPath(fakeSystemctl.binDir);
+    try {
+      expect((await inspectEdgeAgentService("greenhouse-zero")).exists).toBe(false);
+
+      const started = await startEdgeAgentService("greenhouse-zero", { timeoutMs: 5_000 });
+      expect(started.status).toBe(0);
+      expect(await fakeSystemctl.isActive("plantlab-edge-agent.service")).toBe(true);
+      expect(await fakeSystemctl.isActive("plantlab-agent.service")).toBe(false);
+
+      const active = await inspectEdgeAgentService("greenhouse-zero");
+      expect(active.exists).toBe(true);
+      expect(active.active).toBe(true);
+      expect(active.enabled).toBe(true);
+
+      const stopped = await stopEdgeAgentService("greenhouse-zero", { timeoutMs: 5_000 });
+      expect(stopped.status).toBe(0);
+      expect(await fakeSystemctl.isActive("plantlab-edge-agent.service")).toBe(false);
+      expect((await inspectEdgeAgentService("greenhouse-zero")).active).toBe(false);
+    } finally {
+      restore();
+      await fakeSystemctl.cleanup();
+    }
+  });
+
+  it("reconciles a timed-out install as completed when the installed package and unit match", async () => {
+    const fakeSystemctl = await createFakeSystemctl();
+    const restore = prependPath(fakeSystemctl.binDir);
+    try {
+      const binDir = path.join(remoteHome.home, ".local", "bin");
+      await mkdir(binDir, { recursive: true });
+      await writeFile(
+        path.join(binDir, "plantlab-edge"),
+        '#!/bin/sh\nif [ "$1" = "version" ]; then printf \'{"version":"0.1.0","commit":"abc","contentHash":"source-hash"}\\n\'; fi\n',
+        { mode: 0o755 },
+      );
+      const configDir = path.join(remoteHome.home, ".config", "plantlab");
+      await mkdir(configDir, { recursive: true });
+      await writeFile(path.join(configDir, "edge-agent.json"), "{}\n");
+      await startEdgeAgentService("greenhouse-zero", { timeoutMs: 5_000 });
+
+      const result = await reconcileEdgeAgentInstall("greenhouse-zero", { version: "0.1.0", commit: "abc", contentHash: "source-hash" });
+      expect(result.status).toBe("completed");
+      expect(result.executableExists).toBe(true);
+      expect(result.configExists).toBe(true);
+      expect(result.unitExists).toBe(true);
+    } finally {
+      restore();
+      await fakeSystemctl.cleanup();
+    }
+  });
+
+  it("reconciles partial installation artifacts separately from a completed install", async () => {
+    const fakeSystemctl = await createFakeSystemctl();
+    const restore = prependPath(fakeSystemctl.binDir);
+    try {
+      const binDir = path.join(remoteHome.home, ".local", "bin");
+      await mkdir(binDir, { recursive: true });
+      await writeFile(path.join(binDir, "plantlab-edge"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+      const result = await reconcileEdgeAgentInstall("greenhouse-zero", { version: "0.1.0", commit: "abc", contentHash: "source-hash" });
+      expect(result.status).toBe("partially-completed");
+      expect(result.executableExists).toBe(true);
+      expect(result.unitExists).toBe(false);
+    } finally {
+      restore();
+      await fakeSystemctl.cleanup();
+    }
+  });
+
+  it("reconciles an install process that is still running", async () => {
+    const fakeSystemctl = await createFakeSystemctl();
+    const restore = prependPath(fakeSystemctl.binDir);
+    await writeFile(path.join(fakeBin, "pgrep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    try {
+      const result = await reconcileEdgeAgentInstall("greenhouse-zero", { version: "0.1.0", commit: "abc", contentHash: "source-hash" });
+      expect(result.status).toBe("still-running");
+    } finally {
+      restore();
+      await fakeSystemctl.cleanup();
+    }
   });
 });

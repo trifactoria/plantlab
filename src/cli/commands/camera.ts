@@ -14,6 +14,7 @@ import { attachNodeCamera, firstSupportedMode, listNodeCameras, nodeCameraDispla
 import { prisma } from "../../lib/prisma";
 import { discoverLocalCameras } from "../../lib/v4l2";
 import { formatCheckLine } from "../format";
+import { parseStrictMenuChoice } from "../promptValidation";
 
 async function listCameras(): Promise<void> {
   const cameras = await discoverLocalCameras();
@@ -185,10 +186,9 @@ async function ask(question: string): Promise<string> {
 async function chooseIndex(prompt: string, count: number, fallback = 1, askFn = ask): Promise<number> {
   for (;;) {
     const answer = await askFn(`${prompt} [1-${count}, default ${fallback}]: `);
-    if (!answer) return fallback - 1;
-    const index = Number(answer);
-    if (Number.isInteger(index) && index >= 1 && index <= count) {
-      return index - 1;
+    const choice = parseStrictMenuChoice(answer, count, fallback);
+    if (choice !== null) {
+      return choice - 1;
     }
     console.log(`Enter a number between 1 and ${count}.`);
   }
