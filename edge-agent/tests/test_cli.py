@@ -1,7 +1,9 @@
 import json
+from datetime import datetime, timezone
 
 from plantlab_edge_agent import __main__ as cli
 from plantlab_edge_agent import config
+from plantlab_edge_agent.sensors.base import RawEnvironmentalSample, SensorDriverError
 
 
 def _write_ready_config(isolated_config, fake_coordinator):
@@ -57,6 +59,7 @@ def test_config_show_displays_greenhouse_sections_without_secrets(isolated_confi
     assert "greenhouse-ambient" in output
     assert "BCM GPIO 4" in output
     assert "Power provider: kasa" in output
+    assert "Sensor driver mode:" in output
     assert "fans=greenhouse-fans" in output
     assert "Greenhouse secret file: present" in output
     assert "KASA_PASSWORD" not in output
@@ -107,3 +110,106 @@ def test_version_json_reports_package_commit_and_content_hash(capsys):
     assert payload["version"]
     assert "commit" in payload
     assert len(payload["contentHash"]) == 64
+
+
+def test_sensor_probe_json_reports_configured_sensor(monkeypatch, isolated_config, fake_coordinator, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url=fake_coordinator["url"],
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["temperature", "humidity"],
+            sensors=[config.GreenhouseSensorConfig(key="greenhouse-ambient", name="Greenhouse Ambient", type="dht22", gpio=8, placement="outside tent", enabled=True)],
+        )
+    )
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "dht22")
+
+    assert cli.main(["sensor", "probe", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selectedDriverMode"] == "dht22"
+    assert payload["dht22Backend"] == "pigpio"
+    assert payload["configuredSensors"][0]["gpio"] == 8
+
+
+def test_sensor_probe_works_without_config(isolated_config, capsys):
+    assert cli.main(["sensor", "probe", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configuredSensors"] == []
+    assert payload["dht22Backend"] == "pigpio"
+
+
+def test_sensor_test_success_after_intermediate_failure(monkeypatch, isolated_config, fake_coordinator, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url=fake_coordinator["url"],
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["temperature", "humidity"],
+            sensors=[config.GreenhouseSensorConfig(key="greenhouse-ambient", name="Greenhouse Ambient", type="dht22", gpio=8, placement="outside tent", enabled=True)],
+        )
+    )
+
+    class FakeDriver:
+        def __init__(self, _sensor):
+            self.calls = 0
+
+        def read(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise SensorDriverError("dht-timeout", "Timed out waiting for a complete DHT22 frame.")
+            return RawEnvironmentalSample(23.8, 64.2, datetime(2026, 7, 13, 15, 30, tzinfo=timezone.utc))
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli, "DHT22PigpioDriver", FakeDriver)
+    assert cli.main(["sensor", "test", "greenhouse-ambient", "--attempts", "2", "--interval", "0"]) == 0
+    output = capsys.readouterr().out
+    assert "Attempt 1/2: dht-timeout" in output
+    assert "Attempt 2/2: 23.8 C, 64.2% RH - accepted" in output
+    assert "PASS: 1 valid reading" in output
+
+
+def test_sensor_test_unknown_disabled_and_all_failures(monkeypatch, isolated_config, fake_coordinator, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url=fake_coordinator["url"],
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["temperature", "humidity"],
+            sensors=[config.GreenhouseSensorConfig(key="disabled", name="Disabled", type="dht22", gpio=8, enabled=False), config.GreenhouseSensorConfig(key="bad", name="Bad", type="dht22", gpio=9, enabled=True)],
+        )
+    )
+    assert cli.main(["sensor", "test", "missing", "--attempts", "1"]) == 1
+    assert 'Unknown sensor "missing"' in capsys.readouterr().err
+    assert cli.main(["sensor", "test", "disabled", "--attempts", "1"]) == 1
+    assert 'Sensor "disabled" is disabled.' in capsys.readouterr().err
+
+    class FailingDriver:
+        def __init__(self, _sensor):
+            pass
+
+        def read(self):
+            raise SensorDriverError("sensor-no-response", "No DHT22 response pulses were received.")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli, "DHT22PigpioDriver", FailingDriver)
+    assert cli.main(["sensor", "test", "bad", "--attempts", "1", "--interval", "0"]) == 1
+    assert "FAIL: no valid readings" in capsys.readouterr().out
+
+
+def test_sensor_mode_writes_systemd_dropin(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("PLANTLAB_EDGE_SYSTEMD_USER_DIR", str(tmp_path))
+    dropin_dir = tmp_path / "plantlab-edge-agent.service.d"
+    dropin_dir.mkdir(parents=True)
+    (dropin_dir / "greenhouse-mock.conf").write_text("[Service]\nEnvironment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock\n")
+
+    assert cli.main(["sensor", "mode", "dht22"]) == 0
+    assert "Sensor driver mode set to dht22" in capsys.readouterr().out
+    assert not (dropin_dir / "greenhouse-mock.conf").exists()
+    assert "PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22" in (dropin_dir / "greenhouse-sensor-driver.conf").read_text()

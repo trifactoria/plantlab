@@ -7,12 +7,15 @@ import {
   convergeEdgeAgentConfig,
   edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectRemoteDht22Support,
   inspectEdgeAgentService,
+  installRemoteDht22Support,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteGreenhouseSecretStatus,
   reconcileEdgeAgentInstall,
   runEdgeAgentInstall,
+  setRemoteGreenhouseSensorDriverMode,
   startEdgeAgentService,
   stopEdgeAgentService,
   writeRemoteGreenhouseSecrets,
@@ -203,6 +206,73 @@ describe("edge-agent install mirror", () => {
     expect(content).toContain('KASA_USERNAME="user@example.com"');
     expect(content).toContain('KASA_PASSWORD="secret"');
     expect(JSON.stringify(status)).not.toContain("secret");
+  });
+
+  it("inspects remote DHT22 backend readiness and detects a legacy mock drop-in", async () => {
+    const dropinDir = path.join(remoteHome.home, ".config", "systemd", "user", "plantlab-edge-agent.service.d");
+    await mkdir(dropinDir, { recursive: true });
+    await writeFile(path.join(dropinDir, "greenhouse-mock.conf"), "[Service]\nEnvironment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock\n");
+    await writeFile(
+      path.join(fakeBin, "plantlab-edge"),
+      `#!/bin/sh
+if [ "$1" = "sensor" ] && [ "$2" = "probe" ] && [ "$3" = "--json" ]; then
+cat <<'JSON'
+{
+  "selectedDriverMode": "mock",
+  "dht22Backend": "pigpio",
+  "backendDependencyAvailable": true,
+  "backendReady": false,
+  "backendReadinessDetail": "pigpio daemon is not reachable",
+  "configuredSensors": [{"key":"greenhouse-ambient","name":"Greenhouse Ambient","type":"dht22","gpio":8,"placement":"outside tent","enabled":true}],
+  "warnings": ["BCM GPIO 8 overlaps SPI pins"]
+}
+JSON
+  exit 0
+fi
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    const status = await inspectRemoteDht22Support("greenhouse-zero");
+    expect(status.ok).toBe(true);
+    expect(status.backend).toBe("pigpio");
+    expect(status.backendReady).toBe(false);
+    expect(status.selectedDriverMode).toBe("mock");
+    expect(status.mockDropInEnabled).toBe(true);
+    expect(status.configuredSensors).toMatchObject([{ key: "greenhouse-ambient", gpio: 8, enabled: true }]);
+    expect(status.warnings[0]).toContain("SPI");
+  });
+
+  it("switches a legacy mock sensor drop-in to the real DHT22 driver", async () => {
+    const dropinDir = path.join(remoteHome.home, ".config", "systemd", "user", "plantlab-edge-agent.service.d");
+    await mkdir(dropinDir, { recursive: true });
+    await writeFile(path.join(dropinDir, "greenhouse-mock.conf"), "[Service]\nEnvironment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock\n");
+
+    const result = await setRemoteGreenhouseSensorDriverMode("greenhouse-zero", "dht22");
+    expect(result.status).toBe(0);
+    await expect(readFile(path.join(dropinDir, "greenhouse-mock.conf"), "utf8")).rejects.toThrow();
+    expect(await readFile(path.join(dropinDir, "greenhouse-sensor-driver.conf"), "utf8")).toContain("PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22");
+  });
+
+  it("skips DHT22 dependency installation when the pigpio backend is already ready", async () => {
+    await writeFile(
+      path.join(fakeBin, "python3"),
+      `#!/bin/sh
+cat >/dev/null
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      path.join(fakeBin, "apt-get"),
+      "#!/bin/sh\necho apt-get should not run >&2\nexit 55\n",
+      { mode: 0o755 },
+    );
+
+    const result = await installRemoteDht22Support("greenhouse-zero");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("DHT22 backend already ready.");
   });
 
   it("selects extended attach timeouts for ARMv6 and low-memory nodes with environment overrides", () => {

@@ -35,6 +35,16 @@ class EnvironmentalSensorDriver(Protocol):
     def read(self) -> RawEnvironmentalSample:
         ...
 
+    def close(self) -> None:
+        ...
+
+
+class SensorDriverError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
+
 
 @dataclass(frozen=True)
 class SensorTelemetryEvent:

@@ -11,13 +11,16 @@ import {
   copyEdgeAgentDirectory,
   edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectRemoteDht22Support,
   inspectEdgeAgentService,
+  installRemoteDht22Support,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteEdgeAgentConfig,
   readRemoteGreenhouseSecretStatus,
   reconcileEdgeAgentInstall,
   runEdgeAgentInstall,
+  setRemoteGreenhouseSensorDriverMode,
   startEdgeAgentService,
   stopEdgeAgentService,
   verifyEdgeCommand,
@@ -964,6 +967,75 @@ async function runEdgeAgentAttach(input: {
     console.log("Credential file verified.");
   }
 
+  if (role === "greenhouse-node" && registerCapabilities.includes("temperature") && registerCapabilities.includes("humidity")) {
+    console.log("Checking DHT22 runtime backend...");
+    let dht22 = await inspectRemoteDht22Support(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+    for (const warning of dht22.warnings) console.log(`WARN: ${warning}`);
+    if (!dht22.backendReady) {
+      console.log(`DHT22 runtime backend: ${dht22.ok ? "missing" : "unknown"} (${dht22.detail})`);
+      if (await confirmOrYes("Install or update DHT22 runtime support? [Y/n] ", options.yes, true)) {
+        const installDht = await installRemoteDht22Support(sshHost, { timeoutMs: timeoutPolicy.installMs }).catch((error) => ({
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+          status: 124,
+        }));
+        if (installDht.status !== 0) {
+          steps.fail("DHT22 backend", (installDht.stderr.trim() || installDht.stdout.trim() || "DHT22 backend installation failed.").slice(0, 2000));
+          await restoreStoppedService();
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+          process.exitCode = 1;
+          return;
+        }
+        dht22 = await inspectRemoteDht22Support(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+      }
+    }
+    if (!dht22.backendReady) {
+      steps.fail("DHT22 backend", dht22.detail || "DHT22 backend is not ready.");
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    steps.complete("DHT22 backend", `ready (${dht22.detail})`);
+
+    const mode = dht22.selectedDriverMode ?? "unavailable";
+    if (dht22.mockDropInEnabled || mode === "mock") {
+      console.log("Mock greenhouse sensor mode is currently enabled.");
+      if (await confirmOrYes("Switch this node to the real DHT22 driver? [Y/n] ", options.yes, true)) {
+        const modeResult = await setRemoteGreenhouseSensorDriverMode(sshHost, "dht22", { timeoutMs: timeoutPolicy.serviceMs });
+        if (modeResult.status !== 0) {
+          steps.fail("Sensor driver mode", (modeResult.stderr.trim() || modeResult.stdout.trim() || "Could not switch sensor driver mode.").slice(0, 2000));
+          await restoreStoppedService();
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+          process.exitCode = 1;
+          return;
+        }
+        steps.complete("Sensor driver mode", "Switched from mock to dht22.");
+      } else {
+        steps.complete("Sensor driver mode", "Mock mode preserved by user choice.");
+      }
+    } else if (mode !== "dht22") {
+      if (await confirmOrYes("Configure edge service to use real DHT22 driver? [Y/n] ", options.yes, true)) {
+        const modeResult = await setRemoteGreenhouseSensorDriverMode(sshHost, "dht22", { timeoutMs: timeoutPolicy.serviceMs });
+        if (modeResult.status !== 0) {
+          steps.fail("Sensor driver mode", (modeResult.stderr.trim() || modeResult.stdout.trim() || "Could not set sensor driver mode.").slice(0, 2000));
+          await restoreStoppedService();
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+          process.exitCode = 1;
+          return;
+        }
+        steps.complete("Sensor driver mode", "Configured PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22.");
+      } else {
+        steps.complete("Sensor driver mode", `Left unchanged (${mode}).`);
+      }
+    } else {
+      steps.complete("Sensor driver mode", "Already dht22.");
+    }
+  } else if (role === "greenhouse-node") {
+    steps.complete("DHT22 backend", "Skipped; no enabled DHT22 environmental sensors are configured.");
+    steps.complete("Sensor driver mode", "Skipped.");
+  }
+
   console.log("Starting edge agent...");
   const heartbeatSince = new Date();
   const serviceStart = await startEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => ({
@@ -1191,6 +1263,8 @@ const ATTACH_STEP_ORDER = [
   "Edge command",
   "Credential",
   "Greenhouse secrets",
+  "DHT22 backend",
+  "Sensor driver mode",
   "Service start",
   "Heartbeat",
   "Camera report",

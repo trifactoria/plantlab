@@ -10,6 +10,7 @@ from .base import (
     CLASSIFICATION_DRIVER_UNAVAILABLE,
     CLASSIFICATION_FAILED,
     EnvironmentalSensorDriver,
+    SensorDriverError,
     SensorTelemetryEvent,
     utc_now,
 )
@@ -19,6 +20,12 @@ from .validation import EnvironmentalSampleValidator, ValidationConfig
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 15
 DEFAULT_UPLOAD_INTERVAL_SECONDS = 45
 CONTINUING_DIAGNOSTIC_INTERVAL_SECONDS = 300
+DRIVER_MODE_ENV = "PLANTLAB_GREENHOUSE_SENSOR_DRIVER"
+DRIVER_MODE_MOCK = "mock"
+DRIVER_MODE_DHT22 = "dht22"
+DRIVER_MODE_DISABLED = "disabled"
+DRIVER_MODE_UNAVAILABLE = "unavailable"
+SUPPORTED_DRIVER_MODES = (DRIVER_MODE_MOCK, DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED)
 
 
 @dataclass
@@ -70,8 +77,20 @@ class EnvironmentalSensorRuntime:
                 classification=CLASSIFICATION_DRIVER_UNAVAILABLE,
                 temperature_c=None,
                 humidity_pct=None,
-                diagnostic_code="driver-unavailable",
+                diagnostic_code=getattr(exc, "code", "driver-unavailable"),
                 diagnostic_message=str(exc),
+            )
+            events.append(event)
+        except SensorDriverError as exc:
+            self.validator.mark_driver_failure(now)
+            event = SensorTelemetryEvent.build(
+                sensor=self.sensor,
+                captured_at=now,
+                classification=CLASSIFICATION_FAILED,
+                temperature_c=None,
+                humidity_pct=None,
+                diagnostic_code=exc.code,
+                diagnostic_message=exc.safe_message,
             )
             events.append(event)
         except Exception:
@@ -91,6 +110,12 @@ class EnvironmentalSensorRuntime:
         if stale:
             events.append(stale)
         return self._dedupe_diagnostics(events, now)
+
+    def close(self) -> None:
+        try:
+            self.driver.close()
+        except Exception:
+            pass
 
     def _dedupe_diagnostics(self, events: List[SensorTelemetryEvent], now: datetime) -> List[SensorTelemetryEvent]:
         emitted: List[SensorTelemetryEvent] = []
@@ -131,7 +156,11 @@ class EnvironmentalSensorManager:
         sample_interval = getattr(cfg, "sensor_sample_interval_seconds", DEFAULT_SAMPLE_INTERVAL_SECONDS)
         upload_interval = getattr(cfg, "environment_upload_interval_seconds", DEFAULT_UPLOAD_INTERVAL_SECONDS)
         validation_config = ValidationConfig(stale_timeout_seconds=max(sample_interval * 3, 30))
-        driver_mode = os.environ.get("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "").strip().lower()
+        driver_mode = selected_driver_mode()
+        if driver_mode not in (DRIVER_MODE_MOCK, DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED, DRIVER_MODE_UNAVAILABLE):
+            raise ValueError(f'Unsupported greenhouse sensor driver mode "{driver_mode}". Supported values: mock, dht22, disabled.')
+        if driver_mode == DRIVER_MODE_DISABLED:
+            return cls([], sample_interval, upload_interval)
         runtimes: List[EnvironmentalSensorRuntime] = []
         for sensor in cfg.sensors:
             if not sensor.enabled:
@@ -139,8 +168,15 @@ class EnvironmentalSensorManager:
             driver: EnvironmentalSensorDriver
             if driver_mode == "mock":
                 driver = MockEnvironmentalSensorDriver(sensor.key)
+            elif driver_mode == "dht22":
+                if sensor.type != "dht22":
+                    driver = UnavailableEnvironmentalSensorDriver(f'No real driver is available for sensor type "{sensor.type}".')
+                else:
+                    from .dht22 import DHT22PigpioDriver
+
+                    driver = DHT22PigpioDriver(sensor)
             else:
-                driver = UnavailableEnvironmentalSensorDriver("No live environmental sensor driver is installed. Set PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock for development.")
+                driver = UnavailableEnvironmentalSensorDriver("No greenhouse sensor driver mode is selected. Set PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22 for real hardware, mock for development, or disabled.")
             runtimes.append(EnvironmentalSensorRuntime(sensor, driver, validation_config))
         return cls(runtimes, sample_interval, upload_interval)
 
@@ -184,3 +220,15 @@ class EnvironmentalSensorManager:
             failed_sensor_count=failed,
             last_environment_upload_at=self.last_environment_upload_at,
         )
+
+    def close(self) -> None:
+        for runtime in self.runtimes:
+            runtime.close()
+
+
+def selected_driver_mode(env: Optional[dict[str, str]] = None) -> str:
+    source = os.environ if env is None else env
+    raw = source.get(DRIVER_MODE_ENV, "").strip().lower()
+    if not raw:
+        return DRIVER_MODE_UNAVAILABLE
+    return raw

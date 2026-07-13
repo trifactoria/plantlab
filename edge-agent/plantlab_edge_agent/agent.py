@@ -21,7 +21,7 @@ import uuid
 
 from . import camera, config
 from .protocol import AgentProtocolClient, ProtocolError
-from .sensors.runtime import EnvironmentalSensorManager
+from .sensors.runtime import EnvironmentalSensorManager, selected_driver_mode
 from .spool import Spool
 
 logger = logging.getLogger("plantlab_edge_agent")
@@ -213,9 +213,10 @@ def run_loop(stop_check=lambda: False) -> None:
     logger.info("PlantLab edge agent starting: coordinator=%s spool=%s", cfg.coordinator_url, cfg.spool_root)
     if cfg.sensors or cfg.power:
         logger.info(
-            "Greenhouse hardware config loaded: sensors=%d power=%s; live sensor and Kasa drivers are not enabled in this implementation stage.",
+            "Greenhouse hardware config loaded: sensors=%d power=%s sensor_driver=%s; Kasa drivers are not enabled in this implementation stage.",
             len(cfg.sensors),
             cfg.power.provider if cfg.power else "not configured",
+            selected_driver_mode(),
         )
     if cfg.sensors and not sensors.runtimes:
         logger.info("No enabled greenhouse environmental sensors are configured.")
@@ -248,6 +249,7 @@ def run_loop(stop_check=lambda: False) -> None:
                 pass
             time.sleep(cfg.poll_interval_seconds)
     finally:
+        sensors.close()
         spool.close()
     logger.info("PlantLab edge agent stopped")
 

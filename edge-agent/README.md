@@ -6,9 +6,9 @@ Node.js/Next.js-adjacent agent stack is unsupported or not recommended
 (see `plantlab node inspect <host>` / `src/lib/operations/remoteNode.ts`
 `computeFullAgentSupport()`).
 
-- **Zero third-party dependencies** - stdlib only (`urllib`, `sqlite3`,
-  `subprocess`, `json`). No `pip install` of anything beyond this package
-  itself is required.
+- **Small dependency surface** - camera and protocol paths use the Python
+  stdlib. Real DHT22 reads require the edge-node-only `pigpio` Python
+  client and `pigpiod` daemon; camera-only and mock-sensor nodes do not.
 - Speaks the exact same coordinator protocol as the full TypeScript agent
   (`scripts/agent-service.ts`) - see `docs/AGENT_PROTOCOL.md`. There is
   only one protocol, not two.
@@ -43,6 +43,9 @@ plantlab-edge status
 plantlab-edge doctor
 plantlab-edge config show
 plantlab-edge camera list
+plantlab-edge sensor probe
+plantlab-edge sensor test <sensor-key>
+plantlab-edge sensor mode mock|dht22|disabled
 plantlab-edge service status
 plantlab-edge service restart
 plantlab-edge logs
@@ -109,22 +112,65 @@ KASA_USERNAME=
 KASA_PASSWORD=
 ```
 
-This stage does not install `python-kasa`, read live DHT22 sensors, use
-GPIO, connect to Kasa devices, or run automation rules. Planned Kasa runtime
-support requires Python 3.11 or newer; `plantlab doctor --node <ssh-host>`
-reports the remote Python readiness status when power control is configured.
+This stage does not install `python-kasa`, connect to Kasa devices, control
+outlets, or run automation rules. Planned Kasa runtime support requires
+Python 3.11 or newer; `plantlab doctor --node <ssh-host>` reports the
+remote Python readiness status when power control is configured.
 
-## Mock environmental telemetry
+## Environmental telemetry
 
 Configured greenhouse sensors are loaded into a hardware-independent runtime.
-By default, no live DHT22 driver is installed, so enabled sensors report
-`driver-unavailable` diagnostics instead of crashing the agent.
+The driver mode is explicit:
+
+```sh
+plantlab-edge sensor mode mock      # deterministic development readings
+plantlab-edge sensor mode dht22     # real DHT22 through pigpio
+plantlab-edge sensor mode disabled  # do not sample configured sensors
+```
+
+The service mode is stored as a systemd user drop-in under:
+
+```text
+~/.config/systemd/user/plantlab-edge-agent.service.d/
+```
+
+With no `PLANTLAB_GREENHOUSE_SENSOR_DRIVER` value, enabled sensors report
+`driver-unavailable` diagnostics instead of silently producing mock data.
+Real-driver failures never fall back to mock readings.
 
 For development and tests, opt into deterministic mock readings:
 
 ```sh
-PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock plantlab-edge service restart
+plantlab-edge sensor mode mock
+plantlab-edge service restart
 ```
+
+For real DHT22 hardware, `plantlab node attach <ssh-host>` detects enabled
+`dht22` sensors, verifies the `pigpio` backend, offers to install/update
+the backend, and offers to switch an existing mock drop-in to:
+
+```text
+PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22
+```
+
+The backend can also be inspected locally without taking a reading:
+
+```sh
+plantlab-edge sensor probe
+```
+
+A one-shot hardware test reads a configured sensor several times and runs
+the normal validation pipeline:
+
+```sh
+plantlab-edge sensor test greenhouse-ambient --attempts 5 --interval 3
+```
+
+The selected DHT22 backend is `pigpio`: the Python package talks to the
+`pigpiod` daemon, which owns the timing-sensitive GPIO edge capture. This
+keeps the PlantLab loop out of CPU-heavy busy polling on Pi Zero hardware.
+The attach flow installs distro `pigpio`/`python3-pigpio` packages when
+available and uses a pinned `pigpio==1.78` Python client only if needed.
 
 Mock samples use Celsius and percent relative humidity. The validation
 pipeline rejects missing/non-finite values, rejects values outside hard
@@ -140,13 +186,40 @@ acknowledged events are retained briefly and then cleaned up, and failed
 uploads retry with backoff. Repeated identical diagnostics are rate-limited
 so a broken sensor does not fill the spool every polling cycle.
 
+## DHT22 wiring
+
+PlantLab uses BCM GPIO numbering. For the current greenhouse-zero
+configuration:
+
+```text
+DATA -> BCM GPIO 8 / physical header pin 24
+```
+
+For a bare four-pin DHT22:
+
+```text
+Pin 1 VCC  -> Pi 3.3V
+Pin 2 DATA -> configured BCM GPIO
+Pin 3 NC   -> not connected
+Pin 4 GND  -> Pi ground
+```
+
+Many breakout boards include a data-line pull-up resistor. Bare sensors
+usually need an external pull-up between DATA and 3.3V. Verify the labels
+or datasheet for the exact module before wiring; not every board exposes
+pins in the same order.
+
+BCM GPIO 8 is also SPI CE0 on Raspberry Pi. `plantlab-edge sensor probe`
+warns when SPI appears enabled, but PlantLab does not disable SPI
+automatically.
+
 ## Layout
 
 ```
 edge-agent/
 ├── plantlab_edge_agent/   the package: config, protocol, spool, camera, agent loop, CLI
 ├── install.sh             installer - see the file for exact steps
-├── requirements.txt       intentionally empty (see pyproject.toml)
+├── requirements.txt       intentionally empty; DHT22 deps are installed on edge nodes only
 ├── pyproject.toml         packaging metadata (no required deps)
 ├── systemd/               the systemd --user unit template
 └── tests/                 pytest suite (mocked hardware/network - see Part 15)
@@ -175,6 +248,6 @@ equivalent for the edge agent yet; see "Known limitations" below.
 - No independent update mechanism yet (see above) - re-copying the
   directory and re-running `install.sh` is the only path today.
 - Sensor/relay capabilities can be configured and reported for
-  `greenhouse-node`, and mock environmental readings can be uploaded for
-  development. Live DHT22 reads, Kasa communication, outlet control, and
-  automation rules are not implemented yet.
+  `greenhouse-node`; environmental readings can be uploaded from mock or
+  real DHT22 drivers. Kasa communication, outlet control, and automation
+  rules are not implemented yet.

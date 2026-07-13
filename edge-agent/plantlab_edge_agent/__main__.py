@@ -14,12 +14,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import agent, camera, config
 from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
+from .sensors import probe as sensor_probe
+from .sensors.base import CLASSIFICATION_ACCEPTED, RawEnvironmentalSample, SensorDriverError
+from .sensors.dht22 import DHT22PigpioDriver
+from .sensors.mock import DriverUnavailableError
+from .sensors.runtime import DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED, DRIVER_MODE_ENV, DRIVER_MODE_MOCK, selected_driver_mode
+from .sensors.validation import EnvironmentalSampleValidator
 
 try:
     from . import _install_meta
@@ -53,6 +61,7 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
         "credentialLength": len(token) if token else 0,
         "greenhouseSecretPath": str(greenhouse_secret_path),
         "greenhouseSecretPresent": greenhouse_secret_path.exists(),
+        "sensorDriverMode": selected_driver_mode(),
         "sensors": [
             {
                 "key": sensor.key,
@@ -108,6 +117,21 @@ def run_self_check(send_heartbeat: bool = True) -> dict:
     if cfg:
         spool_writable, spool_detail = _spool_ok(cfg.spool_root)
         add("spool", spool_writable, spool_detail)
+        enabled_sensors = [sensor for sensor in cfg.sensors if sensor.enabled]
+        mode = selected_driver_mode()
+        if enabled_sensors:
+            if mode not in (DRIVER_MODE_MOCK, DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED, "unavailable"):
+                add("sensor-driver-mode", False, f'unsupported mode "{mode}"')
+            elif mode == DRIVER_MODE_DHT22:
+                hardware = sensor_probe.collect_probe(cfg)
+                add("sensor-driver-mode", True, "dht22")
+                add("dht22-backend", bool(hardware.get("backendReady")), str(hardware.get("backendReadinessDetail") or "unknown"))
+            elif mode == DRIVER_MODE_MOCK:
+                add("sensor-driver-mode", True, "mock")
+            elif mode == DRIVER_MODE_DISABLED:
+                add("sensor-driver-mode", False, "disabled while enabled sensors are configured")
+            else:
+                add("sensor-driver-mode", False, f"{DRIVER_MODE_ENV} is not set")
     else:
         add("spool", False, "configuration unavailable")
 
@@ -214,6 +238,7 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         print(f"Power outlets: {', '.join(f'{key}={value}' for key, value in outlets.items()) if outlets else '(none)'}")
     else:
         print("Power: not configured")
+    print(f"Sensor driver mode: {summary['sensorDriverMode']}")
     print(f"Greenhouse secret file: {'present' if summary['greenhouseSecretPresent'] else 'missing'} ({summary['greenhouseSecretPath']})")
     print(f"Heartbeat interval: {summary['heartbeatIntervalSeconds'] or '(missing)'}")
     print(f"Poll interval: {summary['pollIntervalSeconds'] or '(missing)'}")
@@ -349,6 +374,136 @@ def cmd_camera_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sensor_probe(args: argparse.Namespace) -> int:
+    cfg, config_error = _load_config_safely()
+    if config_error and not args.json:
+        print(f"Config error: {config_error}", file=sys.stderr)
+    try:
+        payload = sensor_probe.collect_probe(cfg)
+        if config_error:
+            payload["configError"] = config_error
+    except Exception as exc:
+        payload = {"error": str(exc), "selectedDriverMode": selected_driver_mode()}
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Sensor probe failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        sensor_probe.print_probe(payload)
+    return 0
+
+
+def _find_sensor(cfg: config.EdgeAgentConfig, key: str) -> config.GreenhouseSensorConfig | None:
+    for sensor in cfg.sensors:
+        if sensor.key == key:
+            return sensor
+    return None
+
+
+def cmd_sensor_test(args: argparse.Namespace) -> int:
+    if args.attempts < 1:
+        print("--attempts must be at least 1.", file=sys.stderr)
+        return 1
+    if args.interval < 0:
+        print("--interval must be 0 or greater.", file=sys.stderr)
+        return 1
+    cfg, config_error = _load_config_safely()
+    if config_error or cfg is None:
+        print(f"Config error: {config_error or 'edge-agent.json is missing'}", file=sys.stderr)
+        return 1
+    sensor = _find_sensor(cfg, args.sensor_key)
+    if sensor is None:
+        print(f'Unknown sensor "{args.sensor_key}".', file=sys.stderr)
+        return 1
+    if not sensor.enabled:
+        print(f'Sensor "{sensor.key}" is disabled.', file=sys.stderr)
+        return 1
+    if sensor.type != "dht22":
+        print(f'Sensor "{sensor.key}" has unsupported type "{sensor.type}" for this test command.', file=sys.stderr)
+        return 1
+
+    print(f"Testing sensor: {sensor.key}")
+    print(f"Type: {sensor.type}")
+    print(f"BCM GPIO: {sensor.gpio}")
+    print(f"Placement: {sensor.placement or '(none)'}")
+    print("Backend: pigpio")
+
+    driver = DHT22PigpioDriver(sensor)
+    validator = EnvironmentalSampleValidator(sensor)
+    accepted: list[RawEnvironmentalSample] = []
+    try:
+        for attempt in range(1, args.attempts + 1):
+            try:
+                raw = driver.read()
+            except DriverUnavailableError as exc:
+                print(f"Attempt {attempt}/{args.attempts}: {getattr(exc, 'code', 'driver-unavailable')} - {exc}")
+            except SensorDriverError as exc:
+                print(f"Attempt {attempt}/{args.attempts}: {exc.code} - {exc.safe_message}")
+            except Exception as exc:
+                if args.verbose:
+                    print(f"Attempt {attempt}/{args.attempts}: sensor-read-error - {type(exc).__name__}: {exc}")
+                else:
+                    print(f"Attempt {attempt}/{args.attempts}: sensor-read-error - sensor driver read failed")
+            else:
+                events = validator.evaluate(raw)
+                classification = events[-1].classification if events else "unknown"
+                detail = ""
+                diagnostic = events[-1].diagnostic_code if events else None
+                if diagnostic:
+                    detail = f" ({diagnostic})"
+                temp = raw.temperature_c
+                humidity = raw.humidity_pct
+                if isinstance(temp, (int, float)) and isinstance(humidity, (int, float)):
+                    print(f"Attempt {attempt}/{args.attempts}: {temp:.1f} C, {humidity:.1f}% RH - {classification}{detail}")
+                else:
+                    print(f"Attempt {attempt}/{args.attempts}: missing value - {classification}{detail}")
+                if classification == CLASSIFICATION_ACCEPTED:
+                    accepted.append(raw)
+            if attempt < args.attempts:
+                time.sleep(args.interval)
+    finally:
+        driver.close()
+
+    if accepted:
+        latest = accepted[-1]
+        fahrenheit = latest.temperature_c * 9 / 5 + 32 if latest.temperature_c is not None else None
+        print(f"PASS: {len(accepted)} valid reading{'s' if len(accepted) != 1 else ''}")
+        if latest.temperature_c is not None and fahrenheit is not None:
+            print(f"Temperature: {latest.temperature_c:.1f} C / {fahrenheit:.1f} F")
+        if latest.humidity_pct is not None:
+            print(f"Humidity: {latest.humidity_pct:.1f}%")
+        return 0
+    print("FAIL: no valid readings")
+    return 1
+
+
+def _systemd_user_dir() -> Path:
+    override = os.environ.get("PLANTLAB_EDGE_SYSTEMD_USER_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def cmd_sensor_mode(args: argparse.Namespace) -> int:
+    mode = args.mode
+    dropin_dir = _systemd_user_dir() / "plantlab-edge-agent.service.d"
+    dropin_dir.mkdir(parents=True, exist_ok=True)
+    managed = dropin_dir / "greenhouse-sensor-driver.conf"
+    legacy_mock = dropin_dir / "greenhouse-mock.conf"
+    managed.write_text(f"[Service]\nEnvironment={DRIVER_MODE_ENV}={mode}\n", encoding="utf-8")
+    if legacy_mock.exists():
+        legacy_mock.unlink()
+    subprocess.run(["systemctl", "--user", "daemon-reload"], text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"Sensor driver mode set to {mode}. Restart plantlab-edge-agent.service to apply it.")
+    if legacy_mock.exists():
+        print(f"Legacy mock drop-in still exists: {legacy_mock}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _systemctl(args: list[str]) -> int:
     result = subprocess.run(["systemctl", "--user", *args], text=True)
     return result.returncode
@@ -455,6 +610,20 @@ def build_parser() -> argparse.ArgumentParser:
     camera_list.add_argument("--verbose", action="store_true", help="Show all advertised formats, modes, frame rates, and probe details.")
     camera_list.add_argument("--json", action="store_true", help="Print structured JSON.")
     camera_list.set_defaults(func=cmd_camera_list)
+    sensor_parser = sub.add_parser("sensor", help="Environmental sensor diagnostics.")
+    sensor_sub = sensor_parser.add_subparsers(dest="sensor_command", required=True)
+    sensor_probe_parser = sensor_sub.add_parser("probe", help="Inspect GPIO and DHT22 backend readiness without reading a sensor.")
+    sensor_probe_parser.add_argument("--json", action="store_true", help="Print structured JSON.")
+    sensor_probe_parser.set_defaults(func=cmd_sensor_probe)
+    sensor_test = sensor_sub.add_parser("test", help="Attempt one-shot reads from a configured DHT22 sensor.")
+    sensor_test.add_argument("sensor_key", help="Configured sensor logical key.")
+    sensor_test.add_argument("--attempts", type=int, default=5, help="Number of read attempts.")
+    sensor_test.add_argument("--interval", type=float, default=3.0, help="Seconds to wait between attempts.")
+    sensor_test.add_argument("--verbose", action="store_true", help="Show local exception class names for diagnostic failures.")
+    sensor_test.set_defaults(func=cmd_sensor_test)
+    sensor_mode = sensor_sub.add_parser("mode", help="Set the systemd user service sensor driver mode drop-in.")
+    sensor_mode.add_argument("mode", choices=[DRIVER_MODE_MOCK, DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED], help="Sensor driver mode.")
+    sensor_mode.set_defaults(func=cmd_sensor_mode)
     service_parser = sub.add_parser("service", help="Manage the local edge service.")
     service_sub = service_parser.add_subparsers(dest="service_command", required=True)
     service_sub.add_parser("status", help="Show systemd user service status.").set_defaults(func=cmd_service_status)

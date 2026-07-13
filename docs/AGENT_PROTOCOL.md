@@ -88,8 +88,9 @@ what capture settings apply to which physical camera.
 
 Reports bounded batches of greenhouse environmental telemetry from an
 authenticated node. The Python edge agent can produce this with mock sensor
-drivers in development; live DHT22/GPIO support is intentionally not part of
-this stage.
+drivers in development or real DHT22 reads through its explicit `dht22`
+driver mode. The wire protocol is unchanged by the selected edge-side
+driver.
 
 Request body:
 ```json
@@ -129,7 +130,8 @@ Classifications are:
 - `failed` - diagnostic only; driver read failure.
 - `stale` - diagnostic only; no recent accepted reading.
 - `driver-unavailable` - diagnostic only; configured sensor has no runtime
-  driver available.
+  driver available. Real-driver dependency failures use this classification
+  with diagnostic codes such as `backend-unavailable`.
 
 The coordinator authenticates with the same bearer credential as other
 agent endpoints, verifies that `nodeName` matches the authenticated node,

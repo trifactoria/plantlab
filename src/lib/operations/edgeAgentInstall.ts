@@ -717,3 +717,226 @@ PY
     stderr: result.stderr,
   };
 }
+
+export type RemoteDht22SupportStatus = {
+  ok: boolean;
+  backend: "pigpio" | string | null;
+  dependencyAvailable: boolean;
+  backendReady: boolean;
+  selectedDriverMode: string | null;
+  mockDropInEnabled: boolean;
+  currentDropIns: string[];
+  configuredSensors: Array<{ key: string; type: string; gpio: number; enabled: boolean; name?: string; placement?: string | null }>;
+  warnings: string[];
+  detail: string;
+  raw?: unknown;
+};
+
+export async function inspectRemoteDht22Support(sshHost: string, options: { timeoutMs?: number } = {}): Promise<RemoteDht22SupportStatus> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+dropin_dir="$home_dir/.config/systemd/user/plantlab-edge-agent.service.d"
+probe_json=""
+if command -v bash >/dev/null 2>&1; then
+  probe_json="$(bash -lc 'plantlab-edge sensor probe --json' 2>/dev/null || true)"
+fi
+if [ -z "$probe_json" ] && [ -x "$home_dir/.local/bin/plantlab-edge" ]; then
+  probe_json="$("$home_dir/.local/bin/plantlab-edge" sensor probe --json 2>/dev/null || true)"
+fi
+mock_dropin=false
+[ -f "$dropin_dir/greenhouse-mock.conf" ] && grep -q 'PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock' "$dropin_dir/greenhouse-mock.conf" 2>/dev/null && mock_dropin=true
+dropins=""
+if [ -d "$dropin_dir" ]; then
+  dropins="$(find "$dropin_dir" -maxdepth 1 -type f -name '*.conf' -printf '%f\n' 2>/dev/null | sort | tr '\n' ',' || true)"
+fi
+python3 - "$probe_json" "$mock_dropin" "$dropins" <<'PY'
+import json, sys
+probe_json, mock_dropin, dropins = sys.argv[1:4]
+payload = {"probe": None, "probeError": None, "mockDropInEnabled": mock_dropin == "true", "currentDropIns": [item for item in dropins.split(",") if item]}
+try:
+    payload["probe"] = json.loads(probe_json) if probe_json.strip() else None
+except Exception as exc:
+    payload["probeError"] = str(exc)
+print(json.dumps(payload))
+PY
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 20_000 }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    status: 255,
+  }));
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      backend: null,
+      dependencyAvailable: false,
+      backendReady: false,
+      selectedDriverMode: null,
+      mockDropInEnabled: false,
+      currentDropIns: [],
+      configuredSensors: [],
+      warnings: [],
+      detail: (result.stderr.trim() || "Could not inspect DHT22 support.").slice(0, 2000),
+    };
+  }
+  let parsed: { probe?: Record<string, unknown> | null; probeError?: string | null; mockDropInEnabled?: boolean; currentDropIns?: string[] } = {};
+  try {
+    parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
+  } catch {
+    parsed = {};
+  }
+  const probe = parsed.probe ?? null;
+  const sensors = Array.isArray(probe?.configuredSensors)
+    ? probe.configuredSensors
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+        .map((entry) => ({
+          key: String(entry.key ?? ""),
+          type: String(entry.type ?? ""),
+          gpio: Number(entry.gpio),
+          enabled: entry.enabled !== false,
+          name: typeof entry.name === "string" ? entry.name : undefined,
+          placement: typeof entry.placement === "string" ? entry.placement : entry.placement === null ? null : undefined,
+        }))
+    : [];
+  const dependencyAvailable = probe?.backendDependencyAvailable === true;
+  const backendReady = probe?.backendReady === true;
+  const detail =
+    typeof probe?.backendReadinessDetail === "string"
+      ? probe.backendReadinessDetail
+      : typeof parsed.probeError === "string"
+        ? parsed.probeError
+        : probe
+          ? "DHT22 probe completed."
+          : "plantlab-edge sensor probe did not return JSON.";
+  return {
+    ok: Boolean(probe),
+    backend: typeof probe?.dht22Backend === "string" ? probe.dht22Backend : null,
+    dependencyAvailable,
+    backendReady,
+    selectedDriverMode: typeof probe?.selectedDriverMode === "string" ? probe.selectedDriverMode : null,
+    mockDropInEnabled: parsed.mockDropInEnabled === true,
+    currentDropIns: Array.isArray(parsed.currentDropIns) ? parsed.currentDropIns.filter((item): item is string => typeof item === "string") : [],
+    configuredSensors: sensors,
+    warnings: Array.isArray(probe?.warnings) ? probe.warnings.filter((item): item is string => typeof item === "string") : [],
+    detail,
+    raw: probe ?? parsed,
+  };
+}
+
+export async function installRemoteDht22Support(sshHost: string, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -eu
+run_root() {
+  if [ "$(id -u)" = "0" ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "DHT22 backend installation requires root privileges or passwordless sudo for apt/systemctl." >&2
+    return 77
+  fi
+}
+if python3 - <<'PY' >/dev/null 2>&1
+import pigpio
+pi = pigpio.pi()
+try:
+    raise SystemExit(0 if getattr(pi, "connected", False) else 2)
+finally:
+    try:
+        pi.stop()
+    except Exception:
+        pass
+PY
+then
+  echo "DHT22 backend already ready."
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  run_root apt-get update
+  run_root apt-get install -y pigpio python3-pigpio
+fi
+if ! python3 - <<'PY' >/dev/null 2>&1
+import pigpio
+PY
+then
+  if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+    python3 -m pip install --user --no-cache-dir 'pigpio==1.78'
+  else
+    echo "pigpio Python client is missing and python3 -m pip is unavailable." >&2
+    exit 78
+  fi
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  run_root systemctl enable --now pigpiod || run_root systemctl start pigpiod || true
+fi
+if ! python3 - <<'PY'
+import pigpio
+pi = pigpio.pi()
+try:
+    if not getattr(pi, "connected", False):
+        raise SystemExit("pigpio daemon is not reachable after installation")
+finally:
+    try:
+        pi.stop()
+    except Exception:
+        pass
+PY
+then
+  if command -v pigpiod >/dev/null 2>&1; then
+    run_root pigpiod || true
+  fi
+fi
+python3 - <<'PY'
+import pigpio
+pi = pigpio.pi()
+try:
+    if not getattr(pi, "connected", False):
+        raise SystemExit("pigpio daemon is not reachable after installation")
+finally:
+    try:
+        pi.stop()
+    except Exception:
+        pass
+print("DHT22 backend ready.")
+PY
+`;
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 180_000 });
+}
+
+export async function setRemoteGreenhouseSensorDriverMode(
+  sshHost: string,
+  mode: "mock" | "dht22" | "disabled",
+  options: { timeoutMs?: number } = {},
+): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -eu
+mode=__MODE__
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+if command -v bash >/dev/null 2>&1 && bash -lc "plantlab-edge sensor mode '$mode'" >/tmp/plantlab-edge-sensor-mode.out 2>/tmp/plantlab-edge-sensor-mode.err; then
+  cat /tmp/plantlab-edge-sensor-mode.out
+else
+  dropin_dir="$home_dir/.config/systemd/user/plantlab-edge-agent.service.d"
+  mkdir -p "$dropin_dir"
+  rm -f "$dropin_dir/greenhouse-mock.conf"
+  umask 077
+  cat > "$dropin_dir/greenhouse-sensor-driver.conf.tmp" <<EOF
+[Service]
+Environment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=$mode
+EOF
+  mv "$dropin_dir/greenhouse-sensor-driver.conf.tmp" "$dropin_dir/greenhouse-sensor-driver.conf"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  echo "Sensor driver mode set to $mode."
+fi
+if grep -R 'PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock' "$home_dir/.config/systemd/user/plantlab-edge-agent.service.d"/*.conf >/dev/null 2>&1 && [ "$mode" != "mock" ]; then
+  echo "Conflicting mock sensor driver drop-in remains." >&2
+  exit 44
+fi
+`.replace("__MODE__", shellQuote(mode));
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 20_000 });
+}

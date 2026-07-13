@@ -46,6 +46,9 @@ class MockEnvironmentalSensorDriver:
             captured_at=utc_now(),
         )
 
+    def close(self) -> None:
+        return None
+
 
 class UnavailableEnvironmentalSensorDriver:
     def __init__(self, reason: str):
@@ -54,6 +57,11 @@ class UnavailableEnvironmentalSensorDriver:
     def read(self) -> RawEnvironmentalSample:
         raise DriverUnavailableError(self.reason)
 
+    def close(self) -> None:
+        return None
+
 
 class DriverUnavailableError(Exception):
-    pass
+    def __init__(self, reason: str, code: str = "driver-unavailable"):
+        super().__init__(reason)
+        self.code = code

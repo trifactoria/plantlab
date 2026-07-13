@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from plantlab_edge_agent import config
-from plantlab_edge_agent.sensors.base import RawEnvironmentalSample
-from plantlab_edge_agent.sensors.mock import MockEnvironmentalSensorDriver, UnavailableEnvironmentalSensorDriver
-from plantlab_edge_agent.sensors.runtime import EnvironmentalSensorRuntime
+from plantlab_edge_agent.sensors.base import RawEnvironmentalSample, SensorDriverError
+from plantlab_edge_agent.sensors.dht22 import DHT22PigpioDriver
+from plantlab_edge_agent.sensors.mock import DriverUnavailableError, MockEnvironmentalSensorDriver, UnavailableEnvironmentalSensorDriver
+from plantlab_edge_agent.sensors.runtime import EnvironmentalSensorManager, EnvironmentalSensorRuntime, selected_driver_mode
 from plantlab_edge_agent.sensors.validation import EnvironmentalSampleValidator, ValidationConfig
 
 
@@ -142,3 +143,127 @@ def test_multiple_sensors_have_independent_state():
     assert b.evaluate(sample(24, 60, 1))[0].classification == "accepted"
     assert a.state.pending_suspect is not None
     assert b.state.pending_suspect is None
+
+
+class FakeCallback:
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class FakePigpio:
+    EITHER_EDGE = 2
+    OUTPUT = 1
+    INPUT = 0
+    PUD_UP = 2
+
+    @staticmethod
+    def tickDiff(start, end):
+        return end - start
+
+
+class FakePi:
+    connected = True
+
+    def __init__(self, high_pulses=None, error=None):
+        self.high_pulses = high_pulses or []
+        self.error = error
+        self.callback_fn = None
+        self.stopped = False
+
+    def callback(self, _gpio, _edge, fn):
+        self.callback_fn = fn
+        return FakeCallback()
+
+    def set_mode(self, gpio, mode):
+        if self.error:
+            raise self.error
+        if mode == FakePigpio.INPUT and self.callback_fn:
+            tick = 0
+            for width in self.high_pulses:
+                self.callback_fn(gpio, 1, tick)
+                tick += width
+                self.callback_fn(gpio, 0, tick)
+                tick += 50
+
+    def write(self, _gpio, _level):
+        return None
+
+    def set_pull_up_down(self, _gpio, _pud):
+        return None
+
+    def stop(self):
+        self.stopped = True
+
+
+def pulses_for_bytes(values):
+    pulses = [80]
+    for value in values:
+        for shift in range(7, -1, -1):
+            pulses.append(70 if value & (1 << shift) else 26)
+    return pulses
+
+
+def test_dht22_driver_decodes_pigpio_edges():
+    data = [0x02, 0x82, 0x00, 0xEE, (0x02 + 0x82 + 0x00 + 0xEE) & 0xFF]
+    fake_pi = FakePi(pulses_for_bytes(data))
+    driver = DHT22PigpioDriver(sensor(gpio=8), pigpio_module=FakePigpio, pi_factory=lambda: fake_pi, read_timeout_seconds=0.01, settle_seconds=0)
+
+    raw = driver.read()
+    driver.close()
+
+    assert raw.temperature_c == pytest.approx(23.8)
+    assert raw.humidity_pct == pytest.approx(64.2)
+    assert fake_pi.stopped is True
+
+
+def test_dht22_driver_maps_checksum_timeout_and_permission_errors():
+    bad = [0x02, 0x82, 0x00, 0xEE, 0x00]
+    with pytest.raises(SensorDriverError, match="checksum") as checksum:
+        DHT22PigpioDriver(sensor(), pigpio_module=FakePigpio, pi_factory=lambda: FakePi(pulses_for_bytes(bad)), read_timeout_seconds=0.01, settle_seconds=0).read()
+    assert checksum.value.code == "dht-checksum"
+
+    with pytest.raises(SensorDriverError) as timeout:
+        DHT22PigpioDriver(sensor(), pigpio_module=FakePigpio, pi_factory=lambda: FakePi([80, 26]), read_timeout_seconds=0.01, settle_seconds=0).read()
+    assert timeout.value.code == "dht-timeout"
+
+    with pytest.raises(SensorDriverError) as permission:
+        DHT22PigpioDriver(sensor(), pigpio_module=FakePigpio, pi_factory=lambda: FakePi(error=PermissionError("denied")), read_timeout_seconds=0.01, settle_seconds=0).read()
+    assert permission.value.code == "gpio-permission-denied"
+
+
+def test_dht22_driver_reports_backend_unavailable_without_mock_fallback(monkeypatch):
+    import importlib
+
+    def fail_import(_name):
+        raise ImportError("missing")
+
+    monkeypatch.setattr(importlib, "import_module", fail_import)
+    with pytest.raises(DriverUnavailableError) as unavailable:
+        DHT22PigpioDriver(sensor()).read()
+    assert unavailable.value.code == "backend-unavailable"
+
+
+def test_driver_mode_selection_and_manager(monkeypatch):
+    cfg = config.EdgeAgentConfig(
+        role="greenhouse-node",
+        node_name="greenhouse-zero",
+        coordinator_url="http://coordinator:3000",
+        spool_root="/tmp/spool",
+        capabilities=["temperature", "humidity"],
+        sensors=[sensor()],
+    )
+    assert selected_driver_mode({}) == "unavailable"
+    assert selected_driver_mode({"PLANTLAB_GREENHOUSE_SENSOR_DRIVER": "DHT22"}) == "dht22"
+
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "mock")
+    assert EnvironmentalSensorManager.from_config(cfg).sample_due(dt(0))[0].classification == "accepted"
+
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "disabled")
+    assert EnvironmentalSensorManager.from_config(cfg).runtimes == []
+
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "bad")
+    with pytest.raises(ValueError):
+        EnvironmentalSensorManager.from_config(cfg)
