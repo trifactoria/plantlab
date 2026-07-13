@@ -10,7 +10,7 @@ import {
 } from "../../lib/operations/captureSourceDoctor";
 import { runCameraTestCapture } from "../../lib/operations/doctor";
 import { inventoryDiagnosticsForCamera, requestCameraInventoryRefresh } from "../../lib/operations/agentProtocol";
-import { attachNodeCamera, firstSupportedMode, listNodeCameras } from "../../lib/operations/nodeCameras";
+import { attachNodeCamera, firstSupportedMode, listNodeCameras, nodeCameraDisplayName } from "../../lib/operations/nodeCameras";
 import { prisma } from "../../lib/prisma";
 import { discoverLocalCameras } from "../../lib/v4l2";
 import { formatCheckLine } from "../format";
@@ -26,6 +26,9 @@ async function listCameras(): Promise<void> {
   for (const camera of cameras) {
     console.log(`${camera.device}`);
     console.log(`  name:      ${camera.name ?? "(unknown)"}`);
+    if (camera.usbPort || camera.physicalPath) {
+      console.log(`  usb path:  ${camera.usbPort ?? camera.physicalPath}`);
+    }
     console.log(`  stable id: ${camera.stableId ?? "(none - device path may change across reboots)"}`);
     if (camera.alternateDevices && camera.alternateDevices.length > 0) {
       for (const alternate of camera.alternateDevices) {
@@ -81,8 +84,17 @@ function nodeInventoryJson(nodes: Awaited<ReturnType<typeof listNodeCameras>>) {
     cameras: node.cameras.map((camera) => ({
       id: camera.id,
       name: camera.name,
+      displayName: nodeCameraDisplayName(camera),
       stableId: camera.stableId,
+      legacyStableId: camera.legacyStableId,
       devicePath: camera.devicePath,
+      physicalPath: camera.physicalPath,
+      usbPath: camera.usbPath,
+      usbPort: camera.usbPort,
+      vendorId: camera.vendorId,
+      productId: camera.productId,
+      serial: camera.serial,
+      alternateDevices: camera.alternateDevices,
       available: camera.available,
       captureSourceId: camera.captureSourceId,
       lastSeenAt: camera.lastSeenAt,
@@ -111,11 +123,37 @@ function printNodeCameraInventory(nodes: Awaited<ReturnType<typeof listNodeCamer
       console.log("  No cameras reported yet.");
       continue;
     }
+    const legacyGroups = new Map<string, typeof node.cameras>();
+    for (const camera of node.cameras) {
+      if (!camera.legacyStableId || camera.legacyStableId === camera.stableId) continue;
+      legacyGroups.set(camera.legacyStableId, [...(legacyGroups.get(camera.legacyStableId) ?? []), camera]);
+    }
+    for (const [legacyStableId, group] of legacyGroups) {
+      if (group.length < 2) continue;
+      const attached = group.find((camera) => camera.captureSourceId);
+      console.log("");
+      console.log(`  Duplicate USB serial split detected from old identity ${legacyStableId}.`);
+      if (attached) {
+        console.log(`  Existing assignment preserved on ${nodeCameraDisplayName(attached)} (${attached.devicePath}).`);
+      }
+      for (const camera of group.filter((item) => !item.captureSourceId)) {
+        console.log(`  New camera discovered, not attached automatically: ${nodeCameraDisplayName(camera)} (${camera.devicePath}).`);
+      }
+    }
     node.cameras.forEach((camera, index) => {
       const diagnostics = inventoryDiagnosticsForCamera(camera);
-      console.log(`\n${index + 1}. ${camera.name ?? "Unknown camera"}`);
-      console.log(`   Device: ${camera.devicePath}`);
+      console.log(`\n${index + 1}. ${nodeCameraDisplayName(camera)}`);
+      console.log(`   Primary: ${camera.devicePath}`);
+      if (camera.alternateDevices.length > 0) {
+        console.log(`   Alternate: ${camera.alternateDevices.map((alternate) => alternate.device).join(", ")}`);
+      }
+      if (camera.physicalPath || camera.usbPath || camera.usbPort) {
+        console.log(`   USB path: ${camera.usbPort ?? camera.physicalPath ?? camera.usbPath}`);
+      }
       console.log(`   Stable ID: ${camera.stableId}`);
+      if (camera.legacyStableId && camera.legacyStableId !== camera.stableId) {
+        console.log(`   Legacy stable ID: ${camera.legacyStableId}`);
+      }
       console.log(`   Status: ${camera.available ? "available" : "not seen recently"}`);
       console.log(`   Last inventory received: ${diagnostics.lastInventoryReceivedAt?.toISOString() ?? "(never)"}`);
       console.log(`   Formats: ${diagnostics.formatsReceivedCount}; modes: ${diagnostics.modesReceivedCount}; formatsJson empty: ${diagnostics.formatsJsonEmpty ? "yes" : "no"}`);
@@ -230,8 +268,11 @@ export async function runCameraAttachFlow(options: CameraAttachOptions) {
   if (!selectedCamera && canPrompt) {
     console.log("Select a camera:");
     node.cameras.forEach((camera, index) => {
-      console.log(`\n${index + 1}) ${camera.name ?? "Unknown camera"}`);
-      console.log(`   ${camera.devicePath}`);
+      console.log(`\n${index + 1}) ${nodeCameraDisplayName(camera)}`);
+      console.log(`   Primary: ${camera.devicePath}`);
+      if (camera.alternateDevices?.length) {
+        console.log(`   Alternate: ${camera.alternateDevices.map((alternate) => alternate.device).join(", ")}`);
+      }
       console.log(`   Stable ID: ${camera.stableId}`);
     });
     selectedCamera = node.cameras[await chooseIndex("Camera", node.cameras.length, 1, askFn)];
@@ -451,7 +492,7 @@ Examples:
           } else {
             console.log("Camera attached.");
             console.log(`Node: ${result.node.name}`);
-            console.log(`Camera: ${result.camera.name ?? result.camera.stableId}`);
+            console.log(`Camera: ${nodeCameraDisplayName(result.camera)}`);
             console.log(`CaptureSource: ${result.captureSource.name}`);
             console.log(`Mode: ${result.assignment.inputFormat.toUpperCase()} ${result.assignment.width}x${result.assignment.height}`);
           }

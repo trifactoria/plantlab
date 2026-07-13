@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { composeStableId, readUsbIdentity } from "./cameraIdentity";
+import { composeStableId, duplicatedSerialKeys, legacyStableId, readUsbIdentity, usbPathSuffix, type UsbIdentity } from "./cameraIdentity";
 import { normalizeCameraFormats, normalizeCameraInputFormat, preferredCameraMode, type CameraFormat, type CameraFormatResolution } from "./cameraModes";
 export type { CameraFormat, CameraFormatResolution } from "./cameraModes";
 
@@ -13,6 +13,15 @@ export type LocalCamera = {
   supportsCapture: boolean;
   /** Stable USB-based identity, when Linux exposes enough information to compute one. */
   stableId: string | null;
+  /** Previous vendor/product/serial-only identity, retained for safe coordinator reconciliation. */
+  legacyStableId?: string | null;
+  vendorId?: string | null;
+  productId?: string | null;
+  serial?: string | null;
+  /** Normalized parent USB path shared by sibling V4L2 nodes from one physical camera. */
+  physicalPath?: string | null;
+  usbPath?: string | null;
+  usbPort?: string | null;
   /** Other /dev/video* nodes that expose the same physical camera identity. Diagnostic only. */
   alternateDevices?: Array<{ device: string; supportsCapture: boolean; reason?: string }>;
   /** Formats for the selected primary capture device. */
@@ -71,7 +80,7 @@ function execFileText(command: string, args: string[]) {
 
 export async function discoverLocalCameras(): Promise<LocalCamera[]> {
   const output = await execFileText("v4l2-ctl", ["--list-devices"]);
-  const rawCameras: LocalCamera[] = [];
+  const rawCandidates: Array<{ name: string; device: string; supportsCapture: boolean; identity: UsbIdentity; formats: CameraFormat[] }> = [];
   let currentName = "Unknown camera";
 
   for (const line of output.split("\n")) {
@@ -90,12 +99,46 @@ export async function discoverLocalCameras(): Promise<LocalCamera[]> {
     }
 
     const supportsCapture = await deviceSupportsCapture(device).catch(() => false);
-    const stableId = await readUsbIdentity(device)
-      .then((identity) => composeStableId(identity))
-      .catch(() => null);
+    const identity = await readUsbIdentity(device).catch(
+      (): UsbIdentity => ({
+        vendorId: null,
+        productId: null,
+        serial: null,
+        physicalPath: null,
+        usbPath: null,
+        idPathTag: null,
+        devpath: null,
+        busInfo: null,
+      }),
+    );
     const formats = supportsCapture ? await listCameraFormats(device).catch(() => []) : [];
-    rawCameras.push({ name: currentName, device, supportsCapture, stableId, formats });
+    rawCandidates.push({ name: currentName, device, supportsCapture, identity, formats });
   }
+
+  const duplicateSerials = duplicatedSerialKeys(rawCandidates.map((candidate) => candidate.identity));
+  const rawCameras: LocalCamera[] = rawCandidates.map((candidate) => {
+    const serialKey =
+      candidate.identity.vendorId && candidate.identity.productId && candidate.identity.serial
+        ? `${candidate.identity.vendorId}:${candidate.identity.productId}:${candidate.identity.serial}`
+        : null;
+    const duplicateSerial = serialKey ? duplicateSerials.has(serialKey) : false;
+    const stableId = composeStableId(candidate.identity, { duplicateSerial });
+    const physicalPath = candidate.identity.physicalPath ?? candidate.identity.usbPath ?? null;
+    return {
+      name: currentNameForPhysicalCamera(candidate.name, physicalPath),
+      device: candidate.device,
+      supportsCapture: candidate.supportsCapture,
+      stableId,
+      legacyStableId: legacyStableId(candidate.identity),
+      vendorId: candidate.identity.vendorId,
+      productId: candidate.identity.productId,
+      serial: candidate.identity.serial,
+      physicalPath,
+      usbPath: physicalPath,
+      usbPort: usbPathSuffix(physicalPath),
+      formats: candidate.formats,
+    };
+  });
 
   const verified = await verifyCameraGroups(rawCameras);
   return verified.sort((a, b) => {
@@ -108,6 +151,11 @@ export async function discoverLocalCameras(): Promise<LocalCamera[]> {
 
     return a.device.localeCompare(b.device, undefined, { numeric: true });
   });
+}
+
+function currentNameForPhysicalCamera(name: string, physicalPath: string | null) {
+  const suffix = usbPathSuffix(physicalPath);
+  return suffix ? `${name} (${suffix})` : name;
 }
 
 /**

@@ -9,8 +9,16 @@ if (typeof window !== "undefined") {
 
 export type AgentCameraInventoryItem = {
   stableId: string;
+  legacyStableId?: string | null;
   devicePath: string;
   name?: string | null;
+  vendorId?: string | null;
+  productId?: string | null;
+  serial?: string | null;
+  physicalPath?: string | null;
+  usbPath?: string | null;
+  usbPort?: string | null;
+  alternateDevices?: Array<{ device: string; supportsCapture?: boolean; reason?: string | null }> | string[];
   formats?: CameraFormat[];
   formatsStatus?: "ok" | "unavailable" | "error";
   formatsError?: string | null;
@@ -74,6 +82,14 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
   const now = new Date();
   const seenStableIds = new Set<string>();
   const upserted = [];
+  const reportsByLegacyStableId = new Map<string, AgentCameraInventoryItem[]>();
+
+  for (const camera of cameras) {
+    const legacy = legacyStableIdForReport(camera);
+    if (!legacy) continue;
+    reportsByLegacyStableId.set(legacy, [...(reportsByLegacyStableId.get(legacy) ?? []), camera]);
+  }
+  const migratedLegacyCameraIds = new Set<string>();
 
   for (const camera of cameras) {
     const stableId = camera.stableId.trim();
@@ -84,30 +100,51 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
     const shouldUseEmptyFormats =
       nextFormats.length > 0 || camera.formatsStatus === "ok" || camera.formatsStatus === "unavailable";
     const existing = await prisma.nodeCamera.findUnique({ where: { nodeId_stableId: { nodeId, stableId } } });
-    const existingFormats = existing ? normalizeCameraFormats(parseStoredFormats(existing.formatsJson)) : [];
+    const legacyStableId = legacyStableIdForReport(camera);
+    const migratedExisting =
+      existing ??
+      (legacyStableId && legacyStableId !== stableId
+        ? await findMigratableLegacyCamera(prisma, nodeId, legacyStableId, stableId, camera.devicePath, reportsByLegacyStableId, migratedLegacyCameraIds)
+        : null);
+    const existingFormats = migratedExisting ? normalizeCameraFormats(parseStoredFormats(migratedExisting.formatsJson)) : [];
     const formatsForWrite = shouldUseEmptyFormats || existingFormats.length === 0 ? nextFormats : existingFormats;
+    const data = {
+      stableId,
+      legacyStableId,
+      devicePath: camera.devicePath,
+      name: camera.name ?? null,
+      vendorId: camera.vendorId ?? null,
+      productId: camera.productId ?? null,
+      serial: camera.serial ?? null,
+      physicalPath: camera.physicalPath ?? null,
+      usbPath: camera.usbPath ?? camera.physicalPath ?? null,
+      usbPort: camera.usbPort ?? null,
+      alternateDevicesJson: JSON.stringify(camera.alternateDevices ?? []),
+      formatsJson: JSON.stringify(formatsForWrite),
+      available: camera.available ?? true,
+      lastSeenAt: now,
+    };
     seenStableIds.add(stableId);
-    upserted.push(
-      await prisma.nodeCamera.upsert({
-        where: { nodeId_stableId: { nodeId, stableId } },
-        create: {
-          nodeId,
-          stableId,
-          devicePath: camera.devicePath,
-          name: camera.name ?? null,
-          formatsJson: JSON.stringify(formatsForWrite),
-          available: camera.available ?? true,
-          lastSeenAt: now,
-        },
-        update: {
-          devicePath: camera.devicePath,
-          name: camera.name ?? null,
-          formatsJson: JSON.stringify(formatsForWrite),
-          available: camera.available ?? true,
-          lastSeenAt: now,
-        },
-      }),
-    );
+    if (migratedExisting) {
+      migratedLegacyCameraIds.add(migratedExisting.id);
+      upserted.push(
+        await prisma.nodeCamera.update({
+          where: { id: migratedExisting.id },
+          data,
+        }),
+      );
+    } else {
+      upserted.push(
+        await prisma.nodeCamera.upsert({
+          where: { nodeId_stableId: { nodeId, stableId } },
+          create: {
+            nodeId,
+            ...data,
+          },
+          update: data,
+        }),
+      );
+    }
   }
 
   await Promise.all([
@@ -128,6 +165,39 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
   ]);
 
   return upserted;
+}
+
+function legacyStableIdForReport(camera: Pick<AgentCameraInventoryItem, "legacyStableId" | "vendorId" | "productId" | "serial">): string | null {
+  if (camera.legacyStableId) return camera.legacyStableId;
+  if (camera.vendorId && camera.productId) {
+    return `usb:${camera.vendorId}:${camera.productId}:${camera.serial || "noserial"}`;
+  }
+  return null;
+}
+
+async function findMigratableLegacyCamera(
+  prisma: PrismaClient,
+  nodeId: string,
+  legacyStableId: string,
+  nextStableId: string,
+  nextDevicePath: string,
+  reportsByLegacyStableId: Map<string, AgentCameraInventoryItem[]>,
+  migratedLegacyCameraIds: Set<string>,
+) {
+  const legacy = await prisma.nodeCamera.findUnique({ where: { nodeId_stableId: { nodeId, stableId: legacyStableId } } });
+  if (!legacy || migratedLegacyCameraIds.has(legacy.id)) return null;
+
+  const reports = reportsByLegacyStableId.get(legacyStableId) ?? [];
+  if (reports.length === 1 && reports[0].stableId === nextStableId) {
+    return legacy;
+  }
+
+  const matchingDeviceReports = reports.filter((report) => report.devicePath === legacy.devicePath);
+  if (matchingDeviceReports.length === 1 && matchingDeviceReports[0].stableId === nextStableId && nextDevicePath === legacy.devicePath) {
+    return legacy;
+  }
+
+  return null;
 }
 
 function parseStoredFormats(formatsJson: string | null): CameraFormat[] {

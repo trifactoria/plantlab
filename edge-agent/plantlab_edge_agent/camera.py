@@ -33,6 +33,13 @@ class CameraInfo:
     device: str
     name: Optional[str]
     stable_id: Optional[str]
+    legacy_stable_id: Optional[str] = None
+    vendor_id: Optional[str] = None
+    product_id: Optional[str] = None
+    serial: Optional[str] = None
+    physical_path: Optional[str] = None
+    usb_path: Optional[str] = None
+    usb_port: Optional[str] = None
     supports_capture: bool = True
     formats: List[Dict[str, object]] = field(default_factory=list)
     formats_status: str = "unknown"
@@ -82,17 +89,33 @@ def discover_cameras(probe_capture: bool = True) -> List[CameraInfo]:
     if not command_exists("v4l2-ctl"):
         return [CameraInfo(device=d, name=None, stable_id=None) for d in devices]
 
-    cameras: List[CameraInfo] = []
+    raw: List[Tuple[str, Optional[str], Dict[str, Optional[str]], bool, List[Dict[str, object]], str, Optional[str]]] = []
     for device in devices:
         name = _v4l2_card_name(device)
-        stable_id = _stable_id_for_device(device)
+        identity = _identity_for_device(device)
         supports_capture = _supports_capture(device)
         formats, formats_status, formats_error = _list_camera_formats(device) if supports_capture else ([], "unavailable", None)
+        raw.append((device, name, identity, supports_capture, formats, formats_status, formats_error))
+
+    duplicate_serials = _duplicated_serial_keys([entry[2] for entry in raw])
+    cameras: List[CameraInfo] = []
+    for device, name, identity, supports_capture, formats, formats_status, formats_error in raw:
+        serial_key = _serial_key(identity)
+        duplicate_serial = serial_key in duplicate_serials if serial_key else False
+        stable_id = _stable_id_from_identity(identity, duplicate_serial=duplicate_serial)
+        physical_path = identity.get("physicalPath")
         cameras.append(
             CameraInfo(
                 device=device,
-                name=name,
+                name=_display_name(name, physical_path),
                 stable_id=stable_id,
+                legacy_stable_id=_legacy_stable_id(identity),
+                vendor_id=identity.get("vendorId"),
+                product_id=identity.get("productId"),
+                serial=identity.get("serial"),
+                physical_path=physical_path,
+                usb_path=physical_path,
+                usb_port=_usb_path_suffix(physical_path),
                 supports_capture=supports_capture,
                 formats=formats,
                 formats_status=formats_status,
@@ -275,20 +298,98 @@ def _parse_formats_output(output: str) -> List[Dict[str, object]]:
     return formats
 
 
-def _stable_id_for_device(device: str) -> Optional[str]:
-    """Best-effort USB-based stable id via udevadm, when available - falls back to the raw device path (still unique per boot, just not stable across USB port changes) rather than failing discovery outright."""
-    if not command_exists("udevadm"):
+def _parse_properties(output: str) -> Dict[str, str]:
+    return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+
+
+def _normalize_physical_path(value: Optional[str]) -> Optional[str]:
+    if not value:
         return None
+    normalized = value.strip()
+    normalized = re.sub(r"/video4linux/video\d+$", "", normalized, flags=re.I)
+    normalized = re.sub(r"(\d+-\d+(?:\.\d+)*):\d+\.\d+$", r"\1", normalized, flags=re.I)
+    normalized = re.sub(r"(:\d+(?:\.\d+)+):\d+\.\d+$", r"\1", normalized, flags=re.I)
+    return normalized or None
+
+
+def _usb_path_suffix(physical_path: Optional[str]) -> Optional[str]:
+    normalized = _normalize_physical_path(physical_path)
+    if not normalized:
+        return None
+    match = re.search(r":(\d+(?:\.\d+)*)$", normalized)
+    if match:
+        return match.group(1)
+    match = re.search(r"\d+-(\d+(?:\.\d+)*)$", normalized)
+    if match:
+        return match.group(1)
+    return normalized.rstrip("/").split("/")[-1]
+
+
+def _display_name(name: Optional[str], physical_path: Optional[str]) -> Optional[str]:
+    suffix = _usb_path_suffix(physical_path)
+    if not name or not suffix or f"({suffix})" in name or f"USB path {suffix}" in name:
+        return name
+    return f"{name} ({suffix})"
+
+
+def _identity_for_device(device: str) -> Dict[str, Optional[str]]:
+    """Best-effort USB identity via udevadm. The normalized physical path
+    intentionally drops the interface suffix (for example ':1.0') so sibling
+    V4L2 nodes from one UVC webcam share one identity."""
+    if not command_exists("udevadm"):
+        return {"vendorId": None, "productId": None, "serial": None, "physicalPath": None}
     result = subprocess.run(["udevadm", "info", "--query=property", "--name", device], capture_output=True, text=True, timeout=5)
     if result.returncode != 0:
-        return None
-    props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        return {"vendorId": None, "productId": None, "serial": None, "physicalPath": None}
+    props = _parse_properties(result.stdout)
     vendor = props.get("ID_VENDOR_ID")
-    model = props.get("ID_MODEL_ID")
+    product = props.get("ID_MODEL_ID")
     serial = props.get("ID_SERIAL_SHORT") or props.get("ID_SERIAL")
-    if vendor and model:
-        return f"usb:{vendor}:{model}:{serial or 'noserial'}"
+    physical_path = _normalize_physical_path(props.get("ID_PATH")) or _normalize_physical_path(props.get("DEVPATH"))
+    return {"vendorId": vendor, "productId": product, "serial": serial, "physicalPath": physical_path}
+
+
+def _serial_key(identity: Dict[str, Optional[str]]) -> Optional[str]:
+    vendor = identity.get("vendorId")
+    product = identity.get("productId")
+    serial = identity.get("serial")
+    if not vendor or not product or not serial:
+        return None
+    return f"{vendor}:{product}:{serial}"
+
+
+def _duplicated_serial_keys(identities: List[Dict[str, Optional[str]]]) -> set[str]:
+    paths_by_serial: Dict[str, set[str]] = {}
+    for identity in identities:
+        key = _serial_key(identity)
+        path_value = identity.get("physicalPath")
+        if not key or not path_value:
+            continue
+        paths_by_serial.setdefault(key, set()).add(path_value)
+    return {key for key, paths in paths_by_serial.items() if len(paths) > 1}
+
+
+def _legacy_stable_id(identity: Dict[str, Optional[str]]) -> Optional[str]:
+    vendor = identity.get("vendorId")
+    product = identity.get("productId")
+    serial = identity.get("serial")
+    if vendor and product:
+        return f"usb:{vendor}:{product}:{serial or 'noserial'}"
     return None
+
+
+def _stable_id_from_identity(identity: Dict[str, Optional[str]], duplicate_serial: bool = False) -> Optional[str]:
+    base = _legacy_stable_id(identity)
+    physical_path = identity.get("physicalPath")
+    serial = identity.get("serial")
+    if base and (duplicate_serial or not serial):
+        return f"{base}:path:{physical_path}" if physical_path else base
+    return base
+
+
+def _stable_id_for_device(device: str) -> Optional[str]:
+    identity = _identity_for_device(device)
+    return _stable_id_from_identity(identity)
 
 
 def _build_probe_candidates(formats: List[Dict[str, object]]) -> List[Tuple[str, int, int]]:

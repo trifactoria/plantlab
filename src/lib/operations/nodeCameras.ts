@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { CaptureSource, NodeCamera, NodeCameraAssignment, PlantLabNode, PrismaClient } from "@prisma/client";
+import { usbPathSuffix } from "../cameraIdentity";
 import { findCameraMode, normalizeCameraFormats, normalizeCameraInputFormat, preferredCameraMode } from "../cameraModes";
 import { resolveCaptureSourcesDataDir } from "../paths.server";
 import type { CameraFormat } from "../v4l2";
@@ -8,7 +9,8 @@ if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/nodeCameras.ts is server-only operational code.");
 }
 
-export type NodeCameraWithFormats = NodeCamera & { formats: CameraFormat[] };
+export type NodeCameraAlternateDevice = { device: string; supportsCapture?: boolean; reason?: string | null };
+export type NodeCameraWithFormats = NodeCamera & { formats: CameraFormat[]; alternateDevices?: NodeCameraAlternateDevice[] };
 
 export function parseNodeCameraFormats(camera: Pick<NodeCamera, "formatsJson">): CameraFormat[] {
   if (!camera.formatsJson) return [];
@@ -20,6 +22,36 @@ export function parseNodeCameraFormats(camera: Pick<NodeCamera, "formatsJson">):
   }
 }
 
+export function parseNodeCameraAlternateDevices(camera: Pick<NodeCamera, "alternateDevicesJson">): NodeCameraAlternateDevice[] {
+  if (!camera.alternateDevicesJson) return [];
+  try {
+    const parsed = JSON.parse(camera.alternateDevicesJson);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): NodeCameraAlternateDevice[] => {
+      if (typeof item === "string") return [{ device: item }];
+      if (item && typeof item === "object" && typeof item.device === "string") {
+        return [
+          {
+            device: item.device,
+            supportsCapture: typeof item.supportsCapture === "boolean" ? item.supportsCapture : undefined,
+            reason: typeof item.reason === "string" ? item.reason : null,
+          },
+        ];
+      }
+      return [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function nodeCameraDisplayName(camera: Pick<NodeCamera, "name" | "usbPort" | "physicalPath" | "usbPath">): string {
+  const name = camera.name ?? "Unknown camera";
+  const suffix = camera.usbPort ?? usbPathSuffix(camera.physicalPath ?? camera.usbPath);
+  if (!suffix || name.includes(`(${suffix})`) || name.includes(`USB path ${suffix}`)) return name;
+  return `${name} - USB path ${suffix}`;
+}
+
 export async function listNodeCameras(prisma: PrismaClient, nodeName?: string | null) {
   const nodes = await prisma.plantLabNode.findMany({
     where: nodeName ? { name: nodeName } : undefined,
@@ -28,7 +60,11 @@ export async function listNodeCameras(prisma: PrismaClient, nodeName?: string | 
   });
   return nodes.map((node) => ({
     ...node,
-    cameras: node.cameras.map((camera) => ({ ...camera, formats: parseNodeCameraFormats(camera) })),
+    cameras: node.cameras.map((camera) => ({
+      ...camera,
+      formats: parseNodeCameraFormats(camera),
+      alternateDevices: parseNodeCameraAlternateDevices(camera),
+    })),
   }));
 }
 

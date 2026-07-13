@@ -232,8 +232,15 @@ def _camera_to_dict(c: camera.CameraInfo) -> dict:
     return {
         "name": c.name,
         "stableId": c.stable_id,
+        "legacyStableId": c.legacy_stable_id,
         "physicalCamera": c.stable_id or f"device:{c.device}",
         "verifiedPrimaryDevice": c.device,
+        "vendorId": c.vendor_id,
+        "productId": c.product_id,
+        "serial": c.serial,
+        "physicalPath": c.physical_path,
+        "usbPath": c.usb_path,
+        "usbPort": c.usb_port,
         "supportsCapture": c.supports_capture,
         "available": c.verified_capture,
         "verifiedCapture": c.verified_capture,
@@ -273,7 +280,11 @@ def cmd_camera_list(args: argparse.Namespace) -> int:
         print(f"{idx}. {c.name or 'Unknown camera'}")
         print(f"   Physical camera: {c.stable_id or f'device:{c.device}'}")
         print(f"   Primary device: {c.device}")
+        if c.usb_port or c.physical_path:
+            print(f"   USB path: {c.usb_port or c.physical_path}")
         print(f"   Stable ID: {c.stable_id or '(none)'}")
+        if c.legacy_stable_id and c.legacy_stable_id != c.stable_id:
+            print(f"   Legacy stable ID: {c.legacy_stable_id}")
         print(f"   Capture-capable: {'yes' if c.supports_capture else 'no'}")
         print(f"   Verified capture: {'yes' if c.verified_capture else 'no'}")
         if c.verified_format:

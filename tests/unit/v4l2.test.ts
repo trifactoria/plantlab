@@ -263,6 +263,45 @@ describe("groupPhysicalCameras", () => {
     expect(grouped[0].device).toBe("/dev/video0");
     expect(grouped[0].alternateDevices).toEqual([{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }]);
   });
+
+  it("keeps identical duplicate-serial physical cameras separate when stable IDs include USB path", () => {
+    const grouped = groupPhysicalCameras([
+      {
+        name: "webcam 1080P (1.3)",
+        device: "/dev/video0",
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.3",
+        supportsCapture: true,
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: [] }] }],
+      },
+      {
+        name: "webcam 1080P (1.3)",
+        device: "/dev/video1",
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.3",
+        supportsCapture: false,
+        formats: [],
+      },
+      {
+        name: "webcam 1080P (1.2)",
+        device: "/dev/video2",
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.2",
+        supportsCapture: true,
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: [] }] }],
+      },
+      {
+        name: "webcam 1080P (1.2)",
+        device: "/dev/video3",
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.2",
+        supportsCapture: false,
+        formats: [],
+      },
+    ]);
+
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]).toMatchObject({ device: "/dev/video0", stableId: expect.stringContaining(":1.3") });
+    expect(grouped[0].alternateDevices).toEqual([{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }]);
+    expect(grouped[1]).toMatchObject({ device: "/dev/video2", stableId: expect.stringContaining(":1.2") });
+    expect(grouped[1].alternateDevices).toEqual([{ device: "/dev/video3", supportsCapture: false, reason: "not capture-capable" }]);
+  });
 });
 
 describe("capsIndicateVideoCapture", () => {

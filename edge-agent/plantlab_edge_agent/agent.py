@@ -56,8 +56,16 @@ def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtoc
         payload = [
             {
                 "stableId": c.stable_id or f"device:{c.device}",
+                "legacyStableId": c.legacy_stable_id,
                 "devicePath": c.device,
                 "name": c.name,
+                "vendorId": c.vendor_id,
+                "productId": c.product_id,
+                "serial": c.serial,
+                "physicalPath": c.physical_path,
+                "usbPath": c.usb_path,
+                "usbPort": c.usb_port,
+                "alternateDevices": c.alternate_devices,
                 # A real, ffmpeg-verified capture (Part 5), not just V4L2
                 # metadata claiming "Video Capture" support - metadata alone
                 # is what let a Raspberry Pi's non-camera hardware codec/ISP

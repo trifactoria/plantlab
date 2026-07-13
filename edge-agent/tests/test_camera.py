@@ -112,6 +112,57 @@ def test_discover_cameras_groups_duplicate_video_nodes_and_prefers_capture_node(
         assert cameras[0].alternate_devices == ["/dev/video1"]
 
 
+def test_discover_cameras_splits_duplicate_serial_webcams_by_usb_path_and_groups_sibling_nodes():
+    def fake_run(args, **kwargs):
+        device = args[args.index("--device") + 1] if "--device" in args else args[-1]
+        if args[0] == "v4l2-ctl" and "--info" in args:
+            return _completed(stdout="Card type: webcam 1080P\n")
+        if args[0] == "v4l2-ctl" and "--all" in args:
+            return _completed(stdout="Device Caps: Video Capture\n" if device in ("/dev/video0", "/dev/video2") else "Device Caps: Metadata Capture\n")
+        if args[0] == "v4l2-ctl" and "--list-formats-ext" in args:
+            return _completed(stdout="[0]: 'MJPG' (Motion-JPEG)\n  Size: Discrete 1280x720\n")
+        if args[0] == "udevadm":
+            path = "platform-20980000.usb-usb-0:1.3:1.0" if device in ("/dev/video0", "/dev/video1") else "platform-20980000.usb-usb-0:1.2:1.0"
+            return _completed(
+                stdout="\n".join(
+                    [
+                        "ID_VENDOR_ID=32e6",
+                        "ID_MODEL_ID=9221",
+                        "ID_SERIAL_SHORT=202601081445001",
+                        f"ID_PATH={path}",
+                    ]
+                )
+            )
+        return _completed()
+
+    with patch("glob.glob", return_value=["/dev/video0", "/dev/video1", "/dev/video2", "/dev/video3"]), patch.object(
+        camera, "command_exists", return_value=True
+    ), patch("subprocess.run", side_effect=fake_run):
+        cameras = camera.discover_cameras(probe_capture=False)
+
+    assert len(cameras) == 2
+    assert cameras[0].device == "/dev/video0"
+    assert cameras[0].alternate_devices == ["/dev/video1"]
+    assert cameras[0].stable_id == "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.3"
+    assert cameras[0].legacy_stable_id == "usb:32e6:9221:202601081445001"
+    assert cameras[0].usb_port == "1.3"
+    assert cameras[0].name == "webcam 1080P (1.3)"
+    assert cameras[1].device == "/dev/video2"
+    assert cameras[1].alternate_devices == ["/dev/video3"]
+    assert cameras[1].stable_id == "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.2"
+    assert cameras[1].usb_port == "1.2"
+
+
+def test_identity_helpers_handle_unique_serial_missing_serial_and_hub_paths():
+    unique = {"vendorId": "32e6", "productId": "9221", "serial": "REAL1", "physicalPath": "platform-20980000.usb-usb-0:1.3"}
+    missing = {"vendorId": "32e6", "productId": "9221", "serial": None, "physicalPath": "platform-20980000.usb-usb-0:1.3"}
+
+    assert camera._stable_id_from_identity(unique) == "usb:32e6:9221:REAL1"
+    assert camera._stable_id_from_identity(missing) == "usb:32e6:9221:noserial:path:platform-20980000.usb-usb-0:1.3"
+    assert camera._normalize_physical_path("pci-0000:00:14.0-usb-0:4.2.3:1.0") == "pci-0000:00:14.0-usb-0:4.2.3"
+    assert camera._usb_path_suffix("pci-0000:00:14.0-usb-0:4.2.3:1.0") == "4.2.3"
+
+
 def test_capture_frame_raises_when_ffmpeg_fails(tmp_path):
     output = tmp_path / "out.jpg"
     with patch("subprocess.run", return_value=_completed(returncode=1, stderr="No such device")):

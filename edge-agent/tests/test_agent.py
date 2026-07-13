@@ -33,8 +33,16 @@ def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_c
         [
             {
                 "stableId": "usb:1:2:3",
+                "legacyStableId": None,
                 "devicePath": "/dev/video0",
                 "name": "Test Cam",
+                "vendorId": None,
+                "productId": None,
+                "serial": None,
+                "physicalPath": None,
+                "usbPath": None,
+                "usbPort": None,
+                "alternateDevices": [],
                 "available": True,
                 "formats": formats,
                 "formatsStatus": "unknown",
@@ -61,8 +69,16 @@ def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(t
         [
             {
                 "stableId": "platform:bcm2835-codec-decode",
+                "legacyStableId": None,
                 "devicePath": "/dev/video10",
                 "name": "bcm2835-codec-decode",
+                "vendorId": None,
+                "productId": None,
+                "serial": None,
+                "physicalPath": None,
+                "usbPath": None,
+                "usbPort": None,
+                "alternateDevices": [],
                 "available": False,
                 "formats": [],
                 "formatsStatus": "unknown",

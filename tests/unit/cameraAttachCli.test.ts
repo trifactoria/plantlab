@@ -153,4 +153,75 @@ describe("camera attach CLI flow", () => {
     expect(result.stdout).toContain("MJPEG 1920x1080 @ 30 fps");
     expect(result.stdout).toContain("YUYV 640x480 @ 30 fps");
   });
+
+  it("shows duplicate-serial webcams with friendly USB suffixes and attaches the second camera independently", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-dual-webcam", role: "greenhouse-node", rotateCredential: true });
+    const legacyStableId = "usb:32e6:9221:202601081445001";
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: `${legacyStableId}:path:platform-20980000.usb-usb-0:1.3`,
+        legacyStableId,
+        devicePath: "/dev/video0",
+        name: "webcam 1080P (1.3)",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "202601081445001",
+        physicalPath: "platform-20980000.usb-usb-0:1.3",
+        usbPort: "1.3",
+        alternateDevices: [{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }],
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+      {
+        stableId: `${legacyStableId}:path:platform-20980000.usb-usb-0:1.2`,
+        legacyStableId,
+        devicePath: "/dev/video2",
+        name: "webcam 1080P (1.2)",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "202601081445001",
+        physicalPath: "platform-20980000.usb-usb-0:1.2",
+        usbPort: "1.2",
+        alternateDevices: [{ device: "/dev/video3", supportsCapture: false, reason: "not capture-capable" }],
+        formats: [{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+    const first = await runCameraAttachFlow({
+      node: "greenhouse-zero-dual-webcam",
+      camera: `${legacyStableId}:path:platform-20980000.usb-usb-0:1.3`,
+      name: "Greenhouse Camera 1.3",
+      width: 1280,
+      height: 720,
+      format: "mjpeg",
+      yes: true,
+    });
+
+    const info = runCli(["camera", "list", "--node", "greenhouse-zero-dual-webcam", "--verbose"]);
+    expect(info.status).toBe(0);
+    expect(info.stdout).toContain("webcam 1080P (1.3)");
+    expect(info.stdout).toContain("Primary: /dev/video0");
+    expect(info.stdout).toContain("Alternate: /dev/video1");
+    expect(info.stdout).toContain("webcam 1080P (1.2)");
+    expect(info.stdout).toContain("Primary: /dev/video2");
+    expect(info.stdout).toContain("Alternate: /dev/video3");
+
+    const second = await runCameraAttachFlow({
+      node: "greenhouse-zero-dual-webcam",
+      camera: `${legacyStableId}:path:platform-20980000.usb-usb-0:1.2`,
+      name: "Greenhouse Camera 1.2",
+      width: 1280,
+      height: 720,
+      format: "mjpeg",
+      yes: true,
+    });
+
+    expect(second.captureSource.id).not.toBe(first.captureSource.id);
+    expect(second.assignment.nodeCameraId).not.toBe(first.assignment.nodeCameraId);
+    expect(second.camera.devicePath).toBe("/dev/video2");
+    const firstAfter = await prisma.nodeCameraAssignment.findUniqueOrThrow({
+      where: { id: first.assignment.id },
+      include: { nodeCamera: true, captureSource: true },
+    });
+    expect(firstAfter.nodeCamera.devicePath).toBe("/dev/video0");
+    expect(firstAfter.captureSource.name).toBe("Greenhouse Camera 1.3");
+  });
 });

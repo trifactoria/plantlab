@@ -86,6 +86,14 @@ async function postCameraInventory(coordinatorUrl: string, token: string) {
         formats,
         formatsStatus,
         formatsError,
+        legacyStableId: camera.legacyStableId,
+        vendorId: camera.vendorId,
+        productId: camera.productId,
+        serial: camera.serial,
+        physicalPath: camera.physicalPath,
+        usbPath: camera.usbPath,
+        usbPort: camera.usbPort,
+        alternateDevices: camera.alternateDevices ?? [],
       };
     }),
   );

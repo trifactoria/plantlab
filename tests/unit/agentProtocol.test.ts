@@ -232,6 +232,79 @@ describe("agent protocol", () => {
     expect(node.inventoryRefreshRequestedAt).toBeNull();
   });
 
+  it("reconciles an old duplicate-serial stable ID onto the matching new physical camera without attaching the second camera", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-duplicate-reconcile", role: "greenhouse-node", rotateCredential: true });
+    const legacyStableId = "usb:32e6:9221:202601081445001";
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: legacyStableId,
+        devicePath: "/dev/video0",
+        name: "webcam 1080P",
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName: "greenhouse-zero-duplicate-reconcile",
+      stableId: legacyStableId,
+      newCaptureSourceName: "Greenhouse Existing Camera",
+      width: 1280,
+      height: 720,
+      inputFormat: "mjpeg",
+    });
+
+    const [cameraA, cameraB] = await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.3",
+        legacyStableId,
+        devicePath: "/dev/video0",
+        name: "webcam 1080P (1.3)",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "202601081445001",
+        physicalPath: "platform-20980000.usb-usb-0:1.3",
+        usbPath: "platform-20980000.usb-usb-0:1.3",
+        usbPort: "1.3",
+        alternateDevices: [{ device: "/dev/video1", supportsCapture: false, reason: "not capture-capable" }],
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+      {
+        stableId: "usb:32e6:9221:202601081445001:path:platform-20980000.usb-usb-0:1.2",
+        legacyStableId,
+        devicePath: "/dev/video2",
+        name: "webcam 1080P (1.2)",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "202601081445001",
+        physicalPath: "platform-20980000.usb-usb-0:1.2",
+        usbPath: "platform-20980000.usb-usb-0:1.2",
+        usbPort: "1.2",
+        alternateDevices: [{ device: "/dev/video3", supportsCapture: false, reason: "not capture-capable" }],
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+
+    expect(cameraA.id).toBe(attached.camera.id);
+    expect(cameraA.stableId).toContain(":path:platform-20980000.usb-usb-0:1.3");
+    expect(cameraA.captureSourceId).toBe(attached.captureSource.id);
+    expect(cameraB.id).not.toBe(attached.camera.id);
+    expect(cameraB.captureSourceId).toBeNull();
+
+    const assignment = await prisma.nodeCameraAssignment.findUniqueOrThrow({
+      where: { id: attached.assignment.id },
+      include: { nodeCamera: true, captureSource: true },
+    });
+    expect(assignment.nodeCameraId).toBe(cameraA.id);
+    expect(assignment.nodeCamera.stableId).toBe(cameraA.stableId);
+    expect(assignment.captureSourceId).toBe(attached.captureSource.id);
+    expect(assignment.captureSource.name).toBe("Greenhouse Existing Camera");
+
+    const old = await prisma.nodeCamera.findUnique({ where: { nodeId_stableId: { nodeId: registered.node.id, stableId: legacyStableId } } });
+    expect(old).toBeNull();
+  });
+
   it("records runtime, protocol version, and reported capabilities from a heartbeat (Part 6/8/13)", async () => {
     const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero", role: "greenhouse-node", rotateCredential: true });
     await recordHeartbeat(prisma, registered.node.id, {

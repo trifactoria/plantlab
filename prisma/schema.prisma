@@ -481,8 +481,16 @@ model NodeCamera {
   id              String   @id @default(cuid())
   nodeId          String
   stableId        String
+  legacyStableId  String?
   devicePath      String
   name            String?
+  vendorId        String?
+  productId       String?
+  serial          String?
+  physicalPath    String?
+  usbPath         String?
+  usbPort         String?
+  alternateDevicesJson String?
   formatsJson     String?
   available       Boolean  @default(true)
   lastSeenAt      DateTime @default(now())

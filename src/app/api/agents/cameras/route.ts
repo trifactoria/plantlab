@@ -25,7 +25,11 @@ export async function POST(request: Request) {
     cameras: saved.length,
     inventory: saved.map((camera) => ({
       stableId: camera.stableId,
+      legacyStableId: camera.legacyStableId,
       devicePath: camera.devicePath,
+      physicalPath: camera.physicalPath,
+      usbPath: camera.usbPath,
+      usbPort: camera.usbPort,
       ...inventoryDiagnosticsForCamera(camera),
     })),
     assignments: assignments.map((assignment) => ({
