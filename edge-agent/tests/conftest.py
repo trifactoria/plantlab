@@ -29,6 +29,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(config, "CONFIG_PATH", config_dir / "edge-agent.json")
     monkeypatch.setattr(config, "CREDENTIAL_PATH", config_dir / "agent.env")
+    monkeypatch.setattr(config, "GREENHOUSE_SECRET_PATH", config_dir / "greenhouse.env")
     return config_dir
 
 
@@ -43,6 +44,11 @@ class _FakeCoordinatorState:
         self.failed = []
         self.ingested = []
         self.environment_batches = []
+        self.power_states = []
+        self.next_power_command_queue = []
+        self.power_claimed = []
+        self.power_completed = []
+        self.power_failed = []
         self.next_job_queue = []
         self.camera_refresh_requested_at = None
 
@@ -110,6 +116,32 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/api/agents/power/state":
+            body = self._read_json_body()
+            self.state.power_states.append(body)
+            self._send_json(200, {"status": "ok", "acceptedOutlets": [outlet.get("key") for outlet in body.get("outlets", []) if isinstance(outlet, dict)], "count": len(body.get("outlets", []))})
+            return
+
+        if self.path.startswith("/api/agents/power/commands/") and self.path.endswith("/claim"):
+            command_id = self.path.split("/")[5]
+            self.state.power_claimed.append(command_id)
+            self._send_json(200, {"status": "claimed", "commandId": command_id})
+            return
+
+        if self.path.startswith("/api/agents/power/commands/") and self.path.endswith("/complete"):
+            command_id = self.path.split("/")[5]
+            body = self._read_json_body()
+            self.state.power_completed.append({"commandId": command_id, **body})
+            self._send_json(200, {"status": "succeeded", "commandId": command_id, "actualState": body.get("actualState")})
+            return
+
+        if self.path.startswith("/api/agents/power/commands/") and self.path.endswith("/fail"):
+            command_id = self.path.split("/")[5]
+            body = self._read_json_body()
+            self.state.power_failed.append({"commandId": command_id, **body})
+            self._send_json(200, {"status": "failed", "commandId": command_id})
+            return
+
         if self.path.startswith("/api/agents/jobs/") and self.path.endswith("/claim"):
             job_id = self.path.split("/")[4]
             body = self._read_json_body()
@@ -153,6 +185,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/agents/jobs/next":
             job = self.state.next_job_queue.pop(0) if self.state.next_job_queue else None
             self._send_json(200, {"job": job})
+            return
+        if self.path == "/api/agents/power/commands/next":
+            command = self.state.next_power_command_queue.pop(0) if self.state.next_power_command_queue else None
+            self._send_json(200, {"command": command})
             return
         if self.path == "/api/agents/cameras/refresh":
             self._send_json(

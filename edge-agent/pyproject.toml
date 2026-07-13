@@ -14,8 +14,13 @@ requires-python = ">=3.7"
 # image; see requirements.txt.
 dependencies = []
 
+[project.optional-dependencies]
+kasa = [
+  "python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb",
+]
+
 [project.scripts]
 plantlab-edge-agent = "plantlab_edge_agent.__main__:main"
 
 [tool.setuptools]
-packages = ["plantlab_edge_agent"]
+packages = ["plantlab_edge_agent", "plantlab_edge_agent.sensors", "plantlab_edge_agent.power"]

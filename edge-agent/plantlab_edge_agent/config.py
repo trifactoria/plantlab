@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 CONFIG_DIR = Path(os.environ.get("PLANTLAB_EDGE_CONFIG_DIR", str(Path.home() / ".config" / "plantlab")))
 CONFIG_PATH = CONFIG_DIR / "edge-agent.json"
 CREDENTIAL_PATH = CONFIG_DIR / "agent.env"
+GREENHOUSE_SECRET_PATH = CONFIG_DIR / "greenhouse.env"
 DEFAULT_SPOOL_ROOT = Path.home() / ".local" / "state" / "plantlab-edge-agent"
 
 
@@ -60,6 +61,8 @@ class EdgeAgentConfig:
     heartbeat_interval_seconds: int = 30
     poll_interval_seconds: int = 5
     camera_refresh_poll_interval_seconds: int = 60
+    power_command_poll_interval_seconds: int = 5
+    power_state_refresh_interval_seconds: int = 60
     spool_cleanup_interval_seconds: int = 600
     sensor_sample_interval_seconds: int = 15
     environment_upload_interval_seconds: int = 45
@@ -98,6 +101,8 @@ def read_config() -> Optional[EdgeAgentConfig]:
         heartbeat_interval_seconds=int(raw.get("heartbeatIntervalSeconds", 30)),
         poll_interval_seconds=int(raw.get("pollIntervalSeconds", 5)),
         camera_refresh_poll_interval_seconds=int(raw.get("cameraRefreshPollIntervalSeconds", 60)),
+        power_command_poll_interval_seconds=int(raw.get("powerCommandPollIntervalSeconds", 5)),
+        power_state_refresh_interval_seconds=int(raw.get("powerStateRefreshIntervalSeconds", 60)),
         spool_cleanup_interval_seconds=int(raw.get("spoolCleanupIntervalSeconds", 600)),
         sensor_sample_interval_seconds=int(raw.get("sensorSampleIntervalSeconds", 15)),
         environment_upload_interval_seconds=int(raw.get("environmentUploadIntervalSeconds", 45)),
@@ -116,6 +121,8 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "heartbeatIntervalSeconds": config.heartbeat_interval_seconds,
         "pollIntervalSeconds": config.poll_interval_seconds,
         "cameraRefreshPollIntervalSeconds": config.camera_refresh_poll_interval_seconds,
+        "powerCommandPollIntervalSeconds": config.power_command_poll_interval_seconds,
+        "powerStateRefreshIntervalSeconds": config.power_state_refresh_interval_seconds,
         "spoolCleanupIntervalSeconds": config.spool_cleanup_interval_seconds,
         "sensorSampleIntervalSeconds": config.sensor_sample_interval_seconds,
         "environmentUploadIntervalSeconds": config.environment_upload_interval_seconds,
@@ -278,6 +285,23 @@ def read_credential() -> Optional[str]:
             value = line[len("PLANTLAB_NODE_CREDENTIAL="):].strip()
             return value or None
     return None
+
+
+def read_greenhouse_secrets() -> Dict[str, str]:
+    if not GREENHOUSE_SECRET_PATH.exists():
+        return {}
+    secrets: Dict[str, str] = {}
+    for raw_line in GREENHOUSE_SECRET_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        secrets[key] = value
+    return secrets
 
 
 def validate_config(config: EdgeAgentConfig) -> List[str]:

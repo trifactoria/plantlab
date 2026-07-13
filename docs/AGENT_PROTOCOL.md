@@ -217,6 +217,117 @@ environmental sensor status stored for one node:
 }
 ```
 
+### `POST /api/agents/power/state`
+
+Reports actual outlet inventory and observed state from an authenticated
+greenhouse node. Credentials never cross this endpoint.
+
+```json
+{
+  "nodeName": "greenhouse-zero",
+  "outlets": [
+    {
+      "key": "fans",
+      "name": "Fans",
+      "provider": "kasa",
+      "providerAlias": "greenhouse-fans",
+      "enabled": true,
+      "safetyClass": "switch",
+      "actualState": false,
+      "stateObservedAt": "2026-07-13T15:30:00.000Z",
+      "available": true,
+      "lastErrorCode": null,
+      "lastErrorMessage": null
+    }
+  ]
+}
+```
+
+The coordinator upserts `NodeOutlet` rows by `(nodeId, key)`. This is
+actual observed state, not desired state.
+
+### `GET /api/agents/power/commands/next`
+
+Cheap authenticated poll for the next pending manual power command:
+
+```json
+{
+  "command": {
+    "id": "cmd_...",
+    "outletKey": "fans",
+    "action": "on",
+    "durationSeconds": null,
+    "expiresAt": "2026-07-13T15:35:00.000Z"
+  }
+}
+```
+
+Actions are `on`, `off`, `pulse`, and `refresh`. Water outlets never accept
+an unbounded `on` command. Pulse duration is capped at 120 seconds by both
+the coordinator and the edge node.
+
+### `POST /api/agents/power/commands/{id}/claim`
+
+Atomically claims a pending command for the authenticated node. Repeated
+claims of an already claimed command by the same node are idempotent.
+
+### `POST /api/agents/power/commands/{id}/complete`
+
+Marks a claimed command succeeded only after the node verifies actual state.
+
+```json
+{ "actualState": true, "stateObservedAt": "2026-07-13T15:30:02.000Z" }
+```
+
+### `POST /api/agents/power/commands/{id}/fail`
+
+Marks a pending or claimed command failed with a safe, bounded diagnostic.
+
+```json
+{
+  "errorCode": "power-state-verification-failed",
+  "errorMessage": "fans did not verify ON.",
+  "actualState": false,
+  "stateObservedAt": "2026-07-13T15:30:02.000Z"
+}
+```
+
+### `GET /api/nodes/{nodeName}/power`
+
+Future-UI retrieval boundary for actual outlet state and active command:
+
+```json
+{
+  "outlets": [
+    {
+      "key": "fans",
+      "providerAlias": "greenhouse-fans",
+      "actualState": false,
+      "stateObservedAt": "2026-07-13T15:30:00.000Z",
+      "available": true,
+      "pendingCommand": null,
+      "lastErrorCode": null
+    }
+  ]
+}
+```
+
+### `POST /api/nodes/{nodeName}/power/{outletKey}/commands`
+
+Queues a bounded manual command for a node-owned outlet:
+
+```json
+{ "action": "on" }
+```
+
+```json
+{ "action": "pulse", "durationSeconds": 10 }
+```
+
+This endpoint rejects permanent water `on`, excessive pulse durations,
+unknown outlets, disabled outlets, and duplicate active commands for the
+same outlet.
+
 ### `GET /api/agents/jobs/next`
 
 Returns the oldest queued `AgentCaptureJob` for this node, or

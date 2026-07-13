@@ -135,6 +135,25 @@ class Job:
         )
 
 
+@dataclass
+class PowerCommand:
+    id: str
+    outlet_key: str
+    action: str
+    duration_seconds: Optional[int]
+    expires_at: str
+
+    @staticmethod
+    def from_wire(raw: dict) -> "PowerCommand":
+        return PowerCommand(
+            id=raw["id"],
+            outlet_key=raw["outletKey"],
+            action=raw["action"],
+            duration_seconds=raw.get("durationSeconds"),
+            expires_at=raw["expiresAt"],
+        )
+
+
 class AgentProtocolClient:
     def __init__(self, coordinator_url: str, token: str):
         self.coordinator_url = coordinator_url.rstrip("/")
@@ -171,6 +190,35 @@ class AgentProtocolClient:
 
     def post_environment(self, node_name: str, events: List[dict]) -> dict:
         return request_json(self._url("/api/agents/environment"), self.token, method="POST", body={"nodeName": node_name, "events": events}, timeout=20)
+
+    def post_power_state(self, node_name: str, outlets: List[dict]) -> dict:
+        return request_json(self._url("/api/agents/power/state"), self.token, method="POST", body={"nodeName": node_name, "outlets": outlets}, timeout=20)
+
+    def next_power_command(self) -> Optional[PowerCommand]:
+        result = request_json(self._url("/api/agents/power/commands/next"), self.token, method="GET")
+        command = result.get("command")
+        return PowerCommand.from_wire(command) if command else None
+
+    def claim_power_command(self, command_id: str) -> None:
+        request_json(self._url(f"/api/agents/power/commands/{command_id}/claim"), self.token, method="POST", body={})
+
+    def complete_power_command(self, command_id: str, actual_state: Optional[bool], state_observed_at: str) -> None:
+        request_json(
+            self._url(f"/api/agents/power/commands/{command_id}/complete"),
+            self.token,
+            method="POST",
+            body={"actualState": actual_state, "stateObservedAt": state_observed_at},
+        )
+
+    def fail_power_command(self, command_id: str, error_code: str, error_message: str, actual_state: Optional[bool] = None, state_observed_at: Optional[str] = None) -> None:
+        body: Dict[str, Any] = {
+            "errorCode": error_code,
+            "errorMessage": error_message,
+            "actualState": actual_state,
+        }
+        if state_observed_at:
+            body["stateObservedAt"] = state_observed_at
+        request_json(self._url(f"/api/agents/power/commands/{command_id}/fail"), self.token, method="POST", body=body)
 
     def camera_inventory_refresh_request(self) -> dict:
         return request_json(self._url("/api/agents/cameras/refresh"), self.token, method="GET")

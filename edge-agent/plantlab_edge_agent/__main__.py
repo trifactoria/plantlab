@@ -23,6 +23,10 @@ from pathlib import Path
 from . import agent, camera, config
 from .camera_inventory import camera_inventory_cache_status, inventory_refresh_running
 from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
+from .power.base import PowerDriverError
+from .power.kasa import KasaPowerDriver, dependency_available as kasa_dependency_available
+from .power.models import WATER_MAX_PULSE_SECONDS
+from .power.runtime import PowerManager
 from .sensors import probe as sensor_probe
 from .sensors.base import CLASSIFICATION_ACCEPTED, RawEnvironmentalSample, SensorDriverError
 from .sensors.dht22 import DHT22PigpioDriver
@@ -56,6 +60,8 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
         "capabilities": cfg.capabilities if cfg else [],
         "heartbeatIntervalSeconds": cfg.heartbeat_interval_seconds if cfg else None,
         "pollIntervalSeconds": cfg.poll_interval_seconds if cfg else None,
+        "powerCommandPollIntervalSeconds": cfg.power_command_poll_interval_seconds if cfg else None,
+        "powerStateRefreshIntervalSeconds": cfg.power_state_refresh_interval_seconds if cfg else None,
         "maxSpoolBytes": cfg.max_spool_bytes if cfg else None,
         "maxUploadBytes": cfg.max_upload_bytes if cfg else None,
         "credentialPresent": bool(token),
@@ -256,6 +262,8 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"Greenhouse secret file: {'present' if summary['greenhouseSecretPresent'] else 'missing'} ({summary['greenhouseSecretPath']})")
     print(f"Heartbeat interval: {summary['heartbeatIntervalSeconds'] or '(missing)'}")
     print(f"Poll interval: {summary['pollIntervalSeconds'] or '(missing)'}")
+    print(f"Power command poll interval: {summary['powerCommandPollIntervalSeconds'] or '(missing)'} seconds")
+    print(f"Power state refresh interval: {summary['powerStateRefreshIntervalSeconds'] or '(missing)'} seconds")
     print(f"Credential present: {'yes' if summary['credentialPresent'] else 'no'}")
     if summary["credentialPresent"]:
         print(f"Credential length: {summary['credentialLength']}")
@@ -404,6 +412,160 @@ def _camera_subprocess_active() -> bool:
         return result.returncode == 0 and bool(result.stdout.strip())
     except Exception:
         return False
+
+
+def _load_power_config() -> tuple[config.EdgeAgentConfig | None, str | None]:
+    cfg, config_error = _load_config_safely()
+    if config_error or cfg is None:
+        return None, config_error or "edge-agent.json is missing"
+    if not cfg.power:
+        return None, "power is not configured"
+    return cfg, None
+
+
+def _power_probe_payload(cfg: config.EdgeAgentConfig | None) -> dict:
+    secrets = config.read_greenhouse_secrets()
+    payload = {
+        "provider": cfg.power.provider if cfg and cfg.power else None,
+        "host": cfg.power.host if cfg and cfg.power else None,
+        "credentialFile": {
+            "path": str(config.GREENHOUSE_SECRET_PATH),
+            "present": config.GREENHOUSE_SECRET_PATH.exists(),
+            "hasKasaUsername": bool(secrets.get("KASA_USERNAME")),
+            "hasKasaPassword": bool(secrets.get("KASA_PASSWORD")),
+        },
+        "driverImportReady": kasa_dependency_available(),
+        "authentication": "not-attempted",
+        "device": None,
+        "encryption": None,
+        "loginVersion": None,
+        "configuredOutlets": dict(cfg.power.outlets) if cfg and cfg.power else {},
+        "outlets": [],
+        "missingAliases": [],
+        "ready": False,
+        "errorCode": None,
+        "errorMessage": None,
+    }
+    if not cfg or not cfg.power:
+        payload["errorCode"] = "power-configuration-invalid"
+        payload["errorMessage"] = "Power is not configured."
+        return payload
+    driver = KasaPowerDriver(cfg.power.host, secrets.get("KASA_USERNAME", ""), secrets.get("KASA_PASSWORD", ""), cfg.power.outlets)
+    try:
+        driver.connect()
+        states = driver.list_outlets()
+        payload["authentication"] = "successful"
+        payload["device"] = driver.detected_model
+        payload["encryption"] = driver.detected_encryption
+        payload["loginVersion"] = driver.detected_login_version
+        payload["outlets"] = [
+            {
+                "key": key,
+                "providerAlias": alias,
+                "actualState": states.get(key),
+                "available": key in states,
+            }
+            for key, alias in cfg.power.outlets.items()
+        ]
+        payload["missingAliases"] = [alias for key, alias in cfg.power.outlets.items() if key not in states]
+        payload["ready"] = len(payload["missingAliases"]) == 0
+    except PowerDriverError as exc:
+        payload["authentication"] = "failed" if exc.code == "power-authentication-failed" else "unknown"
+        payload["errorCode"] = exc.code
+        payload["errorMessage"] = exc.safe_message
+    finally:
+        driver.close()
+    return payload
+
+
+def cmd_power_probe(args: argparse.Namespace) -> int:
+    cfg, config_error = _load_config_safely()
+    payload = _power_probe_payload(cfg if not config_error else None)
+    if config_error:
+        payload["errorCode"] = "power-configuration-invalid"
+        payload["errorMessage"] = config_error
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Provider: {payload['provider'] or '(not configured)'}")
+        print(f"Host: {payload['host'] or '(none)'}")
+        cred = payload["credentialFile"]
+        print(f"Credential file: {'present' if cred['present'] else 'missing'}")
+        print(f"Required credential keys: {'present' if cred['hasKasaUsername'] and cred['hasKasaPassword'] else 'missing'}")
+        print(f"Driver: {'ready' if payload['driverImportReady'] else 'missing'}")
+        if payload["device"]:
+            print(f"Device: {payload['device']}")
+        if payload["encryption"] or payload["loginVersion"]:
+            print(f"Transport: {payload['encryption'] or 'unknown'} login {payload['loginVersion'] or 'unknown'}")
+        print(f"Authentication: {payload['authentication']}")
+        for outlet in payload["outlets"]:
+            state = "ON" if outlet["actualState"] is True else "OFF" if outlet["actualState"] is False else "UNKNOWN"
+            print(f"{outlet['key']:6} -> {outlet['providerAlias']:20} {state}")
+        if payload["ready"]:
+            print("PASS: all configured outlets resolved")
+        else:
+            print(f"FAIL: {payload['errorMessage'] or 'one or more configured outlets are unavailable'}")
+    return 0 if payload["ready"] else 1
+
+
+def cmd_power_status(_args: argparse.Namespace) -> int:
+    cfg, error = _load_power_config()
+    if error or cfg is None:
+        print(f"Power status unavailable: {error}", file=sys.stderr)
+        return 1
+    manager = PowerManager(cfg)
+    try:
+        states = manager.refresh_states()
+        for state in states:
+            actual = "ON" if state.actual_state is True else "OFF" if state.actual_state is False else "UNKNOWN"
+            available = "available" if state.available else f"unavailable ({state.last_error_code or 'unknown'})"
+            print(f"{state.key:6} -> {state.provider_alias:20} {actual} [{available}]")
+        return 0 if all(state.available for state in states) else 1
+    finally:
+        manager.close()
+
+
+def cmd_power_on_off(args: argparse.Namespace) -> int:
+    cfg, error = _load_power_config()
+    if error or cfg is None:
+        print(f"Power command unavailable: {error}", file=sys.stderr)
+        return 1
+    if args.outlet_key == "water" and args.action == "on":
+        print("Water outlets do not permit unbounded ON commands. Use: plantlab-edge power pulse water --seconds N", file=sys.stderr)
+        return 1
+    manager = PowerManager(cfg)
+    try:
+        result = manager._set(args.outlet_key, args.action == "on")
+        if not result.ok:
+            print(f"FAIL: {result.error_code}: {result.error_message}", file=sys.stderr)
+            return 1
+        print(f"PASS: {args.outlet_key} verified {'ON' if result.actual_state else 'OFF'}")
+        return 0
+    finally:
+        manager.close()
+
+
+def cmd_power_pulse(args: argparse.Namespace) -> int:
+    cfg, error = _load_power_config()
+    if error or cfg is None:
+        print(f"Power command unavailable: {error}", file=sys.stderr)
+        return 1
+    if args.outlet_key != "water":
+        print("Pulse is currently supported only for the water outlet.", file=sys.stderr)
+        return 1
+    if args.seconds <= 0 or args.seconds > WATER_MAX_PULSE_SECONDS:
+        print(f"--seconds must be from 1 to {WATER_MAX_PULSE_SECONDS}.", file=sys.stderr)
+        return 1
+    manager = PowerManager(cfg)
+    try:
+        result = manager._pulse("water", args.seconds)
+        if not result.ok:
+            print(f"FAIL: {result.error_code}: {result.error_message}", file=sys.stderr)
+            return 1
+        print(f"PASS: water pulsed for {args.seconds} second(s) and verified OFF")
+        return 0
+    finally:
+        manager.close()
 
 
 def cmd_sensor_probe(args: argparse.Namespace) -> int:
@@ -643,6 +805,22 @@ def build_parser() -> argparse.ArgumentParser:
     camera_list.add_argument("--json", action="store_true", help="Print structured JSON.")
     camera_list.set_defaults(func=cmd_camera_list)
     camera_sub.add_parser("refresh", help="Run an explicit verified camera inventory refresh and post it to the coordinator.").set_defaults(func=cmd_camera_refresh)
+    power_parser = sub.add_parser("power", help="Greenhouse power diagnostics and manual outlet control.")
+    power_sub = power_parser.add_subparsers(dest="power_command", required=True)
+    power_probe = power_sub.add_parser("probe", help="Inspect Kasa power configuration, credentials, connectivity, and outlet aliases.")
+    power_probe.add_argument("--json", action="store_true", help="Print structured JSON.")
+    power_probe.set_defaults(func=cmd_power_probe)
+    power_sub.add_parser("status", help="Read current configured outlet states.").set_defaults(func=cmd_power_status)
+    power_on = power_sub.add_parser("on", help="Turn a non-water outlet on and verify actual state.")
+    power_on.add_argument("outlet_key", choices=["fans", "lights", "water"])
+    power_on.set_defaults(func=cmd_power_on_off, action="on")
+    power_off = power_sub.add_parser("off", help="Turn an outlet off and verify actual state.")
+    power_off.add_argument("outlet_key", choices=["fans", "lights", "water"])
+    power_off.set_defaults(func=cmd_power_on_off, action="off")
+    power_pulse = power_sub.add_parser("pulse", help="Pulse the water outlet for a bounded duration and verify OFF.")
+    power_pulse.add_argument("outlet_key", choices=["water"])
+    power_pulse.add_argument("--seconds", type=int, required=True)
+    power_pulse.set_defaults(func=cmd_power_pulse)
     sensor_parser = sub.add_parser("sensor", help="Environmental sensor diagnostics.")
     sensor_sub = sensor_parser.add_subparsers(dest="sensor_command", required=True)
     sensor_probe_parser = sensor_sub.add_parser("probe", help="Inspect GPIO and DHT22 backend readiness without reading a sensor.")

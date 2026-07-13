@@ -113,10 +113,13 @@ KASA_USERNAME=
 KASA_PASSWORD=
 ```
 
-This stage does not install `python-kasa`, connect to Kasa devices, control
-outlets, or run automation rules. Planned Kasa runtime support requires
-Python 3.11 or newer; `plantlab doctor --node <ssh-host>` reports the
-remote Python readiness status when power control is configured.
+When Kasa power is configured, `plantlab node attach <ssh-host>` installs
+the tested `python-kasa` Git dependency only on that edge node. Credentials
+stay in `greenhouse.env`; they are never sent to the coordinator.
+
+PlantLab supports manual outlet inventory/state reporting and bounded
+manual commands. It does not run climate automation, schedules, or project
+assignment logic yet.
 
 ## Environmental telemetry
 
@@ -186,6 +189,45 @@ camera captures. Uploads are batched to `POST /api/agents/environment`,
 acknowledged events are retained briefly and then cleaned up, and failed
 uploads retry with backoff. Repeated identical diagnostics are rate-limited
 so a broken sensor does not fill the spool every polling cycle.
+
+## Kasa power control
+
+Kasa support is explicit and capability-gated. Camera-only nodes do not
+install `python-kasa`. Greenhouse nodes with `power.provider = "kasa"` use:
+
+```text
+python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb
+```
+
+Useful diagnostics and manual commands:
+
+```sh
+plantlab-edge power probe
+plantlab-edge power probe --json
+plantlab-edge power status
+plantlab-edge power on fans
+plantlab-edge power off fans
+plantlab-edge power on lights
+plantlab-edge power off lights
+plantlab-edge power pulse water --seconds 10
+```
+
+`power probe` reports provider, host, credential-file presence, driver
+readiness, authentication result, detected device information, configured
+logical outlets, resolved Kasa aliases, and actual outlet state. It never
+prints credential values.
+
+The edge agent reports actual observed outlet state to
+`POST /api/agents/power/state` and polls
+`GET /api/agents/power/commands/next` independently from camera jobs and
+sensor sampling. Kasa connection failures do not stop camera capture or
+environmental telemetry.
+
+Water is safety-limited on the node. `plantlab-edge power on water` is
+rejected; use `power pulse water --seconds N`. The hard maximum pulse is
+120 seconds. The runtime turns water OFF in a `finally` path and verifies
+OFF after a pulse. At startup, if the water outlet is unexpectedly ON, the
+edge agent forces it OFF and reports the resulting state/error.
 
 ## DHT22 wiring
 

@@ -31,6 +31,8 @@ if (typeof window !== "undefined") {
 }
 
 const REMOTE_EDGE_AGENT_DIR = "plantlab-edge-agent";
+const PINNED_KASA_SPEC = "python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb";
+const PINNED_KASA_COMMIT = "8b1f6b8c40588584f5d89df37e4610e2ece9a8cb";
 
 export type EdgeAttachTimeoutPolicy = {
   lowResource: boolean;
@@ -939,4 +941,135 @@ if grep -R 'PLANTLAB_GREENHOUSE_SENSOR_DRIVER=mock' "$home_dir/.config/systemd/u
 fi
 `.replace("__MODE__", shellQuote(mode));
   return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 20_000 });
+}
+
+export type RemoteKasaSupportStatus = {
+  ok: boolean;
+  dependencyAvailable: boolean;
+  pinnedCommitInstalled: boolean;
+  probeReady: boolean;
+  credentialFilePresent: boolean;
+  credentialKeysPresent: boolean;
+  detail: string;
+  raw?: unknown;
+};
+
+export async function inspectRemoteKasaSupport(sshHost: string, options: { timeoutMs?: number } = {}): Promise<RemoteKasaSupportStatus> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+probe_json=""
+if command -v bash >/dev/null 2>&1; then
+  probe_json="$(bash -lc 'plantlab-edge power probe --json' 2>/dev/null || true)"
+fi
+if [ -z "$probe_json" ] && [ -x "$home_dir/.local/bin/plantlab-edge" ]; then
+  probe_json="$("$home_dir/.local/bin/plantlab-edge" power probe --json 2>/dev/null || true)"
+fi
+direct_url="$(python3 - <<'PY' 2>/dev/null || true
+import importlib.metadata as md
+try:
+    dist = md.distribution("python-kasa")
+    print(dist.read_text("direct_url.json") or "")
+except Exception:
+    pass
+PY
+)"
+python3 - "$probe_json" "$direct_url" <<'PY'
+import json, sys
+probe_json, direct_url = sys.argv[1:3]
+payload = {"probe": None, "probeError": None, "directUrl": direct_url}
+try:
+    payload["probe"] = json.loads(probe_json) if probe_json.strip() else None
+except Exception as exc:
+    payload["probeError"] = str(exc)
+print(json.dumps(payload))
+PY
+`;
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 30_000 }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    status: 255,
+  }));
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      dependencyAvailable: false,
+      pinnedCommitInstalled: false,
+      probeReady: false,
+      credentialFilePresent: false,
+      credentialKeysPresent: false,
+      detail: (result.stderr.trim() || "Could not inspect Kasa support.").slice(0, 2000),
+    };
+  }
+  let parsed: { probe?: Record<string, unknown> | null; probeError?: string | null; directUrl?: string } = {};
+  try {
+    parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
+  } catch {
+    parsed = {};
+  }
+  const probe = parsed.probe ?? null;
+  const credentialFile = probe?.credentialFile && typeof probe.credentialFile === "object" && !Array.isArray(probe.credentialFile) ? (probe.credentialFile as Record<string, unknown>) : {};
+  const directUrl = typeof parsed.directUrl === "string" ? parsed.directUrl : "";
+  const dependencyAvailable = probe?.driverImportReady === true;
+  const pinnedCommitInstalled = directUrl.includes(PINNED_KASA_COMMIT);
+  return {
+    ok: Boolean(probe),
+    dependencyAvailable,
+    pinnedCommitInstalled,
+    probeReady: probe?.ready === true,
+    credentialFilePresent: credentialFile.present === true,
+    credentialKeysPresent: credentialFile.hasKasaUsername === true && credentialFile.hasKasaPassword === true,
+    detail:
+      typeof probe?.errorMessage === "string"
+        ? probe.errorMessage
+        : probe?.ready === true
+          ? "Kasa power backend is ready."
+          : parsed.probeError || "plantlab-edge power probe did not report readiness.",
+    raw: probe ?? parsed,
+  };
+}
+
+export async function installRemoteKasaSupport(sshHost: string, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -eu
+spec=__SPEC__
+commit=__COMMIT__
+if python3 - <<'PY' "$commit" >/dev/null 2>&1
+import importlib.metadata as md
+import sys
+commit = sys.argv[1]
+dist = md.distribution("python-kasa")
+direct = dist.read_text("direct_url.json") or ""
+raise SystemExit(0 if commit in direct else 2)
+PY
+then
+  echo "python-kasa pinned commit already installed."
+  exit 0
+fi
+if ! python3 -m pip --version >/dev/null 2>&1; then
+  echo "python3 -m pip is required to install python-kasa." >&2
+  exit 78
+fi
+python3 -m pip install --user --upgrade "$spec"
+python3 - <<'PY' "$commit"
+import importlib.metadata as md
+import sys
+commit = sys.argv[1]
+dist = md.distribution("python-kasa")
+direct = dist.read_text("direct_url.json") or ""
+if commit not in direct:
+    raise SystemExit("python-kasa installed, but pinned git commit was not recorded")
+import kasa
+for attr in ("Device", "DeviceConfig", "Credentials"):
+    if not hasattr(kasa, attr):
+        raise SystemExit(f"python-kasa missing required API: {attr}")
+print("python-kasa pinned backend ready.")
+PY
+`
+    .replace("__SPEC__", shellQuote(PINNED_KASA_SPEC))
+    .replace("__COMMIT__", shellQuote(PINNED_KASA_COMMIT));
+  return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 180_000 });
 }

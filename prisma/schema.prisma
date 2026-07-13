@@ -457,6 +457,8 @@ model PlantLabNode {
   credentials       NodeCredential[]
   cameras           NodeCamera[]
   sensors           NodeSensor[]
+  outlets           NodeOutlet[]
+  powerCommands     PowerCommand[]
   sensorReadings    SensorReading[]
   sensorDiagnostics SensorDiagnostic[]
   assignments       NodeCameraAssignment[]
@@ -464,6 +466,63 @@ model PlantLabNode {
 
   @@index([role])
   @@index([lastHeartbeatAt])
+}
+
+model NodeOutlet {
+  id                   String   @id @default(cuid())
+  nodeId               String
+  key                  String
+  name                 String
+  provider             String
+  providerAlias        String
+  enabled              Boolean  @default(true)
+  safetyClass          String   @default("switch")
+  actualState          Boolean?
+  stateObservedAt      DateTime?
+  available            Boolean  @default(false)
+  lastErrorCode        String?
+  lastErrorMessage     String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  node     PlantLabNode  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  commands PowerCommand[]
+
+  @@unique([nodeId, key])
+  @@index([nodeId])
+  @@index([available])
+}
+
+model PowerCommand {
+  id              String    @id @default(cuid())
+  nodeId          String
+  outletId        String?
+  outletKey       String
+  action          String
+  durationSeconds Int?
+  status          String    @default("pending")
+  requestedAt     DateTime  @default(now())
+  availableAt     DateTime  @default(now())
+  claimedAt       DateTime?
+  completedAt     DateTime?
+  expiresAt       DateTime
+  attemptCount    Int       @default(0)
+  idempotencyKey  String?
+  errorCode       String?
+  errorMessage    String?
+  actualState     Boolean?
+  stateObservedAt DateTime?
+  requestedBy     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  node   PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  outlet NodeOutlet?  @relation(fields: [outletId], references: [id], onDelete: SetNull)
+
+  @@unique([nodeId, idempotencyKey])
+  @@index([nodeId, status, availableAt])
+  @@index([nodeId, outletKey, status])
+  @@index([expiresAt])
 }
 
 model NodeSensor {

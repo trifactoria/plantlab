@@ -13,7 +13,9 @@ import {
   edgeAgentInstallChangeStatus,
   inspectRemoteDht22Support,
   inspectEdgeAgentService,
+  inspectRemoteKasaSupport,
   installRemoteDht22Support,
+  installRemoteKasaSupport,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteEdgeAgentConfig,
@@ -1036,6 +1038,53 @@ async function runEdgeAgentAttach(input: {
     steps.complete("Sensor driver mode", "Skipped.");
   }
 
+  if (role === "greenhouse-node" && greenhouseSelection?.power?.provider === "kasa") {
+    console.log("Checking Kasa power backend...");
+    let kasa = await inspectRemoteKasaSupport(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+    if (!kasa.dependencyAvailable || !kasa.pinnedCommitInstalled) {
+      console.log(`Kasa runtime backend: ${kasa.dependencyAvailable ? "wrong version" : "missing"} (${kasa.detail})`);
+      if (await confirmOrYes("Install or update Kasa runtime support? [Y/n] ", options.yes, true)) {
+        const installKasa = await installRemoteKasaSupport(sshHost, { timeoutMs: timeoutPolicy.installMs }).catch((error) => ({
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+          status: 124,
+        }));
+        if (installKasa.status !== 0) {
+          steps.fail("Kasa backend", (installKasa.stderr.trim() || installKasa.stdout.trim() || "Kasa backend installation failed.").slice(0, 2000));
+          await restoreStoppedService();
+          printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+          process.exitCode = 1;
+          return;
+        }
+        kasa = await inspectRemoteKasaSupport(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+      }
+    }
+    if (!kasa.dependencyAvailable || !kasa.pinnedCommitInstalled) {
+      steps.fail("Kasa backend", "Pinned python-kasa dependency is not installed.");
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!kasa.credentialFilePresent || !kasa.credentialKeysPresent) {
+      steps.fail("Kasa backend", "Kasa credential file is missing or incomplete.");
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!kasa.probeReady) {
+      steps.fail("Kasa backend", kasa.detail || "Kasa power probe did not verify configured outlets.");
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    steps.complete("Kasa backend", "Pinned python-kasa backend ready and configured outlets verified.");
+  } else if (role === "greenhouse-node") {
+    steps.complete("Kasa backend", "Skipped; Kasa power is not configured.");
+  }
+
   console.log("Starting edge agent...");
   const heartbeatSince = new Date();
   const serviceStart = await startEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => ({
@@ -1268,6 +1317,7 @@ const ATTACH_STEP_ORDER = [
   "Greenhouse secrets",
   "DHT22 backend",
   "Sensor driver mode",
+  "Kasa backend",
   "Service start",
   "Heartbeat",
   "Camera inventory refresh",

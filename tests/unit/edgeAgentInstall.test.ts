@@ -9,7 +9,9 @@ import {
   edgeAgentInstallChangeStatus,
   inspectRemoteDht22Support,
   inspectEdgeAgentService,
+  inspectRemoteKasaSupport,
   installRemoteDht22Support,
+  installRemoteKasaSupport,
   localEdgeAgentVersion,
   readInstalledEdgeAgentVersion,
   readRemoteGreenhouseSecretStatus,
@@ -273,6 +275,76 @@ exit 0
     const result = await installRemoteDht22Support("greenhouse-zero");
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("DHT22 backend already ready.");
+  });
+
+  it("inspects remote Kasa backend readiness without exposing credentials", async () => {
+    const wrapperDir = path.join(remoteHome.home, ".local", "bin");
+    await mkdir(wrapperDir, { recursive: true });
+    const fakePlantlabEdge = `#!/bin/sh
+if [ "$1" = "power" ] && [ "$2" = "probe" ] && [ "$3" = "--json" ]; then
+cat <<'JSON'
+{
+  "provider": "kasa",
+  "host": "192.168.1.72",
+  "credentialFile": {"path": "/home/pi/.config/plantlab/greenhouse.env", "present": true, "hasKasaUsername": true, "hasKasaPassword": true},
+  "driverImportReady": true,
+  "authentication": "successful",
+  "device": "KP303(US)",
+  "encryption": "KLAP",
+  "loginVersion": "2",
+  "configuredOutlets": {"fans":"greenhouse-fans"},
+  "outlets": [{"key":"fans","providerAlias":"greenhouse-fans","actualState":false,"available":true}],
+  "missingAliases": [],
+  "ready": true
+}
+JSON
+  exit 0
+fi
+exit 1
+`;
+    await writeFile(path.join(fakeBin, "plantlab-edge"), fakePlantlabEdge, { mode: 0o755 });
+    await writeFile(path.join(wrapperDir, "plantlab-edge"), fakePlantlabEdge, { mode: 0o755 });
+    await writeFile(
+      path.join(fakeBin, "python3"),
+      `#!/bin/sh
+tmp="$(mktemp)"
+cat > "$tmp"
+if grep -q 'distribution("python-kasa")' "$tmp"; then
+  rm -f "$tmp"
+  printf '{"url":"https://github.com/python-kasa/python-kasa.git","vcs_info":{"commit_id":"8b1f6b8c40588584f5d89df37e4610e2ece9a8cb"}}\\n'
+  exit 0
+fi
+/usr/bin/python3 "$@" < "$tmp"
+status=$?
+rm -f "$tmp"
+exit "$status"
+`,
+      { mode: 0o755 },
+    );
+
+    const status = await inspectRemoteKasaSupport("greenhouse-zero");
+
+    expect(status.ok).toBe(true);
+    expect(status.dependencyAvailable).toBe(true);
+    expect(status.pinnedCommitInstalled).toBe(true);
+    expect(status.probeReady).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("KASA_PASSWORD");
+  });
+
+  it("skips Kasa dependency installation when pinned python-kasa is already installed", async () => {
+    await writeFile(
+      path.join(fakeBin, "python3"),
+      `#!/bin/sh
+cat >/dev/null
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const result = await installRemoteKasaSupport("greenhouse-zero");
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("python-kasa pinned commit already installed.");
   });
 
   it("selects extended attach timeouts for ARMv6 and low-memory nodes with environment overrides", () => {

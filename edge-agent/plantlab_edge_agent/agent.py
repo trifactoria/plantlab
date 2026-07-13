@@ -29,6 +29,7 @@ from .camera_inventory import (
     write_camera_inventory_cache,
 )
 from .protocol import AgentProtocolClient, ProtocolError
+from .power.runtime import PowerManager, poll_and_execute_power_command, upload_power_state
 from .sensors.runtime import EnvironmentalSensorManager, selected_driver_mode
 from .spool import Spool
 
@@ -242,10 +243,11 @@ def run_loop(stop_check=lambda: False) -> None:
     spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
     spool.init()
     sensors = EnvironmentalSensorManager.from_config(cfg)
+    power = PowerManager(cfg)
     logger.info("PlantLab edge agent starting: coordinator=%s spool=%s", cfg.coordinator_url, cfg.spool_root)
     if cfg.sensors or cfg.power:
         logger.info(
-            "Greenhouse hardware config loaded: sensors=%d power=%s sensor_driver=%s; Kasa drivers are not enabled in this implementation stage.",
+            "Greenhouse hardware config loaded: sensors=%d power=%s sensor_driver=%s",
             len(cfg.sensors),
             cfg.power.provider if cfg.power else "not configured",
             selected_driver_mode(),
@@ -277,6 +279,8 @@ def run_loop(stop_check=lambda: False) -> None:
     next_sensor_sample_at = now if sensors.runtimes else float("inf")
     next_environment_upload_at = now
     next_capture_upload_at = now
+    next_power_command_poll_at = now if power.enabled else float("inf")
+    next_power_state_refresh_at = now if power.enabled else float("inf")
     next_cleanup_at = now + max(60, cfg.spool_cleanup_interval_seconds)
     try:
         while not stopping["value"] and not stop_check():
@@ -296,6 +300,12 @@ def run_loop(stop_check=lambda: False) -> None:
             if now >= next_capture_upload_at:
                 process_uploads(cfg, client, spool)
                 next_capture_upload_at = now + max(1, cfg.poll_interval_seconds)
+            if now >= next_power_state_refresh_at:
+                upload_power_state(cfg, client, power, startup=power.last_state_upload_at <= 0)
+                next_power_state_refresh_at = now + max(1, cfg.power_state_refresh_interval_seconds)
+            if now >= next_power_command_poll_at:
+                poll_and_execute_power_command(cfg, client, power)
+                next_power_command_poll_at = now + max(1, cfg.power_command_poll_interval_seconds)
             if now >= next_environment_upload_at:
                 process_environment_uploads(cfg, client, sensors, spool)
                 next_environment_upload_at = now + max(1, cfg.environment_upload_interval_seconds)
@@ -314,12 +324,15 @@ def run_loop(stop_check=lambda: False) -> None:
                 next_sensor_sample_at,
                 next_environment_upload_at,
                 next_capture_upload_at,
+                next_power_command_poll_at,
+                next_power_state_refresh_at,
                 next_cleanup_at,
             )
             sleep_for = max(0.0, min(MAX_IDLE_SLEEP_SECONDS, next_due - time.monotonic()))
             if sleep_for > 0:
                 time.sleep(sleep_for)
     finally:
+        power.close()
         sensors.close()
         spool.close()
     logger.info("PlantLab edge agent stopped")

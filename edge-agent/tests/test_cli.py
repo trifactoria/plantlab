@@ -213,3 +213,76 @@ def test_sensor_mode_writes_systemd_dropin(monkeypatch, tmp_path, capsys):
     assert "Sensor driver mode set to dht22" in capsys.readouterr().out
     assert not (dropin_dir / "greenhouse-mock.conf").exists()
     assert "PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22" in (dropin_dir / "greenhouse-sensor-driver.conf").read_text()
+
+
+def test_power_probe_does_not_print_credentials(monkeypatch, isolated_config, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url="http://coordinator",
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["relay", "fan"],
+            power=config.GreenhousePowerConfig(provider="kasa", host="192.168.1.72", outlets={"fans": "greenhouse-fans"}),
+        )
+    )
+    config.GREENHOUSE_SECRET_PATH.write_text('KASA_USERNAME="user@example.com"\nKASA_PASSWORD="secret"\n')
+
+    class FakeKasaDriver:
+        detected_model = "KP303(US)"
+        detected_encryption = "KLAP"
+        detected_login_version = "2"
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def connect(self):
+            return None
+
+        def list_outlets(self):
+            return {"fans": False}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli, "KasaPowerDriver", FakeKasaDriver)
+    monkeypatch.setattr(cli, "kasa_dependency_available", lambda: True)
+
+    assert cli.main(["power", "probe"]) == 0
+    output = capsys.readouterr().out
+    assert "KP303" in output
+    assert "greenhouse-fans" in output
+    assert "user@example.com" not in output
+    assert "secret" not in output
+
+
+def test_power_status_and_manual_water_on_rejection(monkeypatch, isolated_config, capsys):
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url="http://coordinator",
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["relay", "pump"],
+            power=config.GreenhousePowerConfig(provider="kasa", host="192.168.1.72", outlets={"water": "greenhouse-water"}),
+        )
+    )
+
+    class FakeManager:
+        def __init__(self, _cfg):
+            pass
+
+        def refresh_states(self):
+            from plantlab_edge_agent.power.models import OutletState, utc_now
+
+            return [OutletState("water", "Water", "kasa", "greenhouse-water", True, "water", False, utc_now(), True)]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cli, "PowerManager", FakeManager)
+
+    assert cli.main(["power", "status"]) == 0
+    assert "greenhouse-water" in capsys.readouterr().out
+    assert cli.main(["power", "on", "water"]) == 1
+    assert "Water outlets do not permit unbounded ON" in capsys.readouterr().err

@@ -1,6 +1,6 @@
 import pytest
 
-from plantlab_edge_agent.protocol import AgentProtocolClient, PROTOCOL_VERSION, ProtocolError, Job
+from plantlab_edge_agent.protocol import AgentProtocolClient, PROTOCOL_VERSION, ProtocolError, Job, PowerCommand
 
 
 def test_heartbeat_reports_runtime_and_protocol_version(fake_coordinator):
@@ -59,6 +59,47 @@ def test_environment_telemetry_round_trip(fake_coordinator):
 
     assert result["acceptedEventIds"] == ["env-1"]
     assert fake_coordinator["state"].environment_batches == [{"nodeName": "greenhouse-zero", "events": [event]}]
+
+
+def test_power_state_round_trip(fake_coordinator):
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    outlet = {
+        "key": "fans",
+        "name": "Fans",
+        "provider": "kasa",
+        "providerAlias": "greenhouse-fans",
+        "enabled": True,
+        "safetyClass": "switch",
+        "actualState": False,
+        "stateObservedAt": "2026-07-13T15:30:00Z",
+        "available": True,
+        "lastErrorCode": None,
+        "lastErrorMessage": None,
+    }
+
+    result = client.post_power_state("greenhouse-zero", [outlet])
+
+    assert result["acceptedOutlets"] == ["fans"]
+    assert fake_coordinator["state"].power_states == [{"nodeName": "greenhouse-zero", "outlets": [outlet]}]
+
+
+def test_power_command_protocol_flow(fake_coordinator):
+    fake_coordinator["state"].next_power_command_queue.append(
+        {"id": "power-1", "outletKey": "fans", "action": "on", "durationSeconds": None, "expiresAt": "2026-07-13T15:35:00Z"}
+    )
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+
+    command = client.next_power_command()
+    assert isinstance(command, PowerCommand)
+    assert command.outlet_key == "fans"
+    client.claim_power_command(command.id)
+    client.complete_power_command(command.id, True, "2026-07-13T15:30:01Z")
+    client.fail_power_command("power-2", "power-transport-error", "safe message", None, "2026-07-13T15:30:02Z")
+
+    state = fake_coordinator["state"]
+    assert state.power_claimed == ["power-1"]
+    assert state.power_completed == [{"commandId": "power-1", "actualState": True, "stateObservedAt": "2026-07-13T15:30:01Z"}]
+    assert state.power_failed == [{"commandId": "power-2", "errorCode": "power-transport-error", "errorMessage": "safe message", "actualState": None, "stateObservedAt": "2026-07-13T15:30:02Z"}]
 
 
 def test_next_job_returns_none_when_queue_is_empty(fake_coordinator):
