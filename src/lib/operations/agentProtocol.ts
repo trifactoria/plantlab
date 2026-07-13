@@ -12,8 +12,14 @@ export type AgentCameraInventoryItem = {
   devicePath: string;
   name?: string | null;
   formats?: CameraFormat[];
+  formatsStatus?: "ok" | "unavailable" | "error";
+  formatsError?: string | null;
   available?: boolean;
 };
+
+function countModes(formats: CameraFormat[]) {
+  return formats.reduce((sum, format) => sum + format.resolutions.length, 0);
+}
 
 export async function requireAgentAuth(prisma: PrismaClient, request: Request): Promise<AuthenticatedNode | Response> {
   const auth = await authenticateNodeCredential(prisma, request.headers.get("authorization"));
@@ -74,6 +80,12 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
     if (!stableId) {
       continue;
     }
+    const nextFormats = normalizeCameraFormats(camera.formats ?? []);
+    const shouldUseEmptyFormats =
+      nextFormats.length > 0 || camera.formatsStatus === "ok" || camera.formatsStatus === "unavailable";
+    const existing = await prisma.nodeCamera.findUnique({ where: { nodeId_stableId: { nodeId, stableId } } });
+    const existingFormats = existing ? normalizeCameraFormats(parseStoredFormats(existing.formatsJson)) : [];
+    const formatsForWrite = shouldUseEmptyFormats || existingFormats.length === 0 ? nextFormats : existingFormats;
     seenStableIds.add(stableId);
     upserted.push(
       await prisma.nodeCamera.upsert({
@@ -83,14 +95,14 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
           stableId,
           devicePath: camera.devicePath,
           name: camera.name ?? null,
-          formatsJson: JSON.stringify(normalizeCameraFormats(camera.formats ?? [])),
+          formatsJson: JSON.stringify(formatsForWrite),
           available: camera.available ?? true,
           lastSeenAt: now,
         },
         update: {
           devicePath: camera.devicePath,
           name: camera.name ?? null,
-          formatsJson: JSON.stringify(normalizeCameraFormats(camera.formats ?? [])),
+          formatsJson: JSON.stringify(formatsForWrite),
           available: camera.available ?? true,
           lastSeenAt: now,
         },
@@ -98,15 +110,59 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
     );
   }
 
-  await prisma.nodeCamera.updateMany({
-    where: {
-      nodeId,
-      stableId: { notIn: Array.from(seenStableIds) },
-    },
-    data: { available: false },
-  });
+  await Promise.all([
+    prisma.nodeCamera.updateMany({
+      where: {
+        nodeId,
+        stableId: { notIn: Array.from(seenStableIds) },
+      },
+      data: { available: false },
+    }),
+    prisma.plantLabNode.update({
+      where: { id: nodeId },
+      data: {
+        lastInventoryAt: now,
+        inventoryRefreshRequestedAt: null,
+      },
+    }),
+  ]);
 
   return upserted;
+}
+
+function parseStoredFormats(formatsJson: string | null): CameraFormat[] {
+  if (!formatsJson) return [];
+  try {
+    const parsed = JSON.parse(formatsJson);
+    return Array.isArray(parsed) ? (parsed as CameraFormat[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function inventoryDiagnosticsForCamera(camera: { formatsJson: string | null; lastSeenAt: Date | null }) {
+  const formats = normalizeCameraFormats(parseStoredFormats(camera.formatsJson));
+  return {
+    lastInventoryReceivedAt: camera.lastSeenAt,
+    formatsReceivedCount: formats.length,
+    modesReceivedCount: countModes(formats),
+    formatsJsonEmpty: formats.length === 0,
+  };
+}
+
+export async function requestCameraInventoryRefresh(prisma: PrismaClient, nodeName: string) {
+  return prisma.plantLabNode.update({
+    where: { name: nodeName },
+    data: { inventoryRefreshRequestedAt: new Date() },
+  });
+}
+
+export async function getInventoryRefreshRequest(prisma: PrismaClient, nodeId: string) {
+  const node = await prisma.plantLabNode.findUniqueOrThrow({
+    where: { id: nodeId },
+    select: { inventoryRefreshRequestedAt: true },
+  });
+  return node.inventoryRefreshRequestedAt;
 }
 
 export async function nextQueuedJob(prisma: PrismaClient, nodeId: string) {

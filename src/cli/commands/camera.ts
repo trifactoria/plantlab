@@ -9,6 +9,7 @@ import {
   renameCaptureSource,
 } from "../../lib/operations/captureSourceDoctor";
 import { runCameraTestCapture } from "../../lib/operations/doctor";
+import { inventoryDiagnosticsForCamera, requestCameraInventoryRefresh } from "../../lib/operations/agentProtocol";
 import { attachNodeCamera, firstSupportedMode, listNodeCameras } from "../../lib/operations/nodeCameras";
 import { prisma } from "../../lib/prisma";
 import { discoverLocalCameras } from "../../lib/v4l2";
@@ -47,6 +48,92 @@ type CameraAttachOptions = {
   prompt?: (question: string) => Promise<string>;
   interactive?: boolean;
 };
+
+type NodeCameraListOptions = { node?: string; verbose?: boolean; json?: boolean };
+
+function formatPixelFormat(pixelFormat: string) {
+  if (pixelFormat === "mjpeg") return "MJPEG";
+  if (pixelFormat === "yuyv422") return "YUYV";
+  return pixelFormat.toUpperCase();
+}
+
+function modeLines(camera: { formats: Array<{ pixelFormat: string; resolutions: Array<{ width: number; height: number; frameRates: string[] }> }> }) {
+  return camera.formats.flatMap((format) =>
+    format.resolutions.map((resolution) => {
+      const fps = resolution.frameRates.length > 0 ? ` @ ${resolution.frameRates.join(", ")}` : "";
+      return `${formatPixelFormat(format.pixelFormat)} ${resolution.width}x${resolution.height}${fps}`;
+    }),
+  );
+}
+
+function nodeInventoryJson(nodes: Awaited<ReturnType<typeof listNodeCameras>>) {
+  return nodes.map((node) => ({
+    id: node.id,
+    name: node.name,
+    hostname: node.hostname,
+    status: node.status,
+    runtime: node.runtime,
+    protocolVersion: node.protocolVersion,
+    softwareVersion: node.softwareVersion,
+    lastHeartbeatAt: node.lastHeartbeatAt,
+    lastInventoryAt: node.lastInventoryAt,
+    inventoryRefreshRequestedAt: node.inventoryRefreshRequestedAt,
+    cameras: node.cameras.map((camera) => ({
+      id: camera.id,
+      name: camera.name,
+      stableId: camera.stableId,
+      devicePath: camera.devicePath,
+      available: camera.available,
+      captureSourceId: camera.captureSourceId,
+      lastSeenAt: camera.lastSeenAt,
+      diagnostics: inventoryDiagnosticsForCamera(camera),
+      formats: camera.formats,
+      modes: modeLines(camera),
+    })),
+  }));
+}
+
+function printNodeCameraInventory(nodes: Awaited<ReturnType<typeof listNodeCameras>>, options: { verbose?: boolean } = {}) {
+  if (nodes.length === 0) {
+    console.log("No matching registered node found.");
+    return;
+  }
+  for (const node of nodes) {
+    console.log(`Node: ${node.name}`);
+    console.log(`  Runtime: ${node.runtime ?? "(unknown)"}${node.softwareVersion ? ` ${node.softwareVersion}` : ""}`);
+    console.log(`  Protocol: ${node.protocolVersion ?? "(unknown)"}`);
+    console.log(`  Last heartbeat: ${node.lastHeartbeatAt?.toISOString() ?? "(never)"}`);
+    console.log(`  Last inventory: ${node.lastInventoryAt?.toISOString() ?? "(never)"}`);
+    if (node.inventoryRefreshRequestedAt) {
+      console.log(`  Refresh requested: ${node.inventoryRefreshRequestedAt.toISOString()}`);
+    }
+    if (node.cameras.length === 0) {
+      console.log("  No cameras reported yet.");
+      continue;
+    }
+    node.cameras.forEach((camera, index) => {
+      const diagnostics = inventoryDiagnosticsForCamera(camera);
+      console.log(`\n${index + 1}. ${camera.name ?? "Unknown camera"}`);
+      console.log(`   Device: ${camera.devicePath}`);
+      console.log(`   Stable ID: ${camera.stableId}`);
+      console.log(`   Status: ${camera.available ? "available" : "not seen recently"}`);
+      console.log(`   Last inventory received: ${diagnostics.lastInventoryReceivedAt?.toISOString() ?? "(never)"}`);
+      console.log(`   Formats: ${diagnostics.formatsReceivedCount}; modes: ${diagnostics.modesReceivedCount}; formatsJson empty: ${diagnostics.formatsJsonEmpty ? "yes" : "no"}`);
+      if (camera.formats.length > 0) {
+        console.log("   Modes:");
+        for (const line of modeLines(camera)) {
+          console.log(`     ${line}`);
+        }
+      } else {
+        console.log("   Modes: (none stored)");
+      }
+      if (options.verbose) {
+        console.log(`   Raw formatsJson bytes: ${camera.formatsJson?.length ?? 0}`);
+        console.log(`   Capture source: ${camera.captureSourceId ?? "(none)"}`);
+      }
+    });
+  }
+}
 
 async function ask(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -271,42 +358,76 @@ Examples:
     .command("list")
     .description("List cameras discovered on this machine via v4l2-ctl")
     .option("--node <name>", "List camera inventory last reported by a registered node")
+    .option("--verbose", "Show inventory diagnostics and stored modes")
     .option("--json", "Print structured JSON")
-    .action(async (options: { node?: string; json?: boolean }) => {
+    .action(async (options: NodeCameraListOptions) => {
       if (options.node) {
         const nodes = await listNodeCameras(prisma, options.node);
         if (options.json) {
-          console.log(JSON.stringify(nodes, null, 2));
+          console.log(JSON.stringify(nodeInventoryJson(nodes), null, 2));
           return;
         }
-        if (nodes.length === 0) {
-          console.log(`No registered node named "${options.node}".`);
-          return;
-        }
-        for (const node of nodes) {
-          console.log(`Node: ${node.name}`);
-          if (node.cameras.length === 0) {
-            console.log("  No cameras reported yet. Start the remote agent or run plantlab node attach again.");
-            continue;
-          }
-          node.cameras.forEach((camera, index) => {
-            console.log(`\n${index + 1}. ${camera.name ?? "Unknown camera"}`);
-            console.log(`   Device: ${camera.devicePath}`);
-            console.log(`   Stable ID: ${camera.stableId}`);
-            console.log(`   Status: ${camera.available ? "available" : "not seen recently"}`);
-            if (camera.formats.length > 0) {
-              console.log("   Formats:");
-              for (const format of camera.formats) {
-                for (const resolution of format.resolutions) {
-                  console.log(`     ${format.pixelFormat.toUpperCase()} ${resolution.width}x${resolution.height}`);
-                }
-              }
-            }
-          });
-        }
+        if (nodes.length === 0) console.log(`No registered node named "${options.node}".`);
+        else printNodeCameraInventory(nodes, { verbose: options.verbose });
         return;
       }
       await listCameras();
+    });
+
+  camera
+    .command("info")
+    .description("Show stored camera inventory diagnostics for a registered node")
+    .requiredOption("--node <name>", "Registered node name, e.g. greenhouse-zero")
+    .option("--json", "Print structured JSON")
+    .action(async (options: { node: string; json?: boolean }) => {
+      const nodes = await listNodeCameras(prisma, options.node);
+      if (options.json) {
+        console.log(JSON.stringify(nodeInventoryJson(nodes), null, 2));
+        return;
+      }
+      if (nodes.length === 0) {
+        console.log(`No registered node named "${options.node}".`);
+        process.exitCode = 1;
+        return;
+      }
+      printNodeCameraInventory(nodes, { verbose: true });
+    });
+
+  camera
+    .command("refresh")
+    .description("Request an immediate camera inventory refresh from a registered node and print the resulting stored modes")
+    .requiredOption("--node <name>", "Registered node name, e.g. greenhouse-zero")
+    .option("--timeout-ms <ms>", "How long to wait for a newer inventory report", (value) => Number(value), 45_000)
+    .option("--poll-ms <ms>", "Polling interval while waiting", (value) => Number(value), 1500)
+    .option("--json", "Print structured JSON")
+    .action(async (options: { node: string; timeoutMs: number; pollMs: number; json?: boolean }) => {
+      const before = await prisma.plantLabNode.findUnique({ where: { name: options.node } });
+      if (!before) {
+        console.log(`No registered node named "${options.node}".`);
+        process.exitCode = 1;
+        return;
+      }
+      const requested = await requestCameraInventoryRefresh(prisma, options.node);
+      const started = Date.now();
+      let current = requested;
+      while (Date.now() - started < options.timeoutMs) {
+        current = await prisma.plantLabNode.findUniqueOrThrow({ where: { id: requested.id } });
+        if (current.lastInventoryAt && current.lastInventoryAt > requested.inventoryRefreshRequestedAt!) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, options.pollMs));
+      }
+
+      const nodes = await listNodeCameras(prisma, options.node);
+      if (options.json) {
+        console.log(JSON.stringify({ refreshed: current.inventoryRefreshRequestedAt === null, requestedAt: requested.inventoryRefreshRequestedAt, nodes: nodeInventoryJson(nodes) }, null, 2));
+      } else {
+        if (current.inventoryRefreshRequestedAt !== null) {
+          console.log(`Timed out waiting for ${options.node} to report fresh inventory. Current stored inventory follows.`);
+        }
+        printNodeCameraInventory(nodes, { verbose: true });
+      }
+      if (current.inventoryRefreshRequestedAt !== null) process.exitCode = 1;
     });
 
   camera

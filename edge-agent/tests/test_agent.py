@@ -29,7 +29,19 @@ def test_run_heartbeat_and_inventory_reports_discovered_cameras(tmp_path, fake_c
 
     state = fake_coordinator["state"]
     assert len(state.heartbeats) == 1
-    assert state.camera_reports == [[{"stableId": "usb:1:2:3", "devicePath": "/dev/video0", "name": "Test Cam", "available": True, "formats": formats}]]
+    assert state.camera_reports == [
+        [
+            {
+                "stableId": "usb:1:2:3",
+                "devicePath": "/dev/video0",
+                "name": "Test Cam",
+                "available": True,
+                "formats": formats,
+                "formatsStatus": "unknown",
+                "formatsError": None,
+            }
+        ]
+    ]
 
 
 def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(tmp_path, fake_coordinator):
@@ -46,7 +58,17 @@ def test_run_heartbeat_and_inventory_reports_unverified_devices_as_unavailable(t
 
     state = fake_coordinator["state"]
     assert state.camera_reports == [
-        [{"stableId": "platform:bcm2835-codec-decode", "devicePath": "/dev/video10", "name": "bcm2835-codec-decode", "available": False, "formats": []}]
+        [
+            {
+                "stableId": "platform:bcm2835-codec-decode",
+                "devicePath": "/dev/video10",
+                "name": "bcm2835-codec-decode",
+                "available": False,
+                "formats": [],
+                "formatsStatus": "unknown",
+                "formatsError": None,
+            }
+        ]
     ]
 
 

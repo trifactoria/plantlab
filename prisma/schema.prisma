@@ -447,6 +447,10 @@ model PlantLabNode {
   runtime         String?
   /// The agent protocol version this node last reported - see docs/AGENT_PROTOCOL.md.
   protocolVersion String?
+  /// Last time this node sent a camera inventory report to the coordinator.
+  lastInventoryAt DateTime?
+  /// Set by the coordinator CLI/UI to ask the agent to send inventory immediately on its next poll.
+  inventoryRefreshRequestedAt DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

@@ -35,6 +35,8 @@ class CameraInfo:
     stable_id: Optional[str]
     supports_capture: bool = True
     formats: List[Dict[str, object]] = field(default_factory=list)
+    formats_status: str = "unknown"
+    formats_error: Optional[str] = None
     alternate_devices: List[str] = field(default_factory=list)
     # Part 5: whether a real, short ffmpeg one-frame capture actually
     # succeeded on this device - never assume reported V4L2 capabilities
@@ -85,8 +87,18 @@ def discover_cameras(probe_capture: bool = True) -> List[CameraInfo]:
         name = _v4l2_card_name(device)
         stable_id = _stable_id_for_device(device)
         supports_capture = _supports_capture(device)
-        formats = _list_camera_formats(device) if supports_capture else []
-        cameras.append(CameraInfo(device=device, name=name, stable_id=stable_id, supports_capture=supports_capture, formats=formats))
+        formats, formats_status, formats_error = _list_camera_formats(device) if supports_capture else ([], "unavailable", None)
+        cameras.append(
+            CameraInfo(
+                device=device,
+                name=name,
+                stable_id=stable_id,
+                supports_capture=supports_capture,
+                formats=formats,
+                formats_status=formats_status,
+                formats_error=formats_error,
+            )
+        )
 
     return _verify_camera_groups(cameras) if probe_capture else _group_physical_cameras(cameras)
 
@@ -214,11 +226,14 @@ def _normalize_input_format(input_format: str) -> str:
     return normalized or "mjpeg"
 
 
-def _list_camera_formats(device: str) -> List[Dict[str, object]]:
-    result = subprocess.run(["v4l2-ctl", "--device", device, "--list-formats-ext"], capture_output=True, text=True, timeout=5)
+def _list_camera_formats(device: str) -> Tuple[List[Dict[str, object]], str, Optional[str]]:
+    try:
+        result = subprocess.run(["v4l2-ctl", "--device", device, "--list-formats-ext"], capture_output=True, text=True, timeout=5)
+    except Exception as exc:
+        return [], "error", str(exc)
     if result.returncode != 0:
-        return []
-    return _parse_formats_output(result.stdout)
+        return [], "error", result.stderr.strip()[:500] or f"v4l2-ctl exited with code {result.returncode}"
+    return _parse_formats_output(result.stdout), "ok", None
 
 
 def _parse_formats_output(output: str) -> List[Dict[str, object]]:

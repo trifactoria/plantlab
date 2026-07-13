@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from plantlab_edge_agent import camera
+from plantlab_edge_agent import __main__ as edge_cli
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -43,6 +44,50 @@ def test_discover_cameras_reports_name_and_stable_id_when_tools_available():
         assert len(cameras) == 1
         assert cameras[0].name == "Logitech C270"
         assert cameras[0].stable_id == "usb:046d:0825:ABC123"
+
+
+def test_edge_camera_list_verbose_and_json_show_modes_and_probe_details(capsys):
+    formats = [
+        {
+            "pixelFormat": "mjpeg",
+            "description": "Motion-JPEG",
+            "resolutions": [{"width": 1920, "height": 1080, "frameRates": ["30 fps"]}],
+        },
+        {
+            "pixelFormat": "yuyv422",
+            "description": "YUYV 4:2:2",
+            "resolutions": [{"width": 640, "height": 480, "frameRates": ["30 fps"]}],
+        },
+    ]
+    fake_camera = camera.CameraInfo(
+        device="/dev/video0",
+        name="Greenhouse Camera",
+        stable_id="usb:greenhouse-zero",
+        supports_capture=True,
+        verified_capture=True,
+        verified_format={"pixelFormat": "mjpeg", "width": 1920, "height": 1080},
+        formats=formats,
+        formats_status="ok",
+        alternate_devices=["/dev/video1"],
+        alternate_probe_errors={"/dev/video1": "metadata-only device"},
+    )
+
+    with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
+        assert edge_cli.main(["camera", "list", "--verbose"]) == 0
+    verbose = capsys.readouterr().out
+    assert "Physical camera: usb:greenhouse-zero" in verbose
+    assert "Primary device: /dev/video0" in verbose
+    assert "Verified probe mode: MJPEG 1920x1080" in verbose
+    assert "/dev/video1 - probe failed: metadata-only device" in verbose
+    assert "MJPEG 1920x1080 @ 30 fps" in verbose
+    assert "YUYV 640x480 @ 30 fps" in verbose
+
+    with patch.object(camera, "discover_cameras", return_value=[fake_camera]):
+        assert edge_cli.main(["camera", "list", "--json"]) == 0
+    json_output = capsys.readouterr().out
+    assert '"physicalCamera": "usb:greenhouse-zero"' in json_output
+    assert '"verifiedPrimaryDevice": "/dev/video0"' in json_output
+    assert '"pixelFormat": "mjpeg"' in json_output
 
 
 def test_discover_cameras_groups_duplicate_video_nodes_and_prefers_capture_node():
@@ -124,6 +169,62 @@ def test_parse_formats_output_preserves_mjpg_and_yuyv_families():
             "pixelFormat": "yuyv422",
             "description": "YUYV 4:2:2",
             "resolutions": [{"width": 640, "height": 480, "frameRates": ["30.000 fps"]}],
+        },
+    ]
+
+
+def test_parse_formats_output_preserves_greenhouse_zero_recorded_inventory():
+    formats = camera._parse_formats_output(
+        "\n".join(
+            [
+                "[0]: 'MJPG' (Motion-JPEG)",
+                "  Size: Discrete 1920x1080",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 1280x720",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 800x600",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 640x480",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 640x360",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "[1]: 'YUYV' (YUYV 4:2:2)",
+                "  Size: Discrete 1920x1080",
+                "    Interval: Discrete 0.200s (5.000 fps)",
+                "  Size: Discrete 1280x720",
+                "    Interval: Discrete 0.100s (10.000 fps)",
+                "  Size: Discrete 800x600",
+                "    Interval: Discrete 0.050s (20.000 fps)",
+                "  Size: Discrete 640x480",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+                "  Size: Discrete 640x360",
+                "    Interval: Discrete 0.033s (30.000 fps)",
+            ]
+        )
+    )
+
+    assert formats == [
+        {
+            "pixelFormat": "mjpeg",
+            "description": "Motion-JPEG",
+            "resolutions": [
+                {"width": 1920, "height": 1080, "frameRates": ["30.000 fps"]},
+                {"width": 1280, "height": 720, "frameRates": ["30.000 fps"]},
+                {"width": 800, "height": 600, "frameRates": ["30.000 fps"]},
+                {"width": 640, "height": 480, "frameRates": ["30.000 fps"]},
+                {"width": 640, "height": 360, "frameRates": ["30.000 fps"]},
+            ],
+        },
+        {
+            "pixelFormat": "yuyv422",
+            "description": "YUYV 4:2:2",
+            "resolutions": [
+                {"width": 1920, "height": 1080, "frameRates": ["5.000 fps"]},
+                {"width": 1280, "height": 720, "frameRates": ["10.000 fps"]},
+                {"width": 800, "height": 600, "frameRates": ["20.000 fps"]},
+                {"width": 640, "height": 480, "frameRates": ["30.000 fps"]},
+                {"width": 640, "height": 360, "frameRates": ["30.000 fps"]},
+            ],
         },
     ]
 

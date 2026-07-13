@@ -224,20 +224,85 @@ def cmd_credential_check(_args: argparse.Namespace) -> int:
 
 def cmd_inventory(_args: argparse.Namespace) -> int:
     cameras = camera.discover_cameras()
-    print(json.dumps([{"device": c.device, "name": c.name, "stableId": c.stable_id} for c in cameras], indent=2))
+    print(json.dumps([_camera_to_dict(c) for c in cameras], indent=2))
     return 0
 
 
-def cmd_camera_list(_args: argparse.Namespace) -> int:
+def _camera_to_dict(c: camera.CameraInfo) -> dict:
+    return {
+        "name": c.name,
+        "stableId": c.stable_id,
+        "physicalCamera": c.stable_id or f"device:{c.device}",
+        "verifiedPrimaryDevice": c.device,
+        "supportsCapture": c.supports_capture,
+        "available": c.verified_capture,
+        "verifiedCapture": c.verified_capture,
+        "verifiedProbeMode": c.verified_format,
+        "captureProbeError": c.capture_probe_error,
+        "formatsStatus": c.formats_status,
+        "formatsError": c.formats_error,
+        "formats": c.formats,
+        "alternateDevices": [
+            {
+                "device": device,
+                "probeFailure": c.alternate_probe_errors.get(device),
+            }
+            for device in c.alternate_devices
+        ],
+    }
+
+
+def _format_label(pixel_format: str) -> str:
+    normalized = (pixel_format or "").lower()
+    if normalized == "mjpeg":
+        return "MJPEG"
+    if normalized == "yuyv422":
+        return "YUYV"
+    return normalized.upper()
+
+
+def cmd_camera_list(args: argparse.Namespace) -> int:
     cameras = camera.discover_cameras()
+    if args.json:
+        print(json.dumps([_camera_to_dict(c) for c in cameras], indent=2))
+        return 0
     if not cameras:
         print("No cameras discovered.")
         return 0
     for idx, c in enumerate(cameras, start=1):
         print(f"{idx}. {c.name or 'Unknown camera'}")
+        print(f"   Physical camera: {c.stable_id or f'device:{c.device}'}")
         print(f"   Primary device: {c.device}")
         print(f"   Stable ID: {c.stable_id or '(none)'}")
         print(f"   Capture-capable: {'yes' if c.supports_capture else 'no'}")
+        print(f"   Verified capture: {'yes' if c.verified_capture else 'no'}")
+        if c.verified_format:
+            print(
+                "   Verified probe mode: "
+                f"{_format_label(str(c.verified_format.get('pixelFormat')))} "
+                f"{c.verified_format.get('width')}x{c.verified_format.get('height')}"
+            )
+        if c.capture_probe_error:
+            print(f"   Probe error: {c.capture_probe_error}")
+        if c.alternate_devices:
+            print("   Alternate devices:")
+            for device in c.alternate_devices:
+                failure = c.alternate_probe_errors.get(device)
+                print(f"     {device}{f' - probe failed: {failure}' if failure else ''}")
+        if args.verbose:
+            print(f"   Formats status: {c.formats_status}{f' ({c.formats_error})' if c.formats_error else ''}")
+            if c.formats:
+                print("   Advertised modes:")
+                for fmt in c.formats:
+                    resolutions = fmt.get("resolutions") if isinstance(fmt, dict) else []
+                    for resolution in resolutions if isinstance(resolutions, list) else []:
+                        if not isinstance(resolution, dict):
+                            continue
+                        frame_rates = resolution.get("frameRates")
+                        fps = f" @ {', '.join(str(rate) for rate in frame_rates)}" if isinstance(frame_rates, list) and frame_rates else ""
+                        print(f"     {_format_label(str(fmt.get('pixelFormat')))} {resolution.get('width')}x{resolution.get('height')}{fps}")
+            else:
+                print("   Advertised modes: (none)")
     return 0
 
 
@@ -298,7 +363,10 @@ def build_parser() -> argparse.ArgumentParser:
     config_show.set_defaults(func=cmd_config_show)
     camera_parser = sub.add_parser("camera", help="Camera diagnostics.")
     camera_sub = camera_parser.add_subparsers(dest="camera_command", required=True)
-    camera_sub.add_parser("list", help="List locally discovered cameras.").set_defaults(func=cmd_camera_list)
+    camera_list = camera_sub.add_parser("list", help="List locally discovered cameras.")
+    camera_list.add_argument("--verbose", action="store_true", help="Show all advertised formats, modes, frame rates, and probe details.")
+    camera_list.add_argument("--json", action="store_true", help="Print structured JSON.")
+    camera_list.set_defaults(func=cmd_camera_list)
     service_parser = sub.add_parser("service", help="Manage the local edge service.")
     service_sub = service_parser.add_subparsers(dest="service_command", required=True)
     service_sub.add_parser("status", help="Show systemd user service status.").set_defaults(func=cmd_service_status)

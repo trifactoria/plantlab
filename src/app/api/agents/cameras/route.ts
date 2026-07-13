@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { requireAgentAuth, updateCameraInventory, type AgentCameraInventoryItem } from "@/lib/operations/agentProtocol";
+import {
+  inventoryDiagnosticsForCamera,
+  requireAgentAuth,
+  updateCameraInventory,
+  type AgentCameraInventoryItem,
+} from "@/lib/operations/agentProtocol";
 import { prisma } from "@/lib/prisma";
 
 export async function POST(request: Request) {
@@ -18,6 +23,11 @@ export async function POST(request: Request) {
   return NextResponse.json({
     status: "ok",
     cameras: saved.length,
+    inventory: saved.map((camera) => ({
+      stableId: camera.stableId,
+      devicePath: camera.devicePath,
+      ...inventoryDiagnosticsForCamera(camera),
+    })),
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
       name: assignment.name,

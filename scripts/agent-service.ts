@@ -61,22 +61,43 @@ async function postHeartbeat(coordinatorUrl: string, token: string, configRole: 
 
 async function postCameraInventory(coordinatorUrl: string, token: string) {
   const cameras = await Promise.all(
-    (await discoverLocalCameras()).map(async (camera) => ({
-      stableId: camera.stableId ?? camera.device,
-      devicePath: camera.device,
-      name: camera.name,
-      // A real, ffmpeg-verified capture (Part 5), not just V4L2 metadata
-      // claiming "Video Capture" support - metadata alone is what let a
-      // Raspberry Pi's non-camera hardware codec/ISP devices (each its own
-      // stable-ID group) show up as if they were selectable cameras.
-      available: camera.verifiedCapture === true,
-      formats: camera.formats ?? (await listCameraFormats(camera.device).catch(() => [])),
-    })),
+    (await discoverLocalCameras()).map(async (camera) => {
+      let formats = camera.formats ?? [];
+      let formatsStatus: "ok" | "unavailable" | "error" = camera.supportsCapture ? "ok" : "unavailable";
+      let formatsError: string | null = null;
+      if (!camera.formats && camera.supportsCapture) {
+        try {
+          formats = await listCameraFormats(camera.device);
+        } catch (error) {
+          formats = [];
+          formatsStatus = "error";
+          formatsError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      return {
+        stableId: camera.stableId ?? camera.device,
+        devicePath: camera.device,
+        name: camera.name,
+        // A real, ffmpeg-verified capture (Part 5), not just V4L2 metadata
+        // claiming "Video Capture" support - metadata alone is what let a
+        // Raspberry Pi's non-camera hardware codec/ISP devices (each its own
+        // stable-ID group) show up as if they were selectable cameras.
+        available: camera.verifiedCapture === true,
+        formats,
+        formatsStatus,
+        formatsError,
+      };
+    }),
   );
   return requestJson(`${coordinatorUrl}/api/agents/cameras`, token, {
     method: "POST",
     body: JSON.stringify({ cameras }),
   });
+}
+
+async function inventoryRefreshRequested(coordinatorUrl: string, token: string) {
+  const response = (await requestJson(`${coordinatorUrl}/api/agents/cameras/refresh`, token, { method: "GET" })) as { requested?: boolean };
+  return response.requested === true;
 }
 
 async function uploadRecord(coordinatorUrl: string, token: string, record: SpoolRecord) {
@@ -199,6 +220,9 @@ async function main() {
     while (!stopping) {
       await postHeartbeat(config.coordinatorUrl, token, config.role).catch((error) => log("warn", "Heartbeat failed", { error: String(error) }));
       await postCameraInventory(config.coordinatorUrl, token).catch((error) => log("warn", "Camera inventory failed", { error: String(error) }));
+      if (await inventoryRefreshRequested(config.coordinatorUrl, token).catch(() => false)) {
+        await postCameraInventory(config.coordinatorUrl, token).catch((error) => log("warn", "Camera inventory refresh failed", { error: String(error) }));
+      }
       await pollAndRunJob(config.coordinatorUrl, token, spool).catch((error) => log("warn", "Job poll failed", { error: String(error) }));
       await processUploads(config.coordinatorUrl, token, spool);
       await spool.cleanupAcknowledged(ACK_RETAIN_MS).catch(() => undefined);

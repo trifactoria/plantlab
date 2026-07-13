@@ -166,6 +166,9 @@ class AgentProtocolClient:
     def post_camera_inventory(self, cameras: List[dict]) -> dict:
         return request_json(self._url("/api/agents/cameras"), self.token, method="POST", body={"cameras": cameras})
 
+    def camera_inventory_refresh_request(self) -> dict:
+        return request_json(self._url("/api/agents/cameras/refresh"), self.token, method="GET")
+
     def next_job(self) -> Optional[Job]:
         result = request_json(self._url("/api/agents/jobs/next"), self.token, method="GET")
         job = result.get("job")

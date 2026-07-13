@@ -76,6 +76,11 @@ export function ShelfLayoutEditor({
   const dragRef = useRef<{ x: number; y: number } | null>(null);
 
   const [formats, setFormats] = useState<CameraFormat[]>([]);
+  const [formatsLoaded, setFormatsLoaded] = useState(false);
+  const [formatRefreshMessage, setFormatRefreshMessage] = useState<string | null>(null);
+  const [formatRefreshError, setFormatRefreshError] = useState<string | null>(null);
+  const [refreshingInventory, setRefreshingInventory] = useState(false);
+  const [allowUnverifiedFallback, setAllowUnverifiedFallback] = useState(false);
   const sourceInputFormat = normalizeCameraInputFormat(source.inputFormat);
   const sourceRaw = transformedDimensions(source.width, source.height, isValidRotation(source.rotation) ? source.rotation : 0);
   const initialRawWidth = source.rawWidth ?? sourceRaw.width;
@@ -135,10 +140,12 @@ export function ShelfLayoutEditor({
   }
 
   async function loadFormats() {
+    setFormatsLoaded(false);
     const response = await fetch(`/api/capture-sources/${source.id}/formats`);
     const payload = (await response.json()) as { formats?: CameraFormat[] };
     const nextFormats = payload.formats ?? [];
     setFormats(nextFormats);
+    setFormatsLoaded(true);
     const nextModes = flattenCameraModes(nextFormats);
     const saved = nextModes.find(
       (mode) => mode.inputFormat === sourceInputFormat && mode.width === initialRawWidth && mode.height === initialRawHeight,
@@ -146,6 +153,26 @@ export function ShelfLayoutEditor({
     const fallback = saved ?? preferredCameraMode(nextFormats) ?? nextModes[0];
     if (fallback) {
       setSelectedModeKey(modeKey(fallback));
+    }
+  }
+
+  async function refreshInventory() {
+    setRefreshingInventory(true);
+    setFormatRefreshMessage(null);
+    setFormatRefreshError(null);
+    try {
+      const response = await fetch(`/api/capture-sources/${source.id}/inventory-refresh`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Could not request camera inventory refresh.");
+      }
+      setFormatRefreshMessage(`Refresh requested from ${payload.nodeName}. Reloading capability data shortly.`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await loadFormats();
+    } catch (error) {
+      setFormatRefreshError(error instanceof Error ? error.message : "Could not request camera inventory refresh.");
+    } finally {
+      setRefreshingInventory(false);
     }
   }
 
@@ -331,6 +358,8 @@ export function ShelfLayoutEditor({
 
   const frameSize = frameWorkingSize ?? { width: source.width, height: source.height };
   const overlapWarning = findOverlappingPairs(viewports).length > 0;
+  const capabilityDataMissing = formatsLoaded && modes.length === 0;
+  const canSaveMode = modes.length > 0 || allowUnverifiedFallback;
 
   return (
     <div className="grid gap-6">
@@ -344,11 +373,14 @@ export function ShelfLayoutEditor({
               data-testid="raw-resolution-select"
               value={selectedModeKey}
               onChange={(event) => setSelectedModeKey(event.target.value)}
+              disabled={capabilityDataMissing && !allowUnverifiedFallback}
             >
-              {modes.length === 0 ? (
+              {modes.length === 0 && allowUnverifiedFallback ? (
                 <option value={selectedModeKey}>
-                  {formatLabel(selectedFormat)} - {selectedRawWidth || source.width}x{selectedRawHeight || source.height}
+                  Unverified fallback - {formatLabel(selectedFormat)} - {selectedRawWidth || source.width}x{selectedRawHeight || source.height}
                 </option>
+              ) : modes.length === 0 ? (
+                <option value={selectedModeKey}>Capability data unavailable</option>
               ) : (
                 modes.map((mode) => (
                   <option key={modeKey(mode)} value={modeKey(mode)}>
@@ -391,6 +423,22 @@ export function ShelfLayoutEditor({
             return `Transformed working frame: ${working.width} x ${working.height}`;
           })()}
         </p>
+        {capabilityDataMissing ? (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950" data-testid="missing-capability-warning">
+            <p className="font-medium">Camera capability data is unavailable.</p>
+            <p className="mt-1">Refresh camera inventory before selecting a verified capture mode.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" className="button-secondary" onClick={refreshInventory} disabled={refreshingInventory}>
+                {refreshingInventory ? "Refreshing..." : "Refresh Inventory"}
+              </button>
+              <button type="button" className="button-secondary" onClick={() => setAllowUnverifiedFallback(true)}>
+                Use Unverified Fallback
+              </button>
+            </div>
+            {formatRefreshMessage ? <p className="mt-2 text-emerald-800">{formatRefreshMessage}</p> : null}
+            {formatRefreshError ? <p className="mt-2 font-medium text-red-700">{formatRefreshError}</p> : null}
+          </div>
+        ) : null}
         {repairMode ? (
           <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950" data-testid="preferred-mode-repair">
             <p>
@@ -417,7 +465,7 @@ export function ShelfLayoutEditor({
 
         {settingsError ? <p className="mt-3 text-sm font-medium text-red-700">{settingsError}</p> : null}
         {settingsMessage ? <p className="mt-3 text-sm font-medium text-emerald-700">{settingsMessage}</p> : null}
-        <button type="button" className="button mt-4" onClick={() => saveSettings()} disabled={savingSettings}>
+        <button type="button" className="button mt-4" onClick={() => saveSettings()} disabled={savingSettings || !canSaveMode}>
           {savingSettings ? "Saving..." : "Save Shelf Camera Settings"}
         </button>
       </div>

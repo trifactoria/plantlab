@@ -65,6 +65,8 @@ def run_heartbeat_and_inventory(cfg: config.EdgeAgentConfig, client: AgentProtoc
                 # were selectable cameras.
                 "available": c.verified_capture is True,
                 "formats": c.formats,
+                "formatsStatus": c.formats_status,
+                "formatsError": c.formats_error,
             }
             for c in cameras
         ]
@@ -111,6 +113,18 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
         except ProtocolError:
             pass
         logger.error("Capture job %s failed: %s", job.id, exc)
+
+
+def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolClient) -> bool:
+    try:
+        refresh = client.camera_inventory_refresh_request()
+    except ProtocolError as exc:
+        logger.warning("Inventory refresh check failed: %s", exc)
+        return False
+    if refresh.get("requested"):
+        run_heartbeat_and_inventory(cfg, client)
+        return True
+    return False
 
 
 def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, spool: Spool) -> None:
@@ -167,6 +181,8 @@ def run_loop(stop_check=lambda: False) -> None:
             now = time.monotonic()
             if now - last_heartbeat >= cfg.heartbeat_interval_seconds:
                 run_heartbeat_and_inventory(cfg, client)
+                last_heartbeat = now
+            elif maybe_refresh_inventory(cfg, client):
                 last_heartbeat = now
             poll_and_run_job(cfg, client, spool)
             process_uploads(cfg, client, spool)

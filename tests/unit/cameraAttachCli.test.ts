@@ -1,8 +1,16 @@
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { updateCameraInventory } from "../../src/lib/operations/agentProtocol";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
 import { runCameraAttachFlow } from "../../src/cli/commands/camera";
+
+const CLI_PATH = path.join(__dirname, "..", "..", "bin", "plantlab");
+
+function runCli(args: string[]) {
+  return spawnSync(CLI_PATH, args, { encoding: "utf8", env: process.env });
+}
 
 describe("camera attach CLI flow", () => {
   it("does not consume destination choice 2 as the new capture-source name", async () => {
@@ -108,5 +116,41 @@ describe("camera attach CLI flow", () => {
 
     expect(result.captureSource.id).toBe(accidental.id);
     expect(result.captureSource.name).toBe("Bokchoy Front Camera");
+  });
+
+  it("prints stored node camera modes and diagnostics in verbose coordinator camera info", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero", role: "greenhouse-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-zero",
+        devicePath: "/dev/video0",
+        name: "Greenhouse Camera",
+        formatsStatus: "ok",
+        formats: [
+          {
+            pixelFormat: "MJPG",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 1920, height: 1080, frameRates: ["30 fps"] },
+              { width: 1280, height: 720, frameRates: ["30 fps"] },
+            ],
+          },
+          {
+            pixelFormat: "YUYV",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30 fps"] }],
+          },
+        ],
+      },
+    ]);
+
+    const result = runCli(["camera", "info", "--node", "greenhouse-zero"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Node: greenhouse-zero");
+    expect(result.stdout).toContain("Last inventory:");
+    expect(result.stdout).toContain("Formats: 2; modes: 3; formatsJson empty: no");
+    expect(result.stdout).toContain("MJPEG 1920x1080 @ 30 fps");
+    expect(result.stdout).toContain("YUYV 640x480 @ 30 fps");
   });
 });

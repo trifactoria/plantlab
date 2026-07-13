@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { claimJob, completeJob, failJob, nextQueuedJob, recordHeartbeat, serializeJobForAgent, updateCameraInventory } from "../../src/lib/operations/agentProtocol";
+import {
+  claimJob,
+  completeJob,
+  failJob,
+  inventoryDiagnosticsForCamera,
+  nextQueuedJob,
+  recordHeartbeat,
+  requestCameraInventoryRefresh,
+  serializeJobForAgent,
+  updateCameraInventory,
+} from "../../src/lib/operations/agentProtocol";
 import { attachNodeCamera, parseNodeCameraFormats } from "../../src/lib/operations/nodeCameras";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
@@ -93,6 +103,133 @@ describe("agent protocol", () => {
         resolutions: [{ width: 640, height: 480, frameRates: ["30.000 fps"] }],
       },
     ]);
+  });
+
+  it("stores greenhouse-zero recorded MJPEG and YUYV inventory as distinct verified mode tuples", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-recorded", role: "greenhouse-node", rotateCredential: true });
+    const [camera] = await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-zero",
+        devicePath: "/dev/video0",
+        name: "greenhouse-zero webcam",
+        formatsStatus: "ok",
+        formats: [
+          {
+            pixelFormat: "MJPG",
+            description: "Motion-JPEG",
+            resolutions: [
+              { width: 1920, height: 1080, frameRates: ["30 fps"] },
+              { width: 1280, height: 720, frameRates: ["30 fps"] },
+              { width: 800, height: 600, frameRates: ["30 fps"] },
+              { width: 640, height: 480, frameRates: ["30 fps"] },
+              { width: 640, height: 360, frameRates: ["30 fps"] },
+            ],
+          },
+          {
+            pixelFormat: "YUYV",
+            description: "YUYV 4:2:2",
+            resolutions: [
+              { width: 1920, height: 1080, frameRates: ["5 fps"] },
+              { width: 1280, height: 720, frameRates: ["10 fps"] },
+              { width: 800, height: 600, frameRates: ["20 fps"] },
+              { width: 640, height: 480, frameRates: ["30 fps"] },
+              { width: 640, height: 360, frameRates: ["30 fps"] },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const formats = parseNodeCameraFormats(camera);
+    expect(formats).toHaveLength(2);
+    expect(formats[0].pixelFormat).toBe("mjpeg");
+    expect(formats[0].resolutions.map((resolution) => `${resolution.width}x${resolution.height}@${resolution.frameRates.join(",")}`)).toEqual([
+      "1920x1080@30 fps",
+      "1280x720@30 fps",
+      "800x600@30 fps",
+      "640x480@30 fps",
+      "640x360@30 fps",
+    ]);
+    expect(formats[1].pixelFormat).toBe("yuyv422");
+    expect(formats[1].resolutions.map((resolution) => `${resolution.width}x${resolution.height}@${resolution.frameRates.join(",")}`)).toEqual([
+      "1920x1080@5 fps",
+      "1280x720@10 fps",
+      "800x600@20 fps",
+      "640x480@30 fps",
+      "640x360@30 fps",
+    ]);
+    expect(inventoryDiagnosticsForCamera(camera)).toMatchObject({
+      formatsReceivedCount: 2,
+      modesReceivedCount: 10,
+      formatsJsonEmpty: false,
+    });
+  });
+
+  it("does not erase a complete stored camera inventory when a later legacy report omits formats", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-empty-regression", role: "greenhouse-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-zero",
+        devicePath: "/dev/video0",
+        name: "greenhouse-zero webcam",
+        formatsStatus: "ok",
+        formats: [
+          {
+            pixelFormat: "MJPG",
+            description: "Motion-JPEG",
+            resolutions: [{ width: 1920, height: 1080, frameRates: ["30 fps"] }],
+          },
+          {
+            pixelFormat: "YUYV",
+            description: "YUYV 4:2:2",
+            resolutions: [{ width: 640, height: 480, frameRates: ["30 fps"] }],
+          },
+        ],
+      },
+    ]);
+
+    const [camera] = await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-greenhouse-zero",
+        devicePath: "/dev/video0",
+        name: "greenhouse-zero webcam",
+        available: true,
+        formats: [],
+      },
+    ]);
+
+    expect(parseNodeCameraFormats(camera)).toEqual([
+      {
+        pixelFormat: "mjpeg",
+        description: "Motion-JPEG",
+        resolutions: [{ width: 1920, height: 1080, frameRates: ["30 fps"] }],
+      },
+      {
+        pixelFormat: "yuyv422",
+        description: "YUYV 4:2:2",
+        resolutions: [{ width: 640, height: 480, frameRates: ["30 fps"] }],
+      },
+    ]);
+  });
+
+  it("clears a pending manual inventory refresh after the node reports inventory", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-refresh", role: "greenhouse-node", rotateCredential: true });
+    const requested = await requestCameraInventoryRefresh(prisma, "greenhouse-zero-refresh");
+    expect(requested.inventoryRefreshRequestedAt).toBeTruthy();
+
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb-refresh",
+        devicePath: "/dev/video0",
+        name: "Refresh Camera",
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1920, height: 1080, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+
+    const node = await prisma.plantLabNode.findUniqueOrThrow({ where: { id: registered.node.id } });
+    expect(node.lastInventoryAt).toBeTruthy();
+    expect(node.inventoryRefreshRequestedAt).toBeNull();
   });
 
   it("records runtime, protocol version, and reported capabilities from a heartbeat (Part 6/8/13)", async () => {

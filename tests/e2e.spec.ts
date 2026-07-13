@@ -183,6 +183,40 @@ test("shelf camera mode picker preserves advertised format-resolution tuples", a
   await expect(page.getByTestId("preferred-mode-repair")).toContainText("Preferred verified mode is available: MJPEG - 3840x2160 - 15.000 fps");
 });
 
+test("shelf camera mode picker warns when capability inventory is missing instead of showing a fake verified fallback", async ({ page }) => {
+  await mockCameraApis(page);
+  await page.route("**/api/capture-sources/*/formats**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ formats: [] }),
+    });
+  });
+  const ids = await seedVisualData();
+  await page.request.patch(`/api/capture-sources/${ids.captureSourceId}`, {
+    data: {
+      width: 640,
+      height: 480,
+      assignmentWidth: 640,
+      assignmentHeight: 480,
+      inputFormat: "mjpeg",
+    },
+  });
+
+  await goto(page, `/capture-sources/${ids.captureSourceId}`);
+
+  await expect(page.getByTestId("missing-capability-warning")).toContainText("Camera capability data is unavailable.");
+  await expect(page.getByRole("button", { name: "Refresh Inventory" })).toBeVisible();
+  await expect(page.getByTestId("raw-resolution-select")).toBeDisabled();
+  await expect(page.getByTestId("raw-resolution-select")).toContainText("Capability data unavailable");
+  await expect(page.getByTestId("raw-resolution-select")).not.toContainText("MJPEG - 640x480");
+  await expect(page.getByRole("button", { name: "Save Shelf Camera Settings" })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Use Unverified Fallback" }).click();
+  await expect(page.getByTestId("raw-resolution-select")).toBeEnabled();
+  await expect(page.getByTestId("raw-resolution-select")).toContainText("Unverified fallback - MJPEG - 640x480");
+});
+
 test("repeated grid entry remembers timestamp/tags and proposes the next name, scoped per project", async ({ page }) => {
   await mockCameraApis(page);
   const ids = await seedVisualData();
