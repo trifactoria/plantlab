@@ -306,7 +306,11 @@ async function syncAppliedSensorRows(tx: Prisma.TransactionClient, nodeId: strin
     });
   }
   await tx.nodeSensor.updateMany({
-    where: { nodeId, key: { notIn: Array.from(activeKeys) }, appliedConfigRevision: { not: revision } },
+    where: {
+      nodeId,
+      key: { notIn: Array.from(activeKeys) },
+      OR: [{ appliedConfigRevision: null }, { appliedConfigRevision: { not: revision } }],
+    },
     data: { configuredActive: false },
   });
 }

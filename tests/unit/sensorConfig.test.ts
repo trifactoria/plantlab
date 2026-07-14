@@ -78,6 +78,33 @@ describe("sensor desired/applied configuration", () => {
     expect(await prisma.sensorReading.count({ where: { sensorId: retired.id } })).toBe(1);
   });
 
+  it("marks historical sensors outside an applied revision inactive", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "sensor-config-stale-row", role: "greenhouse-node", rotateCredential: true });
+    await ingestEnvironmentTelemetry(
+      prisma,
+      registered.node.id,
+      parseEnvironmentBatch(
+        {
+          events: [
+            event({ key: "real", name: "Real", gpio: 4 }, "real-reading"),
+            event({ key: "mock", name: "Mock", gpio: 17 }, "mock-reading"),
+          ],
+        },
+        new Date("2026-07-14T10:01:00.000Z"),
+      ),
+    );
+
+    const revision = await createDesiredSensorConfigRevision(prisma, "sensor-config-stale-row", [
+      { key: "real", name: "Real", type: "dht22", gpio: 4, placement: "top", enabled: true },
+    ]);
+    await reportAppliedSensorConfig(prisma, registered.node.id, { revision: revision.revision, status: "applied" });
+
+    expect((await activeSensorsForNode(prisma, registered.node.id)).map((sensor) => sensor.key)).toEqual(["real"]);
+    const mock = await prisma.nodeSensor.findUniqueOrThrow({ where: { nodeId_key: { nodeId: registered.node.id, key: "mock" } } });
+    expect(mock.configuredActive).toBe(false);
+    expect(mock.appliedConfigRevision).toBeNull();
+  });
+
   it("old nodes without applied revisions use the compatibility fallback", async () => {
     const registered = await registerOrRotateNode(prisma, { name: "sensor-config-fallback", role: "greenhouse-node", rotateCredential: true });
     await ingestEnvironmentTelemetry(
