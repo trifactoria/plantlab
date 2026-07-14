@@ -173,9 +173,19 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
     await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     return;
   }
-  const result = await execFileResult("ssh", [coordinatorHost, "cd /home/andy/projects/plantlab && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 pnpm screenshots"], 120_000);
+  const result = await execFileResult(
+    "ssh",
+    [
+      coordinatorHost,
+      "cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
+    ],
+    120_000,
+  );
   await writeFile(path.join(dir, "live-readonly-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
   manifest.probes.push({ host: coordinatorHost, role: "screenshots", command: "pnpm screenshots live-readonly", ok: result.status === 0, status: result.status, path: path.join(dir, "live-readonly-run.txt") });
+  const copyResult = await execFileResult("scp", ["-r", `${coordinatorHost}:/home/andy/projects/plantlab/artifacts/screenshots`, path.join(dir, "artifacts")], 120_000);
+  await writeFile(path.join(dir, "live-readonly-copy.txt"), redact(`${copyResult.stdout}\n${copyResult.stderr}`));
+  manifest.probes.push({ host: coordinatorHost, role: "screenshots", command: "copy live-readonly screenshots", ok: copyResult.status === 0, status: copyResult.status, path: path.join(dir, "live-readonly-copy.txt") });
 }
 
 async function copyIfExists(from: string, to: string) {

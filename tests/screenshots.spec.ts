@@ -4,6 +4,10 @@ import { expect, test, type Page } from "@playwright/test";
 import { cleanupNodeVisualData, cleanupVisualData, disconnectPrisma, mockCameraApis, NODE_VISUAL_NAME, seedNodeVisualData, seedVisualData } from "./helpers/devData";
 import { goto } from "./helpers/navigation";
 
+if (process.env.PLANTLAB_SCREENSHOTS_LIVE_READONLY === "1") {
+  throw new Error("tests/screenshots.spec.ts mutates fixture data and must never run in live-readonly screenshot mode.");
+}
+
 // Full-suite viewports run every project surface below; "mobile" is scoped
 // to the newer node/operational surfaces only (see the task note this
 // mirrors: the older project screenshot suite stays desktop/laptop only,
