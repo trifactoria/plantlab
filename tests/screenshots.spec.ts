@@ -1,16 +1,22 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { test, type Page } from "@playwright/test";
-import { cleanupVisualData, disconnectPrisma, mockCameraApis, seedVisualData } from "./helpers/devData";
+import { expect, test, type Page } from "@playwright/test";
+import { cleanupNodeVisualData, cleanupVisualData, disconnectPrisma, mockCameraApis, NODE_VISUAL_NAME, seedNodeVisualData, seedVisualData } from "./helpers/devData";
 import { goto } from "./helpers/navigation";
 
+// Full-suite viewports run every project surface below; "mobile" is scoped
+// to the newer node/operational surfaces only (see the task note this
+// mirrors: the older project screenshot suite stays desktop/laptop only,
+// one mobile viewport was added specifically for the new surfaces).
 const viewports = [
-  { name: "desktop", width: 1440, height: 1000 },
-  { name: "laptop", width: 1024, height: 768 },
+  { name: "desktop", width: 1440, height: 1000, scope: "full" as const },
+  { name: "laptop", width: 1024, height: 768, scope: "full" as const },
+  { name: "mobile", width: 390, height: 844, scope: "node-only" as const },
 ];
 
 test.afterEach(async () => {
   await cleanupVisualData();
+  await cleanupNodeVisualData();
 });
 
 test.afterAll(async () => {
@@ -26,13 +32,120 @@ async function capture(page: Page, name: string) {
   });
 }
 
+/**
+ * Coverage manifest for the node/operational surfaces below - keep this in
+ * sync with captureNodeSurfaces() so it stays obvious at a glance which
+ * routes have screenshot coverage without reading the whole capture
+ * sequence. See AGENTS.md / CLAUDE.md: fixture data here is isolated to the
+ * Playwright test database and must never touch the live xps or plantlab
+ * databases - see seedNodeVisualData() in tests/helpers/devData.ts.
+ */
+const nodeSurfaces = [
+  `/nodes/${NODE_VISUAL_NAME}`,
+  `/nodes/${NODE_VISUAL_NAME}/sensors`,
+  `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-outside`,
+  `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-top`,
+  `/nodes/${NODE_VISUAL_NAME}/cameras`,
+  `/nodes/${NODE_VISUAL_NAME}/power`,
+  `/nodes/${NODE_VISUAL_NAME}/activity`,
+] as const;
+
+const projectSurfaces = [
+  "/",
+  "/projects/:projectId",
+  "/projects/:projectId/settings",
+  "/projects/:projectId/camera",
+  "/capture-sources",
+  "/capture-sources/:sourceId",
+  "/projects/:projectId/timeline",
+  "/projects/:projectId/comparison",
+  "/photos/:photoId",
+  "/plants/:plantId",
+  "/projects/:projectId/gallery/:month",
+  "/projects/:projectId/gallery/:month/:day",
+] as const;
+
+/** Home page plus every /nodes/[nodeName]/... operational surface: outlet controls (including Water as an ordinary outlet), charts, sensor/camera/power/activity subsystem pages. See nodeSurfaces above. */
+async function captureNodeSurfaces(page: Page, prefix: string) {
+  await mockCameraApis(page);
+  await seedNodeVisualData();
+
+  await goto(page, "/");
+  await expect(page.getByRole("link", { name: NODE_VISUAL_NAME, exact: true })).toBeVisible();
+  await capture(page, `${prefix}-home-with-node`);
+
+  // Node overview: three normal outlet cards (fans/lights/water), temperature
+  // and humidity charts across sensors at the default 24h range, and the
+  // degraded-sensor summary (Top shelf's intermittent failure). Wait for
+  // real content signals rather than fixed delays - outlets and sensor
+  // status are async client fetches.
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}`);
+  await expect(page.getByRole("button", { name: "Turn Fans on" })).toBeVisible();
+  await expect(page.getByText("Fresh", { exact: true }).first()).toBeVisible();
+  await expect(page.locator("svg.recharts-surface").first()).toBeVisible();
+  await page.waitForTimeout(300);
+  await capture(page, `${prefix}-node-overview-24h`);
+
+  const chartRangeGroup = page.getByRole("group", { name: "Chart range" });
+  await chartRangeGroup.getByRole("button", { name: "7d" }).click();
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(300);
+  await capture(page, `${prefix}-node-overview-7d`);
+
+  // Sensors subsystem list.
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/sensors`);
+  await expect(page.getByRole("link", { name: "Outside" })).toBeVisible();
+  await capture(page, `${prefix}-node-sensors-list`);
+
+  // Healthy sensor detail with complete real-looking history and a
+  // completed sensor-test result (Outside was seeded free of gaps/failures).
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-outside`);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
+  await expect(page.locator("svg.recharts-surface").first()).toBeVisible();
+  await page.waitForTimeout(300);
+  await capture(page, `${prefix}-sensor-detail-healthy`);
+
+  // Failed/intermittent sensor detail (Top shelf's seeded diagnostic story).
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-top`);
+  await expect(page.getByText("Failed", { exact: true }).first()).toBeVisible();
+  await page.waitForTimeout(300);
+  await capture(page, `${prefix}-sensor-detail-intermittent`);
+
+  // Cameras subsystem page - three cameras, one unavailable.
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/cameras`);
+  await expect(page.getByText("Greenhouse Wide")).toBeVisible();
+  await capture(page, `${prefix}-node-cameras`);
+
+  // Power subsystem page - normal outlet controls (Water included) and the
+  // Daily timers table, which also shows a real "Succeeded" schedule
+  // execution status for the seeded Morning lights schedule.
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/power`);
+  await expect(page.getByRole("button", { name: "Turn Water on" })).toBeVisible();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
+  await capture(page, `${prefix}-node-power-outlets-and-schedule-status`);
+
+  // Timer form with Water available as an ordinary schedulable outlet.
+  await page.locator('form:has(h4:has-text("Add a timer")) select').first().selectOption("water");
+  await capture(page, `${prefix}-node-power-timer-form-water`);
+
+  // Node activity timeline (successful and failed power commands, the fired schedule).
+  await goto(page, `/nodes/${NODE_VISUAL_NAME}/activity`);
+  await expect(page.getByText(/fans ON succeeded/i)).toBeVisible();
+  await capture(page, `${prefix}-node-activity-timeline`);
+}
+
 for (const viewport of viewports) {
   test(`screenshots ${viewport.name}`, async ({ page }) => {
-    await mockCameraApis(page);
-    const ids = await seedVisualData();
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const prefix = viewport.name;
 
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    if (viewport.scope === "node-only") {
+      await captureNodeSurfaces(page, prefix);
+      return;
+    }
+
+    await mockCameraApis(page);
+    const ids = await seedVisualData();
 
     await goto(page, "/");
     await capture(page, `${prefix}-home`);
@@ -221,5 +334,7 @@ for (const viewport of viewports) {
 
     await goto(page, `/projects/${ids.projectId}/gallery/2026-07/10`);
     await capture(page, `${prefix}-day-photo-grid`);
+
+    await captureNodeSurfaces(page, prefix);
   });
 }

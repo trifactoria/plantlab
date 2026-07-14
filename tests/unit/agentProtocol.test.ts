@@ -5,6 +5,7 @@ import {
   failJob,
   inventoryDiagnosticsForCamera,
   nextQueuedJob,
+  nextServableJob,
   recordHeartbeat,
   requestCameraInventoryRefresh,
   serializeJobForAgent,
@@ -534,5 +535,88 @@ describe("agent protocol", () => {
     await prisma.nodeCamera.update({ where: { id: attached.camera.id }, data: { available: false, devicePath: "/dev/video0" } });
 
     await expect(serializeJobForAgent(prisma, await nextQueuedJob(prisma, registered.node.id))).resolves.toBeNull();
+  });
+
+  describe("nextServableJob", () => {
+    it("explicitly fails a stale queued job whose camera became unavailable, rather than leaving it queued forever", async () => {
+      const registered = await registerOrRotateNode(prisma, { name: "greenhouse-servable-stale", role: "greenhouse-node", rotateCredential: true });
+      await updateCameraInventory(prisma, registered.node.id, [
+        { stableId: "usb:stale-camera", devicePath: "/dev/video0", name: "Stale Camera", formats: [] },
+      ]);
+      const attached = await attachNodeCamera(prisma, {
+        nodeName: "greenhouse-servable-stale",
+        stableId: "usb:stale-camera",
+        newCaptureSourceName: "Stale Camera Source",
+        width: 1280,
+        height: 720,
+        inputFormat: "mjpeg",
+      });
+      const job = await prisma.agentCaptureJob.create({
+        data: { nodeId: registered.node.id, assignmentId: attached.assignment.id, captureSourceId: attached.captureSource.id },
+      });
+      // Simulates a USB reconnect that shifted the camera to a new physical
+      // path - the coordinator now considers this stableId unavailable.
+      await prisma.nodeCamera.update({ where: { id: attached.camera.id }, data: { available: false } });
+
+      await expect(nextServableJob(prisma, registered.node.id)).resolves.toBeNull();
+
+      const updated = await prisma.agentCaptureJob.findUniqueOrThrow({ where: { id: job.id } });
+      expect(updated.status).toBe("failed");
+      expect(updated.errorMessage).toMatch(/no longer available/i);
+    });
+
+    it("skips a stale unavailable-camera job at the head of the queue and serves the next job behind it", async () => {
+      const registered = await registerOrRotateNode(prisma, { name: "greenhouse-servable-skip", role: "greenhouse-node", rotateCredential: true });
+      await updateCameraInventory(prisma, registered.node.id, [
+        { stableId: "usb:stale-camera", devicePath: "/dev/video0", name: "Stale Camera", formats: [] },
+        { stableId: "usb:fresh-camera", devicePath: "/dev/video2", name: "Fresh Camera", formats: [] },
+      ]);
+      const staleAttached = await attachNodeCamera(prisma, {
+        nodeName: "greenhouse-servable-skip",
+        stableId: "usb:stale-camera",
+        newCaptureSourceName: "Stale Camera Source",
+        width: 1280,
+        height: 720,
+        inputFormat: "mjpeg",
+      });
+      const freshAttached = await attachNodeCamera(prisma, {
+        nodeName: "greenhouse-servable-skip",
+        stableId: "usb:fresh-camera",
+        newCaptureSourceName: "Fresh Camera Source",
+        width: 1280,
+        height: 720,
+        inputFormat: "mjpeg",
+      });
+      // The stale job was queued first (head of the FIFO queue); the fresh
+      // one was queued afterward, e.g. from a later "Capture Test Frame" click.
+      const staleJob = await prisma.agentCaptureJob.create({
+        data: { nodeId: registered.node.id, assignmentId: staleAttached.assignment.id, captureSourceId: staleAttached.captureSource.id },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const freshJob = await prisma.agentCaptureJob.create({
+        data: { nodeId: registered.node.id, assignmentId: freshAttached.assignment.id, captureSourceId: freshAttached.captureSource.id },
+      });
+      await prisma.nodeCamera.update({ where: { id: staleAttached.camera.id }, data: { available: false } });
+
+      // The naive single-job fetch would return the stale job forever and
+      // never reach the fresh one behind it - this is the head-of-line
+      // blocking bug nextServableJob() fixes.
+      const naiveNext = await nextQueuedJob(prisma, registered.node.id);
+      expect(naiveNext?.id).toBe(staleJob.id);
+      await expect(serializeJobForAgent(prisma, naiveNext)).resolves.toBeNull();
+
+      const servable = await nextServableJob(prisma, registered.node.id);
+      expect(servable?.id).toBe(freshJob.id);
+
+      const staleUpdated = await prisma.agentCaptureJob.findUniqueOrThrow({ where: { id: staleJob.id } });
+      expect(staleUpdated.status).toBe("failed");
+      const freshUpdated = await prisma.agentCaptureJob.findUniqueOrThrow({ where: { id: freshJob.id } });
+      expect(freshUpdated.status).toBe("queued");
+    });
+
+    it("returns null when there are no queued jobs at all", async () => {
+      const registered = await registerOrRotateNode(prisma, { name: "greenhouse-servable-empty", role: "greenhouse-node", rotateCredential: true });
+      await expect(nextServableJob(prisma, registered.node.id)).resolves.toBeNull();
+    });
   });
 });

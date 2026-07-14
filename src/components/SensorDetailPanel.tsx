@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatDateTime } from "@/lib/format";
 import { celsiusToFahrenheit, formatAge, sensorStatusTone, SENSOR_STATUS_LABEL } from "@/lib/greenhouseDisplay";
+import { DEFAULT_HISTORY_RANGE, fetchMetricHistory, type HistoryRangeValue, type NormalizedSeries } from "@/lib/metricHistory";
 import { guidanceForCode, intermittentFailureSummary } from "@/lib/sensorDiagnostics";
+import { RangeSelector } from "./charts/RangeSelector";
+import { TimeSeriesCard } from "./charts/TimeSeriesCard";
 
 type SensorEvent = {
   kind: "accepted" | "diagnostic";
@@ -115,6 +118,40 @@ export function SensorDetailPanel({ nodeName, sensorKey }: { nodeName: string; s
   const [testMessage, setTestMessage] = useState<string | null>(null);
   const hasActiveTestRef = useRef(false);
 
+  const [chartRange, setChartRange] = useState<HistoryRangeValue>(DEFAULT_HISTORY_RANGE);
+  const [chartLoading, setChartLoading] = useState(true);
+  const [chartError, setChartError] = useState<string | null>(null);
+  const [temperatureSeries, setTemperatureSeries] = useState<NormalizedSeries[]>([]);
+  const [humiditySeries, setHumiditySeries] = useState<NormalizedSeries[]>([]);
+  const chartLoadedOnce = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setChartLoading(true);
+    setChartError(null);
+    fetchMetricHistory({ nodeName, sensorKeys: [sensorKey], metrics: ["temperatureC", "humidityPct"], range: chartRange }).then((result) => {
+      if (cancelled) return;
+      chartLoadedOnce.current = true;
+      if (!result.ok) {
+        setChartError(result.error);
+        setChartLoading(false);
+        return;
+      }
+      setTemperatureSeries(
+        (result.seriesByMetric.temperatureC ?? []).map((series) => ({
+          ...series,
+          unit: "fahrenheit",
+          points: series.points.map((point) => ({ at: point.at, value: point.value === null ? null : celsiusToFahrenheit(point.value) })),
+        })),
+      );
+      setHumiditySeries(result.seriesByMetric.humidityPct ?? []);
+      setChartLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeName, sensorKey, chartRange]);
+
   const load = useCallback(async () => {
     try {
       const response = await fetch(`/api/nodes/${nodeName}/sensors/${sensorKey}`, { cache: "no-store" });
@@ -195,7 +232,7 @@ export function SensorDetailPanel({ nodeName, sensorKey }: { nodeName: string; s
   const testDisabled = testBusy || activeTest !== null;
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -204,7 +241,7 @@ export function SensorDetailPanel({ nodeName, sensorKey }: { nodeName: string; s
           </div>
           <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${TONE_STYLES[tone]}`}>{SENSOR_STATUS_LABEL[tone]}</span>
         </div>
-        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Type" value={sensor.type} />
           <Field label="Configured BCM GPIO" value={sensor.gpio !== null ? String(sensor.gpio) : "unknown"} />
           <Field label="Placement" value={sensor.placement ?? "(none)"} />
@@ -308,6 +345,32 @@ export function SensorDetailPanel({ nodeName, sensorKey }: { nodeName: string; s
         ) : (
           <p className="mt-2 text-sm text-stone-600">No tests run yet.</p>
         )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-3">
+        <div className="flex items-center justify-end">
+          <RangeSelector value={chartRange} onChange={setChartRange} label="History range" />
+        </div>
+        <TimeSeriesCard
+          title="Temperature history"
+          unit="°F"
+          series={temperatureSeries}
+          range={chartRange}
+          showRangeSelector={false}
+          loading={chartLoading && !chartLoadedOnce.current}
+          error={chartError}
+          emptyMessage="No temperature history yet for this range."
+        />
+        <TimeSeriesCard
+          title="Humidity history"
+          unit="%"
+          series={humiditySeries}
+          range={chartRange}
+          showRangeSelector={false}
+          loading={chartLoading && !chartLoadedOnce.current}
+          error={chartError}
+          emptyMessage="No humidity history yet for this range."
+        />
       </div>
 
       <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">

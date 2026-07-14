@@ -7,6 +7,9 @@
 
 export type EnvironmentSensor = {
   key: string;
+  /** Always present from the environment API - optional here only so existing minimal test fixtures stay valid. */
+  name?: string;
+  enabled?: boolean;
   latestClassification: string | null;
   latestTemperatureC: number | null;
   latestHumidityPct: number | null;
@@ -74,6 +77,29 @@ export function sensorStatusTone(sensor: EnvironmentSensor | null): SensorStatus
 
 export function celsiusToFahrenheit(celsius: number): number {
   return (celsius * 9) / 5 + 32;
+}
+
+const STILL_ACTIVE_WINDOW_MS = 60 * 60_000;
+
+/**
+ * Mirrors the "currently configured" heuristic in getNodeSummary()
+ * (src/lib/operations/nodeDetail.ts): a sensor's own `enabled` flag never
+ * clears just because the edge stops reporting it (e.g. a retired/renamed
+ * sensor), so a sensor whose last attempt is more than an hour older than
+ * the node's most recently attempted sensor is treated as no longer
+ * actually configured, rather than a genuinely healthy or failed current
+ * sensor. Keeps the sensors list page consistent with the node summary
+ * card's counts. See docs/NODE_CONFIGURATION_CONTROL_PLANE.md - this is a
+ * temporary display heuristic, not the long-term source of truth.
+ */
+export function filterCurrentlyActiveSensors<T extends { enabled?: boolean; lastAttemptAt: string | null }>(sensors: T[]): T[] {
+  const attemptTimes = sensors.map((sensor) => (sensor.lastAttemptAt ? new Date(sensor.lastAttemptAt).getTime() : 0));
+  const mostRecentAttempt = attemptTimes.length > 0 ? Math.max(...attemptTimes) : 0;
+  return sensors.filter((sensor) => {
+    if (sensor.enabled === false) return false;
+    const attemptedAt = sensor.lastAttemptAt ? new Date(sensor.lastAttemptAt).getTime() : 0;
+    return attemptedAt >= mostRecentAttempt - STILL_ACTIVE_WINDOW_MS;
+  });
 }
 
 export type EnvironmentSummary = {
@@ -144,4 +170,40 @@ export function formatDaysOfWeek(days: number[]): string {
   if (sorted.length === 7) return "Every day";
   if (sorted.length === 0) return "Never";
   return sorted.map((day) => DAY_LABELS[day] ?? "?").join(", ");
+}
+
+/**
+ * Mirrors src/lib/outletBehavior.ts's OutletBehavior union without importing
+ * that module - it is server-only (throws if evaluated in a browser) and
+ * this file is shared with client components.
+ */
+export type OutletBehaviorValue = "normal" | "pulse-only";
+
+export function canOutletUsePermanentOn(behavior: OutletBehaviorValue): boolean {
+  return behavior === "normal";
+}
+
+export function canOutletPulse(behavior: OutletBehaviorValue): boolean {
+  return behavior === "pulse-only";
+}
+
+/** Friendly labels for the outlets known ahead of time - any other outlet key falls back to its own reported name. */
+const KNOWN_OUTLET_LABELS: Record<string, string> = { fans: "Fans", lights: "Lights", water: "Water" };
+/** Preferred display/menu order for the known outlet keys; anything else sorts after these, alphabetically by key. */
+const KNOWN_OUTLET_ORDER = ["fans", "lights", "water"];
+
+export function outletLabel(outlet: { key: string; name?: string | null }): string {
+  return KNOWN_OUTLET_LABELS[outlet.key] ?? outlet.name ?? outlet.key;
+}
+
+/** Stable outlet ordering: known friendly-labeled outlets first (fans, lights, water), then any additional configured outlets alphabetically by key. */
+export function orderOutlets<T extends { key: string }>(outlets: T[]): T[] {
+  return [...outlets].sort((a, b) => {
+    const aRank = KNOWN_OUTLET_ORDER.indexOf(a.key);
+    const bRank = KNOWN_OUTLET_ORDER.indexOf(b.key);
+    const aOrder = aRank === -1 ? KNOWN_OUTLET_ORDER.length : aRank;
+    const bOrder = bRank === -1 ? KNOWN_OUTLET_ORDER.length : bRank;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return a.key.localeCompare(b.key);
+  });
 }

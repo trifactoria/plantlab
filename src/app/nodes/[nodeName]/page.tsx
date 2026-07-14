@@ -31,7 +31,7 @@ export default async function NodeDetailPage({ params }: { params: Promise<{ nod
       </header>
 
       <section className="section">
-        <div className="container grid gap-6">
+        <div className="container grid grid-cols-1 gap-6">
           <NodeDetailPanel nodeName={nodeName} />
           {hasGreenhouseSubsystems ? <GreenhousePanel nodeName={nodeName} /> : null}
         </div>

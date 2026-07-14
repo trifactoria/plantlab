@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTIVE_GREENHOUSE_SENSORS,
+  canOutletPulse,
+  canOutletUsePermanentOn,
   celsiusToFahrenheit,
   filterActiveSensors,
+  filterCurrentlyActiveSensors,
   formatAge,
   formatDaysOfWeek,
+  orderOutlets,
+  outletLabel,
   sensorStatusTone,
   summarizeEnvironment,
   type EnvironmentSensor,
@@ -120,5 +125,54 @@ describe("formatDaysOfWeek", () => {
     expect(formatDaysOfWeek([0, 1, 2, 3, 4, 5, 6])).toBe("Every day");
     expect(formatDaysOfWeek([])).toBe("Never");
     expect(formatDaysOfWeek([1, 3, 5])).toBe("Mon, Wed, Fri");
+  });
+});
+
+describe("filterCurrentlyActiveSensors", () => {
+  it("excludes a retired sensor whose last attempt is far older than the node's most recent attempt", () => {
+    const sensors = [
+      { key: "greenhouse-outside", enabled: true, lastAttemptAt: "2026-07-14T12:00:00.000Z" },
+      { key: "greenhouse-ambient", enabled: true, lastAttemptAt: "2026-01-01T00:00:00.000Z" },
+    ];
+    const active = filterCurrentlyActiveSensors(sensors);
+    expect(active.map((sensor) => sensor.key)).toEqual(["greenhouse-outside"]);
+  });
+
+  it("excludes any sensor explicitly disabled", () => {
+    const sensors = [
+      { key: "a", enabled: true, lastAttemptAt: "2026-07-14T12:00:00.000Z" },
+      { key: "b", enabled: false, lastAttemptAt: "2026-07-14T12:00:00.000Z" },
+    ];
+    expect(filterCurrentlyActiveSensors(sensors).map((sensor) => sensor.key)).toEqual(["a"]);
+  });
+
+  it("keeps sensors whose last attempts are all close together, even with no attempts yet", () => {
+    const sensors = [
+      { key: "a", enabled: true, lastAttemptAt: null },
+      { key: "b", enabled: true, lastAttemptAt: null },
+    ];
+    expect(filterCurrentlyActiveSensors(sensors).map((sensor) => sensor.key)).toEqual(["a", "b"]);
+  });
+});
+
+describe("outlet behavior display helpers", () => {
+  it("labels known outlets by friendly name and falls back to the reported name for unknown keys", () => {
+    expect(outletLabel({ key: "fans" })).toBe("Fans");
+    expect(outletLabel({ key: "lights" })).toBe("Lights");
+    expect(outletLabel({ key: "water" })).toBe("Water");
+    expect(outletLabel({ key: "co2-injector", name: "CO2 Injector" })).toBe("CO2 Injector");
+    expect(outletLabel({ key: "co2-injector" })).toBe("co2-injector");
+  });
+
+  it("orders known outlets fans/lights/water first, then any others alphabetically by key", () => {
+    const outlets = [{ key: "water" }, { key: "co2-injector" }, { key: "lights" }, { key: "fans" }, { key: "aux-pump" }];
+    expect(orderOutlets(outlets).map((outlet) => outlet.key)).toEqual(["fans", "lights", "water", "aux-pump", "co2-injector"]);
+  });
+
+  it("treats water identically to any other normal outlet - no special-cased safety meaning", () => {
+    expect(canOutletUsePermanentOn("normal")).toBe(true);
+    expect(canOutletPulse("normal")).toBe(false);
+    expect(canOutletUsePermanentOn("pulse-only")).toBe(false);
+    expect(canOutletPulse("pulse-only")).toBe(true);
   });
 });

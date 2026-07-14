@@ -2,6 +2,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import sharp from "sharp";
+import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
+import { ingestPowerState, parsePowerStateReport } from "../../src/lib/operations/powerProtocol";
 import { prisma } from "../../src/lib/prisma";
 
 export const DEV_IDS = {
@@ -355,6 +357,312 @@ export async function cleanupVisualData() {
   await rm(photoDirectory, { recursive: true, force: true }).catch(() => undefined);
   await rm(captureSourceDirectory, { recursive: true, force: true }).catch(() => undefined);
   await rm(sharedProjectDirectory, { recursive: true, force: true }).catch(() => undefined);
+}
+
+// Isolated visual-fixture greenhouse node. Named literally "greenhouse-zero"
+// to match the operational routes under test (/nodes/greenhouse-zero/...),
+// but this row and everything under it lives only in the isolated Playwright
+// test database (see AGENTS.md / CLAUDE.md - automated tests must never
+// touch the live xps or plantlab databases). Every ID here is deterministic
+// so repeated seedNodeVisualData() calls within a single spec stay idempotent.
+export const NODE_VISUAL_NAME = "greenhouse-zero";
+
+const SENSOR_DEFS = [
+  // Outside: coolest and least humid of the four - and deliberately kept
+  // free of gaps/failures so its detail page has complete, real-looking history.
+  { key: "greenhouse-outside", name: "Outside", gpio: 4, placement: "outside", baseTempC: 17, tempAmplitude: 3, baseHumidity: 42, humidityAmplitude: 6 },
+  { key: "greenhouse-bottom", name: "Bottom shelf", gpio: 17, placement: "bottom shelf", baseTempC: 21, tempAmplitude: 2, baseHumidity: 55, humidityAmplitude: 5 },
+  // Middle: warm, and carries the intentional short missing-data gap.
+  { key: "greenhouse-middle", name: "Middle shelf", gpio: 27, placement: "middle shelf", baseTempC: 24, tempAmplitude: 2, baseHumidity: 58, humidityAmplitude: 5 },
+  // Top: most humid, and carries the intermittent-failure diagnostic story.
+  { key: "greenhouse-top", name: "Top shelf", gpio: 22, placement: "top shelf", baseTempC: 25, tempAmplitude: 2, baseHumidity: 68, humidityAmplitude: 6 },
+] as const;
+
+/** Small deterministic pseudo-random-looking jitter in roughly [-1, 1] - avoids identical repeated values without relying on real randomness (fixtures must stay reproducible). */
+function deterministicJitter(seed: number): number {
+  return Math.sin(seed * 12.9898) * 0.5 + Math.sin(seed * 3.727) * 0.5;
+}
+
+/**
+ * Seeds an isolated greenhouse node with a week of distinct, gently-varying
+ * per-sensor history (for the metric history charts), a short intentional
+ * gap, an intermittent sensor failure, normal fans/lights/water outlets,
+ * representative schedules with real execution status, successful and
+ * failed power command history, a completed sensor test, and three cameras.
+ * See tests/screenshots.spec.ts for the surfaces this backs.
+ */
+export async function seedNodeVisualData(now: Date = new Date()) {
+  await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
+  const registered = await registerOrRotateNode(prisma, { name: NODE_VISUAL_NAME, role: "greenhouse-node", rotateCredential: true });
+  const nodeId = registered.node.id;
+
+  const STEP_MS = 30 * 60_000;
+  const SPAN_MS = 7 * 24 * 60 * 60_000;
+  const start = new Date(now.getTime() - SPAN_MS);
+  const gapStart = new Date(now.getTime() - 10 * 60 * 60_000);
+  const gapEnd = new Date(now.getTime() - 8 * 60 * 60_000);
+  const topReadingCutoff = new Date(now.getTime() - 3 * 60 * 60_000);
+
+  for (const def of SENSOR_DEFS) {
+    const sensor = await prisma.nodeSensor.upsert({
+      where: { nodeId_key: { nodeId, key: def.key } },
+      create: { nodeId, key: def.key, name: def.name, type: "dht22", gpio: def.gpio, placement: def.placement, enabled: true, firstSeenAt: start, lastSeenAt: now },
+      update: { name: def.name, type: "dht22", gpio: def.gpio, placement: def.placement, enabled: true, lastSeenAt: now },
+    });
+
+    const readings: { sensorId: string; nodeId: string; eventId: string; capturedAt: Date; temperatureC: number; humidityPct: number }[] = [];
+    const readingEnd = def.key === "greenhouse-top" ? topReadingCutoff.getTime() : now.getTime();
+    let index = 0;
+    let lastReading: { at: Date; temperatureC: number; humidityPct: number } | null = null;
+
+    for (let t = start.getTime(); t <= readingEnd; t += STEP_MS) {
+      const at = new Date(t);
+      if (def.key === "greenhouse-middle" && at >= gapStart && at <= gapEnd) {
+        index += 1;
+        continue;
+      }
+      const dayPhase = (t / (24 * 60 * 60_000)) * 2 * Math.PI;
+      const temperatureC = Math.round((def.baseTempC + Math.sin(dayPhase) * def.tempAmplitude + deterministicJitter(index) * 0.4) * 10) / 10;
+      const humidityPct = Math.max(0, Math.min(100, Math.round((def.baseHumidity + Math.cos(dayPhase) * def.humidityAmplitude + deterministicJitter(index + 1000) * 1.2) * 10) / 10));
+      readings.push({ sensorId: sensor.id, nodeId, eventId: `${def.key}-${index}`, capturedAt: at, temperatureC, humidityPct });
+      lastReading = { at, temperatureC, humidityPct };
+      index += 1;
+    }
+    if (readings.length > 0) {
+      await prisma.sensorReading.createMany({ data: readings });
+    }
+
+    if (def.key === "greenhouse-top") {
+      const diagnosticTimes = [165, 135, 105, 75, 45, 15].map((minutesAgo) => new Date(now.getTime() - minutesAgo * 60_000));
+      const outcomes: Array<{ classification: "accepted" | "failed"; code: string | null; message: string | null }> = [
+        { classification: "accepted", code: null, message: null },
+        { classification: "failed", code: "sensor-no-response", message: "No DHT22 response pulses were received." },
+        { classification: "accepted", code: null, message: null },
+        { classification: "failed", code: "sensor-no-response", message: "No DHT22 response pulses were received." },
+        { classification: "accepted", code: null, message: null },
+        { classification: "failed", code: "sensor-no-response", message: "No DHT22 response pulses were received." },
+      ];
+      let lastAcceptedAt: Date | null = lastReading?.at ?? null;
+      for (let i = 0; i < diagnosticTimes.length; i += 1) {
+        const at = diagnosticTimes[i];
+        const outcome = outcomes[i];
+        if (outcome.classification === "accepted") {
+          const temperatureC = Math.round((def.baseTempC + deterministicJitter(2000 + i) * 0.5) * 10) / 10;
+          const humidityPct = Math.round((def.baseHumidity + deterministicJitter(3000 + i) * 1.5) * 10) / 10;
+          await prisma.sensorReading.create({ data: { sensorId: sensor.id, nodeId, eventId: `${def.key}-diag-${i}`, capturedAt: at, temperatureC, humidityPct } });
+          lastAcceptedAt = at;
+        } else {
+          await prisma.sensorDiagnostic.create({
+            data: { sensorId: sensor.id, nodeId, eventId: `${def.key}-diag-${i}`, capturedAt: at, classification: outcome.classification, code: outcome.code, message: outcome.message, gpio: def.gpio },
+          });
+        }
+      }
+      await prisma.nodeSensor.update({
+        where: { id: sensor.id },
+        data: {
+          latestClassification: "failed",
+          latestTemperatureC: null,
+          latestHumidityPct: null,
+          lastAttemptAt: diagnosticTimes[diagnosticTimes.length - 1],
+          lastAcceptedAt,
+          consecutiveFailures: 1,
+          consecutiveRejects: 0,
+          lastDiagnosticCode: "sensor-no-response",
+          lastDiagnosticMessage: "No DHT22 response pulses were received.",
+        },
+      });
+    } else if (lastReading) {
+      await prisma.nodeSensor.update({
+        where: { id: sensor.id },
+        data: {
+          latestClassification: "accepted",
+          latestTemperatureC: lastReading.temperatureC,
+          latestHumidityPct: lastReading.humidityPct,
+          lastAttemptAt: lastReading.at,
+          lastAcceptedAt: lastReading.at,
+          consecutiveFailures: 0,
+          consecutiveRejects: 0,
+          lastDiagnosticCode: null,
+          lastDiagnosticMessage: null,
+        },
+      });
+    }
+  }
+
+  // Fans, lights, and water are all ordinary "normal" outlets - Water has no
+  // special safety casing (see src/lib/outletBehavior.ts).
+  await ingestPowerState(
+    prisma,
+    nodeId,
+    parsePowerStateReport(
+      {
+        outlets: [
+          {
+            key: "fans",
+            name: "Fans",
+            provider: "kasa",
+            providerAlias: "greenhouse-fans",
+            behavior: "normal",
+            safetyClass: "switch",
+            actualState: true,
+            available: true,
+            stateObservedAt: new Date(now.getTime() - 5 * 60_000).toISOString(),
+          },
+          {
+            key: "lights",
+            name: "Lights",
+            provider: "kasa",
+            providerAlias: "greenhouse-lights",
+            behavior: "normal",
+            safetyClass: "switch",
+            actualState: false,
+            available: true,
+            stateObservedAt: new Date(now.getTime() - 12 * 60 * 60_000).toISOString(),
+          },
+          {
+            key: "water",
+            name: "Water",
+            provider: "kasa",
+            providerAlias: "greenhouse-water",
+            behavior: "normal",
+            safetyClass: "switch",
+            actualState: false,
+            available: true,
+            stateObservedAt: new Date(now.getTime() - 20 * 60 * 60_000).toISOString(),
+          },
+        ],
+      },
+      now,
+    ),
+  );
+
+  // Successful and failed manual command history, for the node timeline.
+  await prisma.powerCommand.create({
+    data: {
+      nodeId,
+      outletKey: "fans",
+      action: "on",
+      status: "succeeded",
+      requestedAt: new Date(now.getTime() - 5 * 60_000),
+      claimedAt: new Date(now.getTime() - 5 * 60_000 + 500),
+      completedAt: new Date(now.getTime() - 5 * 60_000 + 1200),
+      expiresAt: new Date(now.getTime() + 4 * 60_000),
+      actualState: true,
+      stateObservedAt: new Date(now.getTime() - 5 * 60_000 + 1200),
+      requestedBy: "manual",
+    },
+  });
+  await prisma.powerCommand.create({
+    data: {
+      nodeId,
+      outletKey: "lights",
+      action: "on",
+      status: "failed",
+      requestedAt: new Date(now.getTime() - 3 * 60 * 60_000),
+      claimedAt: new Date(now.getTime() - 3 * 60 * 60_000 + 800),
+      completedAt: new Date(now.getTime() - 3 * 60 * 60_000 + 4000),
+      expiresAt: new Date(now.getTime() - 3 * 60 * 60_000 + 5 * 60_000),
+      errorCode: "kasa-connect-failed",
+      errorMessage: "Could not reach the Kasa device on the local network.",
+      requestedBy: "manual",
+    },
+  });
+
+  // A schedule with real, observed execution status (not just "Never run").
+  const scheduleFiredAt = new Date(now.getTime() - 2 * 60 * 60_000);
+  const scheduleCommand = await prisma.powerCommand.create({
+    data: {
+      nodeId,
+      outletKey: "lights",
+      action: "on",
+      status: "succeeded",
+      requestedAt: scheduleFiredAt,
+      claimedAt: new Date(scheduleFiredAt.getTime() + 500),
+      completedAt: new Date(scheduleFiredAt.getTime() + 1500),
+      expiresAt: new Date(scheduleFiredAt.getTime() + 5 * 60_000),
+      actualState: true,
+      stateObservedAt: new Date(scheduleFiredAt.getTime() + 1500),
+      requestedBy: "schedule:seed-morning-lights",
+      idempotencyKey: "schedule:seed-morning-lights:fixture",
+    },
+  });
+  const todayKey = now.toISOString().slice(0, 10);
+  await prisma.powerSchedule.create({
+    data: {
+      nodeId,
+      outletKey: "lights",
+      action: "on",
+      timeOfDay: "07:00",
+      daysOfWeek: "0,1,2,3,4,5,6",
+      timeZone: "America/New_York",
+      label: "Morning lights",
+      enabled: true,
+      lastRunDateKey: todayKey,
+      lastRunAt: scheduleFiredAt,
+      lastRunStatus: "queued",
+      lastCommandId: scheduleCommand.id,
+    },
+  });
+  await prisma.powerSchedule.create({
+    data: { nodeId, outletKey: "lights", action: "off", timeOfDay: "19:00", daysOfWeek: "0,1,2,3,4,5,6", timeZone: "America/New_York", label: "Evening lights off", enabled: true },
+  });
+  await prisma.powerSchedule.create({
+    data: { nodeId, outletKey: "water", action: "on", timeOfDay: "08:00", daysOfWeek: "1,2,3,4,5", timeZone: "America/New_York", label: "Weekday watering", enabled: true },
+  });
+
+  // One completed sensor test result (deterministic - a "running" state
+  // isn't reproducible for a static screenshot without a live edge agent).
+  await prisma.sensorTestCommand.create({
+    data: {
+      nodeId,
+      sensorKey: "greenhouse-outside",
+      status: "succeeded",
+      attemptsRequested: 3,
+      intervalSeconds: 2,
+      requestedAt: new Date(now.getTime() - 30 * 60_000),
+      claimedAt: new Date(now.getTime() - 30 * 60_000 + 500),
+      startedAt: new Date(now.getTime() - 30 * 60_000 + 600),
+      completedAt: new Date(now.getTime() - 30 * 60_000 + 7000),
+      expiresAt: new Date(now.getTime() - 30 * 60_000 + 5 * 60_000),
+      attemptsCompleted: 3,
+      acceptedCount: 3,
+      failedCount: 0,
+      finalPass: true,
+      effectiveDriver: "pigpio",
+      configuredGpio: 4,
+      attemptsJson: JSON.stringify([
+        { attempt: 1, classification: "accepted", code: null, message: null, temperatureC: 18.2, humidityPct: 43.1 },
+        { attempt: 2, classification: "accepted", code: null, message: null, temperatureC: 18.3, humidityPct: 43.0 },
+        { attempt: 3, classification: "accepted", code: null, message: null, temperatureC: 18.1, humidityPct: 43.4 },
+      ]),
+    },
+  });
+
+  // Three cameras, one unavailable.
+  await prisma.nodeCamera.createMany({
+    data: [
+      { nodeId, stableId: "usb:1a2b:3c4d:CAM1", devicePath: "/dev/video0", name: "Greenhouse Wide", vendorId: "1a2b", productId: "3c4d", serial: "CAM1", available: true, lastSeenAt: now },
+      { nodeId, stableId: "usb:1a2b:3c4d:CAM2", devicePath: "/dev/video1", name: "Greenhouse Top Shelf", vendorId: "1a2b", productId: "3c4d", serial: "CAM2", available: true, lastSeenAt: now },
+      {
+        nodeId,
+        stableId: "usb:1a2b:3c4d:CAM3",
+        devicePath: "/dev/video2",
+        name: "Greenhouse Door",
+        vendorId: "1a2b",
+        productId: "3c4d",
+        serial: "CAM3",
+        available: false,
+        lastSeenAt: new Date(now.getTime() - 3 * 24 * 60 * 60_000),
+      },
+    ],
+  });
+
+  return { nodeName: NODE_VISUAL_NAME, nodeId };
+}
+
+/** Cascades to every row created by seedNodeVisualData() via onDelete: Cascade on PlantLabNode's relations. */
+export async function cleanupNodeVisualData() {
+  await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
 }
 
 export async function mockCameraApis(page: Page) {

@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { formatDateTime } from "@/lib/format";
 import { formatAge } from "@/lib/greenhouseDisplay";
+import { NodeTimelinePanel } from "./NodeTimelinePanel";
 
 type NodeSummary = {
   node: {
@@ -31,15 +33,6 @@ type NodeSummary = {
   };
 };
 
-type TimelineEntry = {
-  id: string;
-  at: string;
-  category: "sensors" | "power" | "cameras" | "agent";
-  summary: string;
-  detail: string | null;
-  tone: "info" | "success" | "warning" | "error";
-};
-
 const STATUS_STYLES: Record<NodeSummary["node"]["statusLabel"], string> = {
   active: "bg-emerald-100 text-emerald-900 border-emerald-200",
   pending: "bg-stone-100 text-stone-700 border-stone-200",
@@ -56,29 +49,10 @@ const STATUS_LABEL: Record<NodeSummary["node"]["statusLabel"], string> = {
   revoked: "Revoked",
 };
 
-const TONE_STYLES: Record<TimelineEntry["tone"], string> = {
-  info: "border-stone-200 bg-stone-50 text-stone-700",
-  success: "border-emerald-200 bg-emerald-50 text-emerald-900",
-  warning: "border-amber-200 bg-amber-50 text-amber-900",
-  error: "border-red-200 bg-red-50 text-red-900",
-};
-
-const FILTERS = [
-  { value: "all", label: "All" },
-  { value: "sensors", label: "Sensors" },
-  { value: "power", label: "Power" },
-  { value: "cameras", label: "Cameras" },
-  { value: "agent", label: "Agent/service" },
-] as const;
-
-type FilterValue = (typeof FILTERS)[number]["value"];
-
 const POLL_INTERVAL_MS = 30_000;
 
 export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
   const [summary, setSummary] = useState<NodeSummary | null>(null);
-  const [entries, setEntries] = useState<TimelineEntry[] | null>(null);
-  const [filter, setFilter] = useState<FilterValue>("all");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
@@ -97,25 +71,11 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
     }
   }, [nodeName]);
 
-  const loadTimeline = useCallback(
-    async (nextFilter: FilterValue) => {
-      const response = await fetch(`/api/nodes/${nodeName}/timeline?filter=${nextFilter}`, { cache: "no-store" });
-      if (!response.ok) return;
-      const body = await response.json();
-      setEntries(body.entries);
-    },
-    [nodeName],
-  );
-
   useEffect(() => {
     void loadSummary();
     const interval = window.setInterval(() => void loadSummary(), POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [loadSummary]);
-
-  useEffect(() => {
-    void loadTimeline(filter);
-  }, [filter, loadTimeline]);
 
   async function runAction(name: string, run: () => Promise<string>) {
     setActionBusy(name);
@@ -141,13 +101,13 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
   const { node, cameras, sensors, power, queue } = summary;
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-stone-950">Identity and connectivity</h2>
           <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${STATUS_STYLES[node.statusLabel]}`}>{STATUS_LABEL[node.statusLabel]}</span>
         </div>
-        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Role" value={node.role} />
           <Field label="Hostname" value={node.hostname ?? "unknown"} />
           <Field label="Operating system" value={node.operatingSystem ?? "unknown"} />
@@ -162,12 +122,25 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
         </dl>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <SubsystemCard title="Cameras" ok={cameras.available} total={cameras.total} okLabel="available" />
-        <SubsystemCard title="Sensors" ok={sensors.healthy} total={sensors.total} okLabel="healthy" degraded={sensors.stale + sensors.rejected} failed={sensors.failed} />
-        <SubsystemCard title="Power outlets" ok={power.on + power.off} total={power.total} okLabel="reporting" failed={power.unknown} />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <SubsystemCard title="Cameras" ok={cameras.available} total={cameras.total} okLabel="available" href={`/nodes/${nodeName}/cameras`} />
+        <SubsystemCard
+          title="Sensors"
+          ok={sensors.healthy}
+          total={sensors.total}
+          okLabel="healthy"
+          degraded={sensors.stale + sensors.rejected}
+          failed={sensors.failed}
+          href={`/nodes/${nodeName}/sensors`}
+        />
+        <SubsystemCard title="Power outlets" ok={power.on + power.off} total={power.total} okLabel="reporting" failed={power.unknown} href={`/nodes/${nodeName}/power`} />
         <QueueCard title="Capture queue" queued={queue.capture.queued} claimed={queue.capture.claimed} />
-        <QueueCard title="Power + test queue" queued={queue.power.pending + queue.sensorTests.pending} claimed={queue.power.claimed + queue.sensorTests.claimed + queue.sensorTests.running} />
+        <QueueCard
+          title="Power + test queue"
+          queued={queue.power.pending + queue.sensorTests.pending}
+          claimed={queue.power.claimed + queue.sensorTests.claimed + queue.sensorTests.running}
+          href={`/nodes/${nodeName}/power`}
+        />
       </div>
 
       <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
@@ -225,35 +198,12 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
       <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-semibold text-stone-950">Recent activity</h2>
-          <div className="flex flex-wrap gap-1">
-            {FILTERS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${filter === option.value ? "border-emerald-300 bg-emerald-100 text-emerald-900" : "border-stone-200 bg-white text-stone-600 hover:border-emerald-300"}`}
-                onClick={() => setFilter(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <Link href={`/nodes/${nodeName}/activity`} className="text-xs font-semibold text-emerald-700 hover:underline">
+            View full activity &rarr;
+          </Link>
         </div>
-        <div className="mt-3 grid gap-2">
-          {entries === null ? (
-            <p className="text-sm text-stone-600">Loading recent activity...</p>
-          ) : entries.length === 0 ? (
-            <p className="text-sm text-stone-600">No recent activity.</p>
-          ) : (
-            entries.map((entry) => (
-              <div key={entry.id} className={`rounded-md border px-3 py-2 text-sm ${TONE_STYLES[entry.tone]}`}>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="font-medium">{entry.summary}</span>
-                  <span className="text-xs">{formatAge(entry.at)}</span>
-                </div>
-                {entry.detail ? <p className="mt-1 text-xs">{entry.detail}</p> : null}
-              </div>
-            ))
-          )}
+        <div className="mt-3">
+          <NodeTimelinePanel nodeName={nodeName} />
         </div>
       </div>
     </div>
@@ -269,9 +219,25 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SubsystemCard({ title, ok, total, okLabel, degraded = 0, failed = 0 }: { title: string; ok: number; total: number; okLabel: string; degraded?: number; failed?: number }) {
-  return (
-    <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+function SubsystemCard({
+  title,
+  ok,
+  total,
+  okLabel,
+  degraded = 0,
+  failed = 0,
+  href,
+}: {
+  title: string;
+  ok: number;
+  total: number;
+  okLabel: string;
+  degraded?: number;
+  failed?: number;
+  href?: string;
+}) {
+  const content = (
+    <>
       <h3 className="text-sm font-semibold text-stone-950">{title}</h3>
       <p className="mt-2 text-2xl font-semibold text-stone-950">
         {ok}
@@ -280,18 +246,34 @@ function SubsystemCard({ title, ok, total, okLabel, degraded = 0, failed = 0 }: 
       <p className="text-xs text-stone-500">{okLabel}</p>
       {degraded > 0 ? <p className="mt-1 text-xs font-medium text-amber-700">{degraded} degraded</p> : null}
       {failed > 0 ? <p className="mt-1 text-xs font-medium text-red-700">{failed} failed</p> : null}
-    </div>
+    </>
   );
+  if (href) {
+    return (
+      <Link href={href} className="block rounded-lg border border-stone-200 bg-white p-4 shadow-sm transition hover:border-emerald-300">
+        {content}
+      </Link>
+    );
+  }
+  return <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">{content}</div>;
 }
 
-function QueueCard({ title, queued, claimed }: { title: string; queued: number; claimed: number }) {
-  return (
-    <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+function QueueCard({ title, queued, claimed, href }: { title: string; queued: number; claimed: number; href?: string }) {
+  const content = (
+    <>
       <h3 className="text-sm font-semibold text-stone-950">{title}</h3>
       <p className="mt-2 text-2xl font-semibold text-stone-950">{queued + claimed}</p>
       <p className="text-xs text-stone-500">
         {queued} queued, {claimed} in progress
       </p>
-    </div>
+    </>
   );
+  if (href) {
+    return (
+      <Link href={href} className="block rounded-lg border border-stone-200 bg-white p-4 shadow-sm transition hover:border-emerald-300">
+        {content}
+      </Link>
+    );
+  }
+  return <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">{content}</div>;
 }

@@ -246,6 +246,69 @@ export async function nextQueuedJob(prisma: PrismaClient, nodeId: string) {
   });
 }
 
+const MAX_JOB_SCAN = 20;
+
+/**
+ * Finds the oldest queued job whose camera is currently available,
+ * explicitly failing (never silently skipping) any stale jobs it passes
+ * over whose camera has gone unavailable - e.g. a USB reconnect assigned
+ * the camera a new physical path, so the coordinator now tracks it as a
+ * different NodeCamera row and marked the old one unavailable. Without
+ * this, nextQueuedJob() alone always returns the single oldest queued job;
+ * if that job's camera is unavailable, serializeJobForAgent() declines it
+ * (returns null) and the poll ends there - no newer job for the same node
+ * is ever reached, so one stale job head-of-line-blocks the whole capture
+ * queue for that node forever with no visible error anywhere. Runs as part
+ * of normal polling traffic (mirrors recoverStaleClaimedCommands() in
+ * powerProtocol.ts), so recovery needs no separate cron/poller. Bounded by
+ * MAX_JOB_SCAN so a node with a very long-stuck queue can't turn one poll
+ * into an unbounded scan.
+ */
+export async function nextServableJob(prisma: PrismaClient, nodeId: string) {
+  const candidates = await prisma.agentCaptureJob.findMany({
+    where: { nodeId, status: "queued" },
+    orderBy: { requestedAt: "asc" },
+    take: MAX_JOB_SCAN,
+    include: {
+      assignment: { include: { nodeCamera: true, captureSource: true } },
+      captureSource: true,
+    },
+  });
+
+  for (const job of candidates) {
+    const currentCamera = await prisma.nodeCamera.findUnique({
+      where: { nodeId_stableId: { nodeId, stableId: job.assignment.nodeCamera.stableId } },
+      select: { available: true },
+    });
+    if (currentCamera?.available) {
+      return job;
+    }
+
+    const failed = await prisma.agentCaptureJob.updateMany({
+      where: { id: job.id, nodeId, status: "queued" },
+      data: {
+        status: "failed",
+        completedAt: new Date(),
+        errorMessage: "Camera is no longer available - it may have been reconnected with a different USB path. Re-attach the camera and try again.",
+      },
+    });
+    if (failed.count > 0) {
+      console.log(
+        JSON.stringify({
+          level: "warn",
+          message: "capture job failed: camera unavailable",
+          jobId: job.id,
+          nodeId,
+          assignmentId: job.assignmentId,
+          time: new Date().toISOString(),
+        }),
+      );
+    }
+  }
+
+  return null;
+}
+
 export type AgentCaptureJobPayload = {
   id: string;
   captureSourceId: string;
