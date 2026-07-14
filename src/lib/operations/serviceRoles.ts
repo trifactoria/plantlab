@@ -33,8 +33,20 @@ export function expectedServicesForRole(role: string | null | undefined): PlantL
   if (role === "camera-node" || role === "greenhouse-node") {
     return ["agent"];
   }
+  // "camera" (plantlab-camera.service) is misnamed for this role - a
+  // coordinator has no local camera hardware to capture from. It's
+  // included here because it's also the only process that ticks
+  // PowerScheduler (src/lib/operations/powerSchedule.ts) and the capture
+  // schedulers; a coordinator with persistent greenhouse power schedules
+  // needs that loop running just as much as a standalone machine does.
+  // Discovered 2026-07-14: role convergence previously stopped/disabled
+  // this service on a coordinator as "inappropriate," which silently
+  // stopped every power schedule from ever firing on a properly-converged
+  // coordinator host - see the incident report in that day's commit.
+  // With zero local Projects/CaptureSources configured (the normal case
+  // for a pure coordinator), its capture-related ticks are simply no-ops.
   if (role === "coordinator") {
-    return ["web"];
+    return ["web", "camera"];
   }
   if (role === "standalone" || role === "microscope-node" || role === "mobile-uploader") {
     return ["web", "camera"];

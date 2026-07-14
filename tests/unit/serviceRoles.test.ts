@@ -11,7 +11,11 @@ describe("serviceRoles", () => {
   describe("expectedServicesForRole - never defaults for an unknown role", () => {
     it("returns the correct services for each known role", () => {
       expect(expectedServicesForRole("camera-node")).toEqual(["agent"]);
-      expect(expectedServicesForRole("coordinator")).toEqual(["web"]);
+      // "camera" is also expected for coordinator: it's the process that
+      // ticks PowerScheduler (persistent greenhouse power schedules must
+      // keep running on the coordinator, not just on a standalone
+      // machine) - see the comment on expectedServicesForRole().
+      expect(expectedServicesForRole("coordinator")).toEqual(["web", "camera"]);
       expect(expectedServicesForRole("standalone")).toEqual(["web", "camera"]);
     });
 
@@ -37,7 +41,7 @@ describe("serviceRoles", () => {
   describe("inappropriateServicesForRole", () => {
     it("is the complement of expectedServicesForRole for a known role", () => {
       expect(inappropriateServicesForRole("camera-node").sort()).toEqual(["camera", "web"]);
-      expect(inappropriateServicesForRole("coordinator").sort()).toEqual(["agent", "camera"]);
+      expect(inappropriateServicesForRole("coordinator").sort()).toEqual(["agent"]);
     });
 
     it("returns every service as inappropriate for an unknown role (nothing is 'expected')", () => {

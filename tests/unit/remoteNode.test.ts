@@ -26,7 +26,7 @@ describe("remote node helpers", () => {
 
   it("selects services by role instead of defaulting to every service", () => {
     expect(serviceUnitsForSelection({ role: "camera-node" })).toEqual(["plantlab-agent.service"]);
-    expect(serviceUnitsForSelection({ role: "coordinator" })).toEqual(["plantlab-web.service"]);
+    expect(serviceUnitsForSelection({ role: "coordinator" })).toEqual(["plantlab-web.service", "plantlab-camera.service"]);
     expect(serviceUnitsForSelection({ role: "standalone" })).toEqual(["plantlab-web.service", "plantlab-camera.service"]);
     expect(serviceUnitsForSelection({ role: "camera-node", service: "camera" })).toEqual(["plantlab-camera.service"]);
     expect(serviceUnitsForSelection({ role: "camera-node", all: true })).toEqual([
