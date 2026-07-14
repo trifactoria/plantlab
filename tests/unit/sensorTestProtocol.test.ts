@@ -200,6 +200,45 @@ describe("node summary reflects partial hardware failure with a healthy heartbea
     expect(body.sensors.healthy).toBe(1);
     expect(body.sensors.failed).toBe(1);
   });
+
+  it("does not let a retired/no-longer-configured sensor inflate the total or failed counts", async () => {
+    const registered = await setUpNodeWithSensor("greenhouse-node-retired");
+    // A sensor that stopped being sampled >1h ago (e.g. dropped from the
+    // edge's config, like the real greenhouse-ambient row) while the rest
+    // of the node keeps reporting normally.
+    await ingestEnvironmentTelemetry(
+      prisma,
+      registered.node.id,
+      parseEnvironmentBatch(
+        {
+          events: [
+            envEvent({
+              eventId: "retired-1",
+              sensor: { key: "greenhouse-retired", name: "Retired", type: "dht22", gpio: 4, placement: null, enabled: true },
+              classification: "failed",
+              temperatureC: null,
+              humidityPct: null,
+              diagnosticCode: "sensor-no-response",
+              diagnosticMessage: "no response",
+              capturedAt: "2026-07-14T10:00:00.000Z",
+            }),
+          ],
+        },
+        new Date("2026-07-14T10:00:01.000Z"),
+      ),
+    );
+    await ingestEnvironmentTelemetry(
+      prisma,
+      registered.node.id,
+      parseEnvironmentBatch({ events: [envEvent({ eventId: "retired-2", capturedAt: "2026-07-14T15:32:00.000Z" })] }, new Date("2026-07-14T15:32:01.000Z")),
+    );
+
+    const response = await nodeSummaryRoute(new Request("http://localhost"), { params: Promise.resolve({ nodeName: "greenhouse-node-retired" }) });
+    const body = await response.json();
+    expect(body.sensors.total).toBe(1);
+    expect(body.sensors.healthy).toBe(1);
+    expect(body.sensors.failed).toBe(0);
+  });
 });
 
 describe("node diagnostics sweep", () => {

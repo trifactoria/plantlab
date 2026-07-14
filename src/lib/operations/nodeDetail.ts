@@ -11,7 +11,7 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
     where: { name: nodeName },
     include: {
       cameras: { select: { id: true, available: true } },
-      sensors: { select: { id: true, key: true, latestClassification: true, enabled: true } },
+      sensors: { select: { id: true, key: true, latestClassification: true, enabled: true, lastAttemptAt: true } },
       outlets: { select: { id: true, actualState: true, available: true } },
     },
   });
@@ -28,7 +28,21 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
     prisma.sensorTestCommand.count({ where: { nodeId: node.id, status: "running", expiresAt: { gt: new Date() } } }),
   ]);
 
-  const enabledSensors = node.sensors.filter((sensor) => sensor.enabled);
+  // A sensor's own `enabled` flag reflects the last config it ever
+  // reported and never gets cleared if the edge simply stops including it
+  // (e.g. a retired/renamed sensor like greenhouse-ambient) - only a fresh
+  // report changes it. Currently-configured sensors on the same node get
+  // sampled every ~15s, so a sensor whose last attempt is more than an
+  // hour older than the node's most recently attempted sensor is a
+  // reasonable signal that it's no longer actually being sampled, and
+  // shouldn't inflate "total"/"failed" counts for a node that's otherwise
+  // fully healthy.
+  const attemptTimes = node.sensors.map((sensor) => sensor.lastAttemptAt?.getTime() ?? 0);
+  const mostRecentAttempt = attemptTimes.length > 0 ? Math.max(...attemptTimes) : 0;
+  const STILL_ACTIVE_WINDOW_MS = 60 * 60_000;
+  const enabledSensors = node.sensors.filter(
+    (sensor) => sensor.enabled && (sensor.lastAttemptAt?.getTime() ?? 0) >= mostRecentAttempt - STILL_ACTIVE_WINDOW_MS,
+  );
   const healthySensors = enabledSensors.filter((sensor) => sensor.latestClassification === "accepted").length;
   const failedSensors = enabledSensors.filter((sensor) => sensor.latestClassification === "failed" || sensor.latestClassification === "driver-unavailable").length;
   const staleSensors = enabledSensors.filter((sensor) => sensor.latestClassification === "stale").length;
