@@ -223,15 +223,28 @@ def process_environment_uploads(cfg: config.EdgeAgentConfig, client: AgentProtoc
     due = spool.due_environment_events(limit=50)
     if not due:
         return
-    event_ids = [record.event_id for record in due]
+    _upload_environment_records(cfg, client, sensors, spool, due)
+
+
+def _upload_environment_records(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sensors: EnvironmentalSensorManager, spool: Spool, records: list) -> None:
+    event_ids = [record.event_id for record in records]
     try:
-        response = client.post_environment(cfg.node_name, [record.payload() for record in due])
+        response = client.post_environment(cfg.node_name, [record.payload() for record in records])
         acknowledged = response.get("acceptedEventIds") if isinstance(response, dict) else None
         ack_ids = [event_id for event_id in acknowledged if isinstance(event_id, str)] if isinstance(acknowledged, list) else event_ids
         spool.mark_environment_acknowledged(ack_ids)
         sensors.mark_uploaded()
         logger.info("Environmental telemetry uploaded: %d event(s)", len(ack_ids))
     except ProtocolError as exc:
+        if exc.status == 400 and len(records) > 1:
+            logger.warning("Environmental telemetry batch was rejected; isolating %d event(s).", len(records))
+            for record in records:
+                _upload_environment_records(cfg, client, sensors, spool, [record])
+            return
+        if exc.status == 400 and len(records) == 1:
+            spool.discard_environment_events(event_ids, str(exc))
+            logger.warning("Discarded malformed environmental telemetry event %s: %s", event_ids[0], exc)
+            return
         spool.mark_environment_failed(event_ids, str(exc))
         logger.warning("Environmental telemetry upload failed: %s", exc)
 

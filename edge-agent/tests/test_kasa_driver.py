@@ -1,4 +1,5 @@
 import types
+import asyncio
 
 import pytest
 
@@ -30,6 +31,18 @@ class FakeDevice:
 
     async def disconnect(self):
         return None
+
+
+class SlowUpdateDevice(FakeDevice):
+    def __init__(self):
+        super().__init__()
+        self.update_calls = 0
+
+    async def update(self):
+        self.update_calls += 1
+        if self.update_calls == 1:
+            return None
+        await asyncio.sleep(1)
 
 
 def fake_kasa_module(device):
@@ -92,6 +105,19 @@ def test_kasa_driver_unavailable(monkeypatch):
     with pytest.raises(PowerDriverError) as exc:
         driver.connect()
     assert exc.value.code == "power-driver-unavailable"
+
+
+def test_kasa_driver_bounds_post_connect_state_refresh(monkeypatch):
+    device = SlowUpdateDevice()
+    monkeypatch.setattr(kasa_module.importlib, "import_module", lambda _name: fake_kasa_module(device))
+    driver = KasaPowerDriver("192.168.1.72", "user", "secret", {"fans": "greenhouse-fans"}, timeout_seconds=0.01)
+
+    driver.connect()
+    with pytest.raises(PowerDriverError) as exc:
+        driver.list_outlets()
+
+    assert exc.value.code == "power-connection-timeout"
+    driver.close()
 
 
 def test_kasa_error_mapping_distinguishes_network_and_auth():

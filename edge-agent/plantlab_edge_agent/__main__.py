@@ -200,7 +200,7 @@ def run_self_check(send_heartbeat: bool = True) -> dict:
         spool_writable, spool_detail = _spool_ok(cfg.spool_root)
         add("spool", spool_writable, spool_detail)
         enabled_sensors = [sensor for sensor in cfg.sensors if sensor.enabled]
-        mode = selected_driver_mode()
+        mode = sensor_driver_mode_summary()["resolved"]
         if enabled_sensors:
             if mode not in (DRIVER_MODE_MOCK, DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED, "unavailable"):
                 add("sensor-driver-mode", False, f'unsupported mode "{mode}"')

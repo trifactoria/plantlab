@@ -322,3 +322,55 @@ def test_environment_upload_failure_is_retained_for_retry(tmp_path, monkeypatch)
         assert row == ("failed", 1)
     finally:
         spool.close()
+
+
+def test_environment_upload_isolates_bad_event_without_poisoning_batch(tmp_path, fake_coordinator, monkeypatch):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    cfg.sensors = [config.GreenhouseSensorConfig(key="greenhouse-ambient", name="Greenhouse ambient", type="dht22", gpio=4, enabled=True)]
+    monkeypatch.setenv("PLANTLAB_GREENHOUSE_SENSOR_DRIVER", "mock")
+    sensors = EnvironmentalSensorManager.from_config(cfg)
+    spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
+    spool.init()
+
+    class RejectInvalidHumidityClient:
+        def __init__(self):
+            self.accepted_batches = []
+
+        def post_environment(self, node_name, events):
+            assert node_name == "greenhouse-zero"
+            if any(event.get("humidityPct") == 1000 for event in events):
+                raise agent.ProtocolError("humidity outside hard bounds", status=400)
+            self.accepted_batches.append(events)
+            return {"acceptedEventIds": [event["eventId"] for event in events]}
+
+    valid = {
+        "eventId": "valid-env",
+        "sensor": {"key": "ambient", "name": "Ambient", "type": "dht22", "gpio": 4, "placement": None, "enabled": True},
+        "capturedAt": "2026-07-13T15:30:00Z",
+        "classification": "accepted",
+        "temperatureC": 24.0,
+        "humidityPct": 60.0,
+        "diagnosticCode": None,
+        "diagnosticMessage": None,
+    }
+    invalid = {
+        **valid,
+        "eventId": "invalid-env",
+        "classification": "rejected",
+        "humidityPct": 1000,
+        "diagnosticCode": "humidity-hard-bound",
+        "diagnosticMessage": "Humidity is outside sensor hard physical bounds.",
+    }
+    client = RejectInvalidHumidityClient()
+    try:
+        spool.record_environment_events([invalid, valid])
+        agent.process_environment_uploads(cfg, client, sensors, spool)
+
+        assert client.accepted_batches == [[valid]]
+        assert spool.due_environment_events() == []
+        rows = {event_id: (state, last_error) for event_id, state, last_error in spool._db.execute("SELECT eventId, state, lastError FROM environment_events").fetchall()}
+        assert rows["valid-env"][0] == "acknowledged"
+        assert rows["invalid-env"][0] == "acknowledged"
+        assert "discarded" in rows["invalid-env"][1]
+    finally:
+        spool.close()

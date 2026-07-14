@@ -108,6 +108,30 @@ def test_doctor_checks_coordinator_credential_and_heartbeat(isolated_config, fak
     assert fake_coordinator["state"].heartbeats
 
 
+def test_doctor_resolves_dht22_mode_from_systemd_dropin(monkeypatch, isolated_config, fake_coordinator, tmp_path, capsys):
+    monkeypatch.setenv("PLANTLAB_EDGE_SYSTEMD_USER_DIR", str(tmp_path))
+    dropin_dir = tmp_path / "plantlab-edge-agent.service.d"
+    dropin_dir.mkdir(parents=True)
+    (dropin_dir / "greenhouse-sensor-driver.conf").write_text("[Service]\nEnvironment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22\n")
+    config.write_config(
+        config.EdgeAgentConfig(
+            role="greenhouse-node",
+            node_name="greenhouse-zero",
+            coordinator_url=fake_coordinator["url"],
+            spool_root=str(isolated_config / "spool"),
+            capabilities=["temperature", "humidity"],
+            sensors=[config.GreenhouseSensorConfig(key="greenhouse-ambient", name="Greenhouse Ambient", type="dht22", gpio=8, enabled=True)],
+        )
+    )
+    config.write_credential("pln_validtoken")
+    monkeypatch.setattr(cli.sensor_probe, "collect_probe", lambda _cfg: {"backendReady": True, "backendReadinessDetail": "pigpio daemon is reachable"})
+
+    assert cli.main(["doctor"]) == 0
+    output = capsys.readouterr().out
+    assert "PASS: sensor-driver-mode: dht22" in output
+    assert "PASS: dht22-backend: pigpio daemon is reachable" in output
+
+
 def test_config_show_json_is_non_secret(isolated_config, fake_coordinator, capsys):
     _write_ready_config(isolated_config, fake_coordinator)
 

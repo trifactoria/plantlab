@@ -125,7 +125,6 @@ class PowerManager:
     def _set(self, outlet: str, desired: bool) -> PowerCommandExecution:
         try:
             driver = self._driver()
-            before = driver.get_state(outlet)
             if desired:
                 driver.turn_on(outlet)
             else:
@@ -133,7 +132,7 @@ class PowerManager:
             actual = driver.get_state(outlet)
             if actual is not desired:
                 return PowerCommandExecution(False, actual, "power-state-verification-failed", f"{outlet} did not verify {'ON' if desired else 'OFF'}.")
-            logger.info("Power command verified: %s %s (was %s)", outlet, "ON" if desired else "OFF", "ON" if before else "OFF")
+            logger.info("Power command verified: %s %s", outlet, "ON" if desired else "OFF")
             return PowerCommandExecution(True, actual)
         except PowerDriverError as exc:
             self._mark_connection_failure(exc)

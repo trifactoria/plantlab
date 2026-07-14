@@ -193,6 +193,16 @@ class Spool:
         self._db.executemany("UPDATE environment_events SET state = 'acknowledged', lastError = NULL WHERE eventId = ?", [(event_id,) for event_id in event_ids])
         self._db.commit()
 
+    def discard_environment_events(self, event_ids: List[str], reason: str) -> None:
+        assert self._db is not None
+        if not event_ids:
+            return
+        self._db.executemany(
+            "UPDATE environment_events SET state = 'acknowledged', lastError = ? WHERE eventId = ?",
+            [(f"discarded: {reason[:1900]}", event_id) for event_id in event_ids],
+        )
+        self._db.commit()
+
     def mark_environment_failed(self, event_ids: List[str], error_message: str) -> None:
         assert self._db is not None
         if not event_ids:

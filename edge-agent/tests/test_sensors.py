@@ -60,6 +60,8 @@ def test_hard_bound_rejection():
     events = validator.evaluate(sample(81, 50))
     assert classifications(events) == ["rejected"]
     assert events[0].diagnostic_code == "temperature-hard-bound"
+    assert events[0].temperature_c is None
+    assert events[0].humidity_pct is None
 
 
 def test_plausible_bound_suspect():

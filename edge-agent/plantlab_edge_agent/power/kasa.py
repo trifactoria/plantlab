@@ -26,12 +26,13 @@ class KasaPowerDriver:
         self.detected_alias: Optional[str] = None
         self.detected_encryption: Optional[str] = None
         self.detected_login_version: Optional[str] = None
+        self._last_states: dict[str, bool] = {}
 
     def connect(self) -> None:
         if not self.username or not self.password:
             raise PowerDriverError("power-authentication-failed", "Kasa username/password are missing from greenhouse.env.")
         try:
-            self._loop.run_until_complete(asyncio.wait_for(self._connect(), timeout=self.timeout_seconds))
+            self._run(self._connect())
         except PowerDriverError:
             raise
         except socket.gaierror as exc:
@@ -83,12 +84,13 @@ class KasaPowerDriver:
     def list_outlets(self) -> dict[str, bool]:
         self._ensure_connected()
         try:
-            self._loop.run_until_complete(self._device.update())
-            return {logical: bool(_child_state(self._children_by_alias[alias])) for logical, alias in self.alias_map.items()}
+            return self._refresh_states()
         except Exception as exc:
             raise _map_kasa_exception(exc) from None
 
     def get_state(self, outlet: str) -> bool:
+        if outlet in self._last_states:
+            return self._last_states[outlet]
         return self.list_outlets()[outlet]
 
     def turn_on(self, outlet: str) -> None:
@@ -105,14 +107,22 @@ class KasaPowerDriver:
             raise PowerDriverError("power-outlet-missing", f"Configured outlet {outlet} is missing from the Kasa device.")
         try:
             method = child.turn_on if desired else child.turn_off
-            self._loop.run_until_complete(method())
-            self._loop.run_until_complete(self._device.update())
+            self._run(method())
+            self._refresh_states()
         except Exception as exc:
             raise _map_kasa_exception(exc) from None
 
     def _ensure_connected(self) -> None:
         if self._device is None:
             self.connect()
+
+    def _refresh_states(self) -> dict[str, bool]:
+        self._run(self._device.update())
+        self._last_states = {logical: bool(_child_state(self._children_by_alias[alias])) for logical, alias in self.alias_map.items()}
+        return dict(self._last_states)
+
+    def _run(self, awaitable: Any):
+        return self._loop.run_until_complete(asyncio.wait_for(awaitable, timeout=self.timeout_seconds))
 
 
 def _load_kasa_module():

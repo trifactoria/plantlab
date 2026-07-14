@@ -81,7 +81,7 @@ class EnvironmentalSampleValidator:
         hard_problem = self._hard_bound_problem(temperature_c, humidity_pct)
         if hard_problem:
             code, message = hard_problem
-            event = self._event(sample.captured_at, CLASSIFICATION_REJECTED, temperature_c, humidity_pct, code, message)
+            event = self._event(sample.captured_at, CLASSIFICATION_REJECTED, None, None, code, message)
             events.append(event)
             self._mark_rejected(event)
             return events
