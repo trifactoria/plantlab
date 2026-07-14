@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { computeNodeStatus, hasActiveCredential } from "./nodeCredentials";
 import { parseCapabilities } from "./capabilities";
+import { activeSensorsForNode } from "./sensorConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/nodeDetail.ts is server-only operational code.");
@@ -11,11 +12,11 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
     where: { name: nodeName },
     include: {
       cameras: { select: { id: true, available: true } },
-      sensors: { select: { id: true, key: true, latestClassification: true, enabled: true, lastAttemptAt: true } },
       outlets: { select: { id: true, actualState: true, available: true } },
     },
   });
   if (!node) return null;
+  const activeSensors = await activeSensorsForNode(prisma, node.id);
 
   const [activeCredential, captureQueued, captureClaimed, powerPending, powerClaimed, testsPending, testsClaimed, testsRunning] = await Promise.all([
     hasActiveCredential(prisma, node.id),
@@ -28,25 +29,10 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
     prisma.sensorTestCommand.count({ where: { nodeId: node.id, status: "running", expiresAt: { gt: new Date() } } }),
   ]);
 
-  // A sensor's own `enabled` flag reflects the last config it ever
-  // reported and never gets cleared if the edge simply stops including it
-  // (e.g. a retired/renamed sensor like greenhouse-ambient) - only a fresh
-  // report changes it. Currently-configured sensors on the same node get
-  // sampled every ~15s, so a sensor whose last attempt is more than an
-  // hour older than the node's most recently attempted sensor is a
-  // reasonable signal that it's no longer actually being sampled, and
-  // shouldn't inflate "total"/"failed" counts for a node that's otherwise
-  // fully healthy.
-  const attemptTimes = node.sensors.map((sensor) => sensor.lastAttemptAt?.getTime() ?? 0);
-  const mostRecentAttempt = attemptTimes.length > 0 ? Math.max(...attemptTimes) : 0;
-  const STILL_ACTIVE_WINDOW_MS = 60 * 60_000;
-  const enabledSensors = node.sensors.filter(
-    (sensor) => sensor.enabled && (sensor.lastAttemptAt?.getTime() ?? 0) >= mostRecentAttempt - STILL_ACTIVE_WINDOW_MS,
-  );
-  const healthySensors = enabledSensors.filter((sensor) => sensor.latestClassification === "accepted").length;
-  const failedSensors = enabledSensors.filter((sensor) => sensor.latestClassification === "failed" || sensor.latestClassification === "driver-unavailable").length;
-  const staleSensors = enabledSensors.filter((sensor) => sensor.latestClassification === "stale").length;
-  const rejectedSensors = enabledSensors.filter((sensor) => sensor.latestClassification === "rejected" || sensor.latestClassification === "suspect").length;
+  const healthySensors = activeSensors.filter((sensor) => sensor.latestClassification === "accepted").length;
+  const failedSensors = activeSensors.filter((sensor) => sensor.latestClassification === "failed" || sensor.latestClassification === "driver-unavailable").length;
+  const staleSensors = activeSensors.filter((sensor) => sensor.latestClassification === "stale").length;
+  const rejectedSensors = activeSensors.filter((sensor) => sensor.latestClassification === "rejected" || sensor.latestClassification === "suspect").length;
 
   return {
     node: {
@@ -71,7 +57,7 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
       unavailable: node.cameras.filter((camera) => !camera.available).length,
     },
     sensors: {
-      total: enabledSensors.length,
+      total: activeSensors.length,
       healthy: healthySensors,
       failed: failedSensors,
       stale: staleSensors,

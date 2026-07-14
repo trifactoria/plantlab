@@ -42,6 +42,7 @@ import {
   type GreenhouseSensorConfig,
 } from "../../lib/operations/greenhouseConfig";
 import { diagnoseEdgeAgent } from "../../lib/operations/edgeAgentDiagnostics";
+import { getSensorConfiguration } from "../../lib/operations/sensorConfig";
 import {
   diagnoseRemoteAgent,
   inspectRemoteHost,
@@ -148,6 +149,90 @@ Examples:
       }
       if (inspection.checks.some((check) => check.status === "fail")) {
         process.exitCode = 1;
+      }
+    });
+
+  node
+    .command("deploy")
+    .description("Update edge-agent code on a node while preserving config, credentials, spools, and state")
+    .argument("<ssh-host>", "SSH host alias, e.g. greenhouse-zero")
+    .option("--yes", "Confirm writes without prompting")
+    .action(async (sshHost: string, options: { yes?: boolean }) => {
+      if (!(await confirmOrYes(`Copy edge-agent source and run its preserving installer on ${sshHost}? [y/N] `, options.yes, false))) {
+        console.log("No changes made.");
+        return;
+      }
+      const timeoutPolicy = edgeAttachTimeoutPolicy(await inspectRemoteHost(sshHost));
+      const sourceVersion = await localEdgeAgentVersion();
+      const installedBefore = await readInstalledEdgeAgentVersion(sshHost);
+      const copyResult = await copyEdgeAgentDirectory(sshHost, { timeoutMs: timeoutPolicy.copyMs });
+      if (copyResult.status !== 0) throw new Error(copyResult.stderr || "Could not copy edge-agent directory.");
+      const configResult = await readRemoteEdgeAgentConfig(sshHost);
+      const config = configResult.config as Record<string, unknown>;
+      const role = typeof config.role === "string" && (config.role === "camera-node" || config.role === "greenhouse-node") ? config.role : "greenhouse-node";
+      const nodeName = typeof config.nodeName === "string" ? config.nodeName : sshHost;
+      const coordinatorUrl = typeof config.coordinatorUrl === "string" ? config.coordinatorUrl : "";
+      const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName, coordinatorUrl }, { timeoutMs: timeoutPolicy.installMs });
+      if (installResult.status !== 0) throw new Error(installResult.stderr || installResult.stdout || "Edge installer failed.");
+      const installedAfter = await readInstalledEdgeAgentVersion(sshHost);
+      console.log(`Deployed edge-agent to ${sshHost}.`);
+      console.log(`Previous: ${installedBefore?.contentHash?.slice(0, 12) ?? "(unknown)"}`);
+      console.log(`Current: ${installedAfter?.contentHash?.slice(0, 12) ?? sourceVersion.contentHash?.slice(0, 12) ?? "(unknown)"}`);
+    });
+
+  node
+    .command("configure")
+    .description("Inspect desired/applied coordinator-owned configuration for a node")
+    .argument("<node-name>", "Registered node name, e.g. greenhouse-zero")
+    .option("--json", "Print structured JSON")
+    .action(async (nodeName: string, options: { json?: boolean }) => {
+      const config = await getSensorConfiguration(prisma, nodeName);
+      if (!config) throw new Error(`No registered node named "${nodeName}".`);
+      if (options.json) {
+        console.log(JSON.stringify(config, null, 2));
+        return;
+      }
+      console.log(`Node: ${config.node.name}`);
+      console.log(`Desired sensor revision: ${config.node.desiredRevision ?? "(none)"}`);
+      console.log(`Applied sensor revision: ${config.node.appliedRevision ?? "(none)"}`);
+      console.log(`Apply status: ${config.node.appliedStatus ?? "(unknown)"}`);
+      if (config.node.appliedError) console.log(`Apply error: ${config.node.appliedError}`);
+      for (const sensor of config.sensors) {
+        console.log(`${sensor.configuredActive ? "active" : "inactive"}\t${sensor.key}\t${sensor.name}\tGPIO ${sensor.gpio ?? "(none)"}\t${sensor.placement ?? ""}`);
+      }
+    });
+
+  node
+    .command("repair")
+    .description("Run bounded repair-oriented diagnostics for a node without overwriting valid config or durable data")
+    .argument("<ssh-host>", "SSH host alias")
+    .option("--json", "Print structured JSON")
+    .action(async (sshHost: string, options: { json?: boolean }) => {
+      const inspection = await inspectRemoteHost(sshHost);
+      const edge = await diagnoseEdgeAgent(sshHost).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+      if (options.json) {
+        console.log(JSON.stringify({ inspection, edge }, null, 2));
+        return;
+      }
+      printInspection(inspection);
+      console.log("");
+      console.log("Edge diagnostics collected. This command did not overwrite config, credentials, spools, or state.");
+      if ("error" in edge) console.log(`Edge diagnostics error: ${edge.error}`);
+    });
+
+  node
+    .command("test")
+    .description("Run structured bounded diagnostics for a node without persistent configuration mutation")
+    .argument("<ssh-host>", "SSH host alias")
+    .option("--json", "Print structured JSON")
+    .action(async (sshHost: string, options: { json?: boolean }) => {
+      const inspection = await inspectRemoteHost(sshHost);
+      const edge = await diagnoseEdgeAgent(sshHost).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+      if (options.json) console.log(JSON.stringify({ inspection, edge }, null, 2));
+      else {
+        printInspection(inspection);
+        console.log("");
+        console.log("Test diagnostics complete. No coordinator sensor config, camera assignment, credentials, or spool state was changed.");
       }
     });
 

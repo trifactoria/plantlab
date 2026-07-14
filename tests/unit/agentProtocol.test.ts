@@ -11,7 +11,7 @@ import {
   serializeJobForAgent,
   updateCameraInventory,
 } from "../../src/lib/operations/agentProtocol";
-import { attachNodeCamera, parseNodeCameraFormats } from "../../src/lib/operations/nodeCameras";
+import { attachNodeCamera, listCameraReattachCandidates, parseNodeCameraFormats, reattachNodeCamera } from "../../src/lib/operations/nodeCameras";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
 
@@ -304,6 +304,89 @@ describe("agent protocol", () => {
 
     const old = await prisma.nodeCamera.findUnique({ where: { nodeId_stableId: { nodeId: registered.node.id, stableId: legacyStableId } } });
     expect(old).toBeNull();
+  });
+
+  it("records endpoint observations and keeps one logical camera for same serial when only /dev path changes", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "camera-endpoint-history", role: "camera-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:046d:0825:SERIAL1",
+        devicePath: "/dev/video0",
+        name: "Stable Camera",
+        vendorId: "046d",
+        productId: "0825",
+        serial: "SERIAL1",
+      },
+    ]);
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:046d:0825:SERIAL1",
+        devicePath: "/dev/video4",
+        name: "Stable Camera",
+        vendorId: "046d",
+        productId: "0825",
+        serial: "SERIAL1",
+      },
+    ]);
+
+    const cameras = await prisma.nodeCamera.findMany({ where: { nodeId: registered.node.id } });
+    expect(cameras).toHaveLength(1);
+    expect(cameras[0].devicePath).toBe("/dev/video4");
+    const endpoints = await prisma.nodeCameraEndpoint.findMany({ where: { nodeId: registered.node.id }, orderBy: { devicePath: "asc" } });
+    expect(endpoints.map((endpoint) => [endpoint.devicePath, endpoint.available])).toEqual([
+      ["/dev/video0", false],
+      ["/dev/video4", true],
+    ]);
+  });
+
+  it("requires explicit reattach for an ambiguous endpoint and preserves assignment config", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "camera-reattach", role: "camera-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:32e6:9221:fake:path:port-a",
+        legacyStableId: "usb:32e6:9221:fake",
+        devicePath: "/dev/video0",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "fake",
+        physicalPath: "port-a",
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName: "camera-reattach",
+      stableId: "usb:32e6:9221:fake:path:port-a",
+      newCaptureSourceName: "Reattach Source",
+      width: 1280,
+      height: 720,
+      inputFormat: "mjpeg",
+    });
+    await prisma.captureSource.update({ where: { id: attached.captureSource.id }, data: { rotation: 90 } });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: "usb:32e6:9221:fake:path:port-b",
+        legacyStableId: "usb:32e6:9221:fake",
+        devicePath: "/dev/video2",
+        vendorId: "32e6",
+        productId: "9221",
+        serial: "fake",
+        physicalPath: "port-b",
+        formatsStatus: "ok",
+        formats: [{ pixelFormat: "MJPG", description: "Motion-JPEG", resolutions: [{ width: 1280, height: 720, frameRates: ["30 fps"] }] }],
+      },
+    ]);
+
+    const candidates = await listCameraReattachCandidates(prisma, { nodeName: "camera-reattach", cameraId: attached.camera.id });
+    expect(candidates[0].confidence).toBe("medium");
+    const result = await reattachNodeCamera(prisma, { nodeName: "camera-reattach", cameraId: attached.camera.id, endpointId: candidates[0].endpoint.id });
+    expect(result.camera.id).toBe(attached.camera.id);
+    expect(result.camera.devicePath).toBe("/dev/video2");
+    const assignment = await prisma.nodeCameraAssignment.findUniqueOrThrow({ where: { id: attached.assignment.id }, include: { captureSource: true } });
+    expect(assignment.width).toBe(1280);
+    expect(assignment.height).toBe(720);
+    expect(assignment.inputFormat).toBe("mjpeg");
+    expect(assignment.captureSource.rotation).toBe(90);
   });
 
   it("records runtime, protocol version, and reported capabilities from a heartbeat (Part 6/8/13)", async () => {

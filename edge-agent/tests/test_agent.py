@@ -135,6 +135,61 @@ def test_camera_disabled_node_ignores_refresh(tmp_path, fake_coordinator):
     metadata.assert_not_called()
 
 
+def test_maybe_apply_sensor_config_writes_atomically_and_reports_applied(tmp_path, isolated_config, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    cfg.capabilities = ["camera", "temperature", "humidity"]
+    config.write_config(cfg)
+    cfg = config.read_config()
+    assert cfg is not None
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    sensors = EnvironmentalSensorManager.from_config(cfg)
+    fake_coordinator["state"].desired_sensor_config = {
+        "revision": 7,
+        "entries": [{"key": "outside", "name": "Outside", "type": "dht22", "gpio": 4, "placement": "outside", "enabled": True}],
+    }
+
+    next_cfg, next_sensors = agent.maybe_apply_sensor_config(cfg, client, sensors)
+
+    try:
+        assert next_cfg.applied_sensor_config_revision == 7
+        assert next_cfg.last_known_good_sensor_config_revision == 7
+        assert next_cfg.sensors[0].key == "outside"
+        assert fake_coordinator["state"].sensor_config_reports[-1]["status"] == "applied"
+        assert config.read_config().applied_sensor_config_revision == 7
+    finally:
+        next_sensors.close()
+
+
+def test_maybe_apply_sensor_config_rejects_duplicate_gpio_and_keeps_last_known_good(tmp_path, isolated_config, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    cfg.applied_sensor_config_revision = 3
+    cfg.last_known_good_sensor_config_revision = 3
+    config.write_config(cfg)
+    cfg = config.read_config()
+    assert cfg is not None
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    sensors = EnvironmentalSensorManager.from_config(cfg)
+    fake_coordinator["state"].desired_sensor_config = {
+        "revision": 8,
+        "entries": [
+            {"key": "a", "name": "A", "type": "dht22", "gpio": 4, "enabled": True},
+            {"key": "b", "name": "B", "type": "dht22", "gpio": 4, "enabled": True},
+        ],
+    }
+
+    next_cfg, next_sensors = agent.maybe_apply_sensor_config(cfg, client, sensors)
+
+    try:
+        assert next_cfg.applied_sensor_config_revision == 3
+        report = fake_coordinator["state"].sensor_config_reports[-1]
+        assert report["status"] == "rejected"
+        assert report["lastKnownGoodRevision"] == 3
+        assert "Duplicate BCM GPIO" in report["rejectionReason"]
+        assert config.read_config().applied_sensor_config_revision == 3
+    finally:
+        next_sensors.close()
+
+
 def test_poll_and_run_job_captures_a_frame_to_the_durable_spool_before_uploading(tmp_path, fake_coordinator):
     """Part 7/9: a manual capture job flows through claim -> capture -> durable spool record, all before any upload attempt."""
     cfg = _make_config(tmp_path, fake_coordinator["url"])

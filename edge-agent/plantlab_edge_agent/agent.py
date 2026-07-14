@@ -270,6 +270,103 @@ def _upload_environment_records(cfg: config.EdgeAgentConfig, client: AgentProtoc
         logger.warning("Environmental telemetry upload failed: %s", exc)
 
 
+def maybe_apply_sensor_config(
+    cfg: config.EdgeAgentConfig,
+    client: AgentProtocolClient,
+    sensors: EnvironmentalSensorManager,
+) -> tuple[config.EdgeAgentConfig, EnvironmentalSensorManager]:
+    if cfg.role != "greenhouse-node":
+        return cfg, sensors
+    try:
+        result = client.desired_sensor_config()
+    except ProtocolError as exc:
+        logger.warning("Sensor config check failed: %s", exc)
+        return cfg, sensors
+    desired = result.get("desired") if isinstance(result, dict) else None
+    if not isinstance(desired, dict):
+        return cfg, sensors
+    revision = desired.get("revision")
+    if not isinstance(revision, int) or revision == cfg.applied_sensor_config_revision:
+        return cfg, sensors
+    entries = desired.get("entries")
+    if not isinstance(entries, list):
+        _report_sensor_config_rejected(client, revision, "Desired sensor config did not include an entries array.", cfg)
+        return cfg, sensors
+
+    try:
+        parsed_sensors = config.parse_sensors(entries)
+        next_cfg = config.EdgeAgentConfig(
+            role=cfg.role,
+            node_name=cfg.node_name,
+            coordinator_url=cfg.coordinator_url,
+            spool_root=cfg.spool_root,
+            capabilities=config.derive_capabilities(role=cfg.role, current=cfg.capabilities, sensors=parsed_sensors, power=cfg.power),
+            sensors=parsed_sensors,
+            power=cfg.power,
+            heartbeat_interval_seconds=cfg.heartbeat_interval_seconds,
+            poll_interval_seconds=cfg.poll_interval_seconds,
+            camera_refresh_poll_interval_seconds=cfg.camera_refresh_poll_interval_seconds,
+            power_command_poll_interval_seconds=cfg.power_command_poll_interval_seconds,
+            power_state_refresh_interval_seconds=cfg.power_state_refresh_interval_seconds,
+            sensor_test_poll_interval_seconds=cfg.sensor_test_poll_interval_seconds,
+            sensor_config_poll_interval_seconds=cfg.sensor_config_poll_interval_seconds,
+            spool_cleanup_interval_seconds=cfg.spool_cleanup_interval_seconds,
+            sensor_sample_interval_seconds=cfg.sensor_sample_interval_seconds,
+            environment_upload_interval_seconds=cfg.environment_upload_interval_seconds,
+            max_spool_bytes=cfg.max_spool_bytes,
+            max_upload_bytes=cfg.max_upload_bytes,
+            applied_sensor_config_revision=revision,
+            last_known_good_sensor_config_revision=revision,
+        )
+        problems = config.validate_config(next_cfg)
+        if problems:
+            raise config.ConfigError("; ".join(problems))
+        config.write_config(next_cfg)
+        reloaded = config.read_config()
+        if reloaded is None:
+            raise config.ConfigError("Config disappeared after write.")
+        next_sensors = EnvironmentalSensorManager.from_config(reloaded)
+        sensors.close()
+        client.report_sensor_config(
+            {
+                "revision": revision,
+                "status": "applied",
+                "entries": [
+                    {
+                        "key": sensor.key,
+                        "name": sensor.name,
+                        "type": sensor.type,
+                        "gpio": sensor.gpio,
+                        "placement": sensor.placement,
+                        "enabled": sensor.enabled,
+                    }
+                    for sensor in reloaded.sensors
+                ],
+                "lastKnownGoodRevision": reloaded.last_known_good_sensor_config_revision,
+            }
+        )
+        logger.info("Applied desired sensor config revision %s.", revision)
+        return reloaded, next_sensors
+    except Exception as exc:
+        _report_sensor_config_rejected(client, revision, str(exc), cfg)
+        logger.warning("Rejected desired sensor config revision %s: %s", revision, exc)
+        return cfg, sensors
+
+
+def _report_sensor_config_rejected(client: AgentProtocolClient, revision: int, reason: str, cfg: config.EdgeAgentConfig) -> None:
+    try:
+        client.report_sensor_config(
+            {
+                "revision": revision,
+                "status": "rejected",
+                "rejectionReason": reason[:1000],
+                "lastKnownGoodRevision": cfg.last_known_good_sensor_config_revision or cfg.applied_sensor_config_revision,
+            }
+        )
+    except ProtocolError as exc:
+        logger.warning("Sensor config rejection report failed: %s", exc)
+
+
 def run_loop(stop_check=lambda: False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg, client = load_client_and_config()
@@ -317,6 +414,7 @@ def run_loop(stop_check=lambda: False) -> None:
     next_power_state_refresh_at = now if power.enabled else float("inf")
     next_power_refresh_check_at = now if power.enabled else float("inf")
     next_sensor_test_poll_at = now if cfg.sensors else float("inf")
+    next_sensor_config_poll_at = now if cfg.role == "greenhouse-node" else float("inf")
     next_cleanup_at = now + max(60, cfg.spool_cleanup_interval_seconds)
     try:
         while not stopping["value"] and not stop_check():
@@ -348,6 +446,11 @@ def run_loop(stop_check=lambda: False) -> None:
             if now >= next_sensor_test_poll_at:
                 poll_and_execute_sensor_test(cfg, client)
                 next_sensor_test_poll_at = now + max(1, cfg.sensor_test_poll_interval_seconds)
+            if now >= next_sensor_config_poll_at:
+                cfg, sensors = maybe_apply_sensor_config(cfg, client, sensors)
+                next_sensor_sample_at = now if sensors.runtimes else float("inf")
+                next_sensor_test_poll_at = now if cfg.sensors else float("inf")
+                next_sensor_config_poll_at = now + max(1, cfg.sensor_config_poll_interval_seconds)
             if now >= next_environment_upload_at:
                 process_environment_uploads(cfg, client, sensors, spool)
                 next_environment_upload_at = now + max(1, cfg.environment_upload_interval_seconds)
@@ -370,6 +473,7 @@ def run_loop(stop_check=lambda: False) -> None:
                 next_power_state_refresh_at,
                 next_power_refresh_check_at,
                 next_sensor_test_poll_at,
+                next_sensor_config_poll_at,
                 next_cleanup_at,
             )
             sleep_for = max(0.0, min(MAX_IDLE_SLEEP_SECONDS, next_due - time.monotonic()))

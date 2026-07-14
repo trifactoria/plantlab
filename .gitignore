@@ -9,6 +9,7 @@ coverage
 *.tsbuildinfo
 /data/
 artifacts/screenshots/
+artifacts/support/
 test-results/
 backups/
 prisma/dev.db

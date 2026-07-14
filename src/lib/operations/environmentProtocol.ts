@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { activeSensorsForNode } from "./sensorConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/environmentProtocol.ts is server-only operational code.");
@@ -153,12 +154,12 @@ export async function ingestEnvironmentTelemetry(
 export async function getLatestEnvironmentStatus(prisma: PrismaClient, nodeName: string) {
   const node = await prisma.plantLabNode.findUnique({
     where: { name: nodeName },
-    include: { sensors: { orderBy: [{ placement: "asc" }, { key: "asc" }] } },
   });
   if (!node) return null;
+  const sensors = await activeSensorsForNode(prisma, node.id);
   return {
     node: { id: node.id, name: node.name, role: node.role },
-    sensors: node.sensors.map((sensor) => ({
+    sensors: sensors.map((sensor) => ({
       key: sensor.key,
       name: sensor.name,
       type: sensor.type,

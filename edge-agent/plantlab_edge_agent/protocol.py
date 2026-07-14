@@ -210,6 +210,12 @@ class AgentProtocolClient:
     def post_environment(self, node_name: str, events: List[dict]) -> dict:
         return request_json(self._url("/api/agents/environment"), self.token, method="POST", body={"nodeName": node_name, "events": events}, timeout=20)
 
+    def desired_sensor_config(self) -> dict:
+        return request_json(self._url("/api/agents/sensors/config"), self.token, method="GET", timeout=10)
+
+    def report_sensor_config(self, payload: Dict[str, Any]) -> dict:
+        return request_json(self._url("/api/agents/sensors/config/report"), self.token, method="POST", body=payload, timeout=15)
+
     def post_power_state(self, node_name: str, outlets: List[dict]) -> dict:
         return request_json(self._url("/api/agents/power/state"), self.token, method="POST", body={"nodeName": node_name, "outlets": outlets}, timeout=20)
 

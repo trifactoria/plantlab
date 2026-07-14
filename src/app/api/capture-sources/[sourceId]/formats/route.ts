@@ -24,7 +24,7 @@ export async function GET(_request: Request, context: Context) {
     where: { id: sourceId },
     include: {
       assignments: {
-        where: { active: true },
+        where: { active: true, nodeCamera: { available: true, enabled: true, retiredAt: null } },
         include: { nodeCamera: true },
         orderBy: { updatedAt: "desc" },
         take: 1,

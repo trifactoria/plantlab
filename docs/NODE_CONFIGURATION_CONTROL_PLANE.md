@@ -1,107 +1,61 @@
 # Node Configuration Control Plane
 
-PlantLab currently learns much of a node's effective greenhouse configuration
-from edge reports:
+PlantLab node management should distinguish three related but separate facts:
 
-- `edge-agent.json` on the edge host is merged by `bin/plantlab node attach`.
-- Environmental telemetry upserts `NodeSensor` rows by `(nodeId, key)`.
-- Power state reports upsert `NodeOutlet` rows by `(nodeId, key)`.
-- Camera inventory reports upsert/update camera rows and assignments.
+- **Desired configuration**: coordinator-owned intent for sensors, outlets, cameras, and roles.
+- **Applied configuration**: the exact revision the edge accepted and loaded atomically.
+- **Observed hardware state**: what the node most recently saw when it sampled sensors, refreshed outlets, or inventoried cameras.
 
-That keeps historical rows available, but it does not yet give the
-coordinator an authoritative active configuration revision. A removed sensor
-can remain `enabled` in the coordinator because no report explicitly says
-"this key is no longer configured." The node summary currently avoids
-counting retired sensors with a one-hour last-attempt heuristic in
-`src/lib/operations/nodeDetail.ts`. That is a temporary display repair, not
-the long-term source of truth.
+Desired configuration is not proof that hardware changed. Observed hardware state is not permission for the edge to invent long-lived configuration.
+
+## Revisions And Ownership
+
+The coordinator owns desired configuration revisions. A revision is immutable once requested and contains the complete slice being applied, not a partial patch. The edge validates the whole revision, writes it atomically, reloads it, and acknowledges either `applied` or `rejected`.
+
+Credentials remain separate from configuration revisions. Node tokens, Kasa secrets, private keys, and host-specific credential files are never stored in revision snapshots.
 
 ## Desired, Applied, Observed
 
-Future node configuration should distinguish three related states.
+Desired sensor configuration includes stable sensor keys, mutable display names, type, GPIO, placement, enabled state, and retired state. Applied sensor configuration is the revision the edge loaded successfully. Observed sensor state is telemetry and diagnostics from sampling that applied configuration.
 
-**Desired configuration** is the coordinator-owned intent for a node:
-configured sensors, outlets, cameras, roles, schedules, and non-secret
-runtime options. Each desired snapshot should have a monotonically
-increasing revision, creation timestamp, author/source, and validation
-status. Credentials remain separate and must not be embedded in the desired
-snapshot.
+Camera desired configuration should bind assignments and operator-facing settings to a logical camera, not to `/dev/videoN`. Camera endpoint observations record current V4L2 paths, `/dev/v4l/by-id`, vendor/product/serial, USB path, and confidence evidence. Observed camera inventory may propose reattach candidates, but ambiguous devices require explicit operator selection.
 
-**Applied configuration** is the edge agent's acknowledged configuration:
-the revision it accepted, wrote atomically, loaded, and is currently using.
-The edge should reject invalid desired revisions with structured errors
-without partially applying them. It should preserve and report the last known
-good revision so a bad desired change can roll back without losing durable
-spool, credentials, or historical records.
+Outlet desired configuration should own behavior policy and provider aliases. Observed outlet state remains authoritative for what is physically on or off.
 
-**Observed hardware state** is what the edge actually sees now: sensor read
-attempts/classifications, outlet actual state, camera inventory, command
-results, and diagnostics. Observed state can drift from desired/applied state
-because hardware is unplugged, a Kasa alias is wrong, a camera path moved, a
-sensor failed, or the node is offline.
+Historical sensor, camera, outlet, reading, diagnostic, and capture records must be preserved. Retirement hides records from active views and config snapshots by default; it is not deletion.
 
-## Revision Flow
+## Edge Apply Rules
 
-1. The coordinator creates a desired configuration snapshot and marks it
-   pending for a node.
-2. The edge polls for the newest pending revision.
-3. The edge validates it locally, including hardware-specific constraints
-   that the coordinator cannot fully know.
-4. The edge writes the candidate config atomically to a staging path, loads
-   it, and performs bounded validation.
-5. On success, the edge promotes it to applied, reports the applied revision,
-   and resumes normal polling.
-6. On rejection, the edge reports a structured rejection and continues using
-   the last known good applied revision.
-7. The coordinator compares desired, applied, and observed state to surface
-   pending, rejected, drifted, stale, and offline statuses.
+The edge validates a complete revision before promotion:
 
-## Data Model Direction
+- reject duplicate active GPIOs;
+- reject unsupported sensor types;
+- write the new config through temp-file plus rename;
+- reload and construct runtimes before acknowledging;
+- keep last-known-good config on rejection;
+- report rejection reasons to the coordinator.
 
-Add an authoritative active-config snapshot for each node before replacing
-existing heuristics. The snapshot should preserve historical sensor, camera,
-and outlet rows rather than deleting them. Rows can be linked to first/last
-configured revisions so old history remains queryable while active UI views
-filter by applied revision.
+No partial application: a revision is applied as a whole or not at all.
 
-Recommended incremental order:
+## Drift, Offline Nodes, And Rollback
 
-1. Authoritative active-config snapshot table and revision metadata.
-2. Sensor desired/applied configuration and summary filtering by applied
-   revision.
-3. Outlet desired/applied configuration, including explicit behavior such as
-   `normal` and `pulse-only`.
-4. Camera desired/applied configuration and inventory drift reporting.
-5. Node-role transition jobs with bounded rollback.
-6. Project transfer/import once node state can be reasoned about without
-   relying on host-local assumptions.
+Drift exists when desired revision differs from applied revision, when applied status is rejected, or when observed hardware contradicts applied config. Offline nodes keep their last applied and last observed state until they return; the coordinator should not pretend a desired change applied while the node is offline.
 
-## Offline, Drift, And Rollback
+Rollback should create a new desired revision copied from the last-known-good applied revision. Do not mutate old revision rows.
 
-Offline nodes keep their last applied revision and last observed hardware
-state. A newer desired revision can remain pending until the node returns.
-The coordinator should not pretend pending desired state is observed state.
+## Role Transitions
 
-Drift should be explicit:
+Role transitions should be jobs owned by the coordinator. A transition from camera-node to greenhouse-node should stage desired role/capability config, deploy compatible runtime if needed, validate the node, then acknowledge the applied role. It should preserve credentials, spools, historical records, and media.
 
-- desired outlet exists but observed alias is missing;
-- applied sensor exists but recent attempts fail;
-- observed camera appears but is not in desired camera assignments;
-- edge reports an older applied revision than the coordinator's desired
-  revision.
+## Browser Safety
 
-Rollback should choose a known good applied revision, create a new desired
-revision that matches it, and let the edge acknowledge it normally. Avoid
-mutating historical revision records in place.
+Browser routes must expose structured operations only: request inventory refresh, create bounded test capture, update desired config, reattach to a known endpoint, or request a bounded diagnostic. They must never expose arbitrary shell execution, SSH command text, or filesystem paths as user-controlled execution inputs.
 
-## Security Boundaries
+## Incremental Implementation Order
 
-Credentials stay in the existing credential files/secrets flow and are
-referenced only by presence/status, never copied into browser-visible
-configuration JSON.
-
-Browser routes must not expose arbitrary SSH or shell execution. The
-coordinator should offer structured actions with bounded inputs, such as
-"apply config revision", "refresh inventory", "test sensor", or "toggle
-outlet", and those actions should flow through authenticated coordinator-to-
-agent protocols with timeouts and auditable results.
+1. Authoritative active-config snapshot for sensors, with compatibility fallback for old nodes.
+2. Sensor desired/applied configuration and edge acknowledgement.
+3. Outlet desired/applied configuration, including explicit behavior policies.
+4. Camera desired/applied configuration with logical camera, endpoint observations, and reattach audit.
+5. Node-role transition jobs.
+6. Project transfer/import.

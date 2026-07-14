@@ -57,6 +57,8 @@ class _FakeCoordinatorState:
         self.sensor_test_started = []
         self.sensor_test_reported = []
         self.sensor_test_failed = []
+        self.desired_sensor_config = None
+        self.sensor_config_reports = []
         self.node_environment_response = {"sensors": []}
 
     def authorized(self, headers) -> bool:
@@ -121,6 +123,12 @@ class _Handler(BaseHTTPRequestHandler):
                     "storedDiagnostics": len([event for event in events if isinstance(event, dict) and event.get("classification") != "accepted"]),
                 },
             )
+            return
+
+        if self.path == "/api/agents/sensors/config/report":
+            body = self._read_json_body()
+            self.state.sensor_config_reports.append(body)
+            self._send_json(200, {"status": "ok"})
             return
 
         if self.path == "/api/agents/power/state":
@@ -235,6 +243,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/agents/sensor-tests/next":
             command = self.state.next_sensor_test_queue.pop(0) if self.state.next_sensor_test_queue else None
             self._send_json(200, {"command": command})
+            return
+        if self.path == "/api/agents/sensors/config":
+            self._send_json(200, {"desired": self.state.desired_sensor_config})
             return
         if self.path.startswith("/api/nodes/") and self.path.endswith("/environment"):
             self._send_json(200, self.state.node_environment_response)

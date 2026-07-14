@@ -453,12 +453,23 @@ model PlantLabNode {
   inventoryRefreshRequestedAt DateTime?
   /// Set by the node detail page's "Refresh power state" action to ask the agent to re-upload outlet state immediately, mirroring inventoryRefreshRequestedAt.
   powerStateRefreshRequestedAt DateTime?
+  /// Coordinator-authored desired sensor config revision. Null means this node has not joined the desired/applied config protocol yet.
+  desiredSensorConfigRevision Int?
+  /// Last sensor config revision the edge explicitly applied.
+  appliedSensorConfigRevision Int?
+  /// applied | rejected | unknown. Kept on the node for fast summaries; detailed history lives in NodeSensorConfigRevision.
+  appliedSensorConfigStatus   String?
+  appliedSensorConfigError    String?
+  sensorConfigUpdatedAt       DateTime?
   createdAt                   DateTime  @default(now())
   updatedAt                   DateTime  @updatedAt
 
   credentials       NodeCredential[]
   cameras           NodeCamera[]
+  cameraEndpoints   NodeCameraEndpoint[]
+  cameraRepairAudit NodeCameraRepairAudit[]
   sensors           NodeSensor[]
+  sensorConfigRevisions NodeSensorConfigRevision[]
   outlets           NodeOutlet[]
   powerCommands      PowerCommand[]
   powerSchedules     PowerSchedule[]
@@ -470,6 +481,8 @@ model PlantLabNode {
 
   @@index([role])
   @@index([lastHeartbeatAt])
+  @@index([desiredSensorConfigRevision])
+  @@index([appliedSensorConfigRevision])
 }
 
 // A persistent daily on/off schedule for a power outlet (fans/lights).
@@ -582,6 +595,10 @@ model NodeSensor {
   gpio                  Int?
   placement             String?
   enabled               Boolean   @default(true)
+  configuredActive      Boolean   @default(true)
+  retiredAt             DateTime?
+  desiredConfigRevision Int?
+  appliedConfigRevision Int?
   firstSeenAt           DateTime  @default(now())
   lastSeenAt            DateTime  @default(now())
   lastAttemptAt         DateTime?
@@ -604,6 +621,8 @@ model NodeSensor {
   @@index([nodeId])
   @@index([lastSeenAt])
   @@index([latestClassification])
+  @@index([nodeId, configuredActive])
+  @@index([retiredAt])
 }
 
 model SensorReading {
@@ -738,8 +757,11 @@ model NodeCamera {
   usbPath              String?
   usbPort              String?
   alternateDevicesJson String?
+  identityEvidenceJson String?
   formatsJson          String?
   available            Boolean  @default(true)
+  enabled              Boolean  @default(true)
+  retiredAt            DateTime?
   lastSeenAt           DateTime @default(now())
   captureSourceId      String?
   createdAt            DateTime @default(now())
@@ -748,10 +770,67 @@ model NodeCamera {
   node          PlantLabNode           @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   captureSource CaptureSource?         @relation(fields: [captureSourceId], references: [id], onDelete: SetNull)
   assignments   NodeCameraAssignment[]
+  endpoints     NodeCameraEndpoint[]
+  repairAudit   NodeCameraRepairAudit[]
 
   @@unique([nodeId, stableId])
   @@index([nodeId])
   @@index([captureSourceId])
+  @@index([nodeId, available])
+  @@index([retiredAt])
+}
+
+model NodeCameraEndpoint {
+  id                   String   @id @default(cuid())
+  nodeId               String
+  nodeCameraId         String?
+  stableId             String
+  devicePath           String
+  name                 String?
+  vendorId             String?
+  productId            String?
+  serial               String?
+  physicalPath         String?
+  usbPath              String?
+  usbPort              String?
+  alternateDevicesJson String?
+  formatsJson          String?
+  available            Boolean  @default(true)
+  observedAt           DateTime @default(now())
+  unavailableAt        DateTime?
+  confidence           String   @default("reported-stable-id")
+  evidenceJson         String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  node       PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  nodeCamera NodeCamera?  @relation(fields: [nodeCameraId], references: [id], onDelete: SetNull)
+
+  @@unique([nodeId, stableId, devicePath])
+  @@index([nodeId, available])
+  @@index([nodeCameraId, observedAt])
+  @@index([nodeId, stableId])
+}
+
+model NodeCameraRepairAudit {
+  id              String   @id @default(cuid())
+  nodeId          String
+  nodeCameraId    String?
+  operation       String
+  status          String
+  requestedBy     String?
+  previousStateJson String?
+  nextStateJson   String?
+  evidenceJson    String?
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+
+  node       PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  nodeCamera NodeCamera?  @relation(fields: [nodeCameraId], references: [id], onDelete: SetNull)
+
+  @@index([nodeId, createdAt])
+  @@index([nodeCameraId])
+  @@index([operation, status])
 }
 
 model NodeCameraAssignment {
@@ -800,4 +879,27 @@ model AgentCaptureJob {
   @@index([nodeId, status, requestedAt])
   @@index([assignmentId])
   @@index([captureSourceId])
+}
+
+model NodeSensorConfigRevision {
+  id              String    @id @default(cuid())
+  nodeId          String
+  revision        Int
+  requestedAt     DateTime  @default(now())
+  requestedBy     String?
+  source          String    @default("coordinator")
+  validationStatus String   @default("valid")
+  applyStatus     String    @default("pending") // pending | applied | rejected
+  appliedAt       DateTime?
+  rejectedAt      DateTime?
+  rejectionReason String?
+  entriesJson     String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  node PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, revision])
+  @@index([nodeId, applyStatus])
+  @@index([requestedAt])
 }

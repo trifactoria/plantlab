@@ -9,7 +9,11 @@ export async function createManualCaptureJob(prisma: PrismaClient, input: { node
     where: { name: input.nodeName },
     include: {
       assignments: {
-        where: { active: true, ...(input.assignmentId ? { id: input.assignmentId } : {}) },
+        where: {
+          active: true,
+          nodeCamera: { available: true, enabled: true, retiredAt: null },
+          ...(input.assignmentId ? { id: input.assignmentId } : {}),
+        },
         include: { captureSource: true, nodeCamera: true },
         orderBy: { createdAt: "asc" },
       },

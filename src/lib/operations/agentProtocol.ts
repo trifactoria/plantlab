@@ -81,6 +81,7 @@ export async function recordHeartbeat(
 export async function updateCameraInventory(prisma: PrismaClient, nodeId: string, cameras: AgentCameraInventoryItem[]) {
   const now = new Date();
   const seenStableIds = new Set<string>();
+  const seenEndpointKeys = new Set<string>();
   const upserted = [];
   const reportsByLegacyStableId = new Map<string, AgentCameraInventoryItem[]>();
 
@@ -120,31 +121,31 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
       usbPath: camera.usbPath ?? camera.physicalPath ?? null,
       usbPort: camera.usbPort ?? null,
       alternateDevicesJson: JSON.stringify(camera.alternateDevices ?? []),
+      identityEvidenceJson: JSON.stringify(identityEvidenceForReport(camera, legacyStableId)),
       formatsJson: JSON.stringify(formatsForWrite),
       available: camera.available ?? true,
       lastSeenAt: now,
     };
     seenStableIds.add(stableId);
-    if (migratedExisting) {
-      migratedLegacyCameraIds.add(migratedExisting.id);
-      upserted.push(
-        await prisma.nodeCamera.update({
+    const saved = migratedExisting
+      ? await prisma.nodeCamera.update({
           where: { id: migratedExisting.id },
           data,
-        }),
-      );
-    } else {
-      upserted.push(
-        await prisma.nodeCamera.upsert({
+        })
+      : await prisma.nodeCamera.upsert({
           where: { nodeId_stableId: { nodeId, stableId } },
           create: {
             nodeId,
             ...data,
           },
           update: data,
-        }),
-      );
+        });
+    if (migratedExisting) {
+      migratedLegacyCameraIds.add(migratedExisting.id);
     }
+    await recordCameraEndpoint(prisma, nodeId, saved.id, camera, formatsForWrite, now, legacyStableId);
+    seenEndpointKeys.add(endpointKey(stableId, camera.devicePath));
+    upserted.push(saved);
   }
 
   await Promise.all([
@@ -155,6 +156,7 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
       },
       data: { available: false },
     }),
+    markMissingEndpointsUnavailable(prisma, nodeId, seenEndpointKeys, now),
     prisma.plantLabNode.update({
       where: { id: nodeId },
       data: {
@@ -165,6 +167,104 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
   ]);
 
   return upserted;
+}
+
+async function recordCameraEndpoint(
+  prisma: PrismaClient,
+  nodeId: string,
+  nodeCameraId: string,
+  camera: AgentCameraInventoryItem,
+  formats: CameraFormat[],
+  now: Date,
+  legacyStableId: string | null,
+) {
+  const stableId = camera.stableId.trim();
+  const evidence = identityEvidenceForReport(camera, legacyStableId);
+  await prisma.nodeCameraEndpoint.upsert({
+    where: {
+      nodeId_stableId_devicePath: {
+        nodeId,
+        stableId,
+        devicePath: camera.devicePath,
+      },
+    },
+    create: {
+      nodeId,
+      nodeCameraId,
+      stableId,
+      devicePath: camera.devicePath,
+      name: camera.name ?? null,
+      vendorId: camera.vendorId ?? null,
+      productId: camera.productId ?? null,
+      serial: camera.serial ?? null,
+      physicalPath: camera.physicalPath ?? null,
+      usbPath: camera.usbPath ?? camera.physicalPath ?? null,
+      usbPort: camera.usbPort ?? null,
+      alternateDevicesJson: JSON.stringify(camera.alternateDevices ?? []),
+      formatsJson: JSON.stringify(formats),
+      available: camera.available ?? true,
+      observedAt: now,
+      unavailableAt: null,
+      confidence: evidence.confidence,
+      evidenceJson: JSON.stringify(evidence),
+    },
+    update: {
+      nodeCameraId,
+      name: camera.name ?? null,
+      vendorId: camera.vendorId ?? null,
+      productId: camera.productId ?? null,
+      serial: camera.serial ?? null,
+      physicalPath: camera.physicalPath ?? null,
+      usbPath: camera.usbPath ?? camera.physicalPath ?? null,
+      usbPort: camera.usbPort ?? null,
+      alternateDevicesJson: JSON.stringify(camera.alternateDevices ?? []),
+      formatsJson: JSON.stringify(formats),
+      available: camera.available ?? true,
+      observedAt: now,
+      unavailableAt: null,
+      confidence: evidence.confidence,
+      evidenceJson: JSON.stringify(evidence),
+    },
+  });
+}
+
+async function markMissingEndpointsUnavailable(prisma: PrismaClient, nodeId: string, seenEndpointKeys: Set<string>, now: Date) {
+  const endpoints = await prisma.nodeCameraEndpoint.findMany({
+    where: { nodeId, available: true },
+    select: { id: true, stableId: true, devicePath: true },
+  });
+  const staleIds = endpoints.filter((endpoint) => !seenEndpointKeys.has(endpointKey(endpoint.stableId, endpoint.devicePath))).map((endpoint) => endpoint.id);
+  if (staleIds.length === 0) return;
+  await prisma.nodeCameraEndpoint.updateMany({
+    where: { id: { in: staleIds } },
+    data: { available: false, unavailableAt: now },
+  });
+}
+
+function endpointKey(stableId: string, devicePath: string) {
+  return `${stableId}\n${devicePath}`;
+}
+
+function identityEvidenceForReport(camera: AgentCameraInventoryItem, legacyStableId: string | null) {
+  const hasHardwareSerial = Boolean(camera.vendorId && camera.productId && camera.serial && !camera.stableId.includes(":path:"));
+  const hasPathDisambiguator = Boolean(camera.physicalPath || camera.usbPath || camera.usbPort);
+  return {
+    stableId: camera.stableId,
+    legacyStableId,
+    vendorId: camera.vendorId ?? null,
+    productId: camera.productId ?? null,
+    serial: camera.serial ?? null,
+    physicalPath: camera.physicalPath ?? null,
+    usbPath: camera.usbPath ?? camera.physicalPath ?? null,
+    usbPort: camera.usbPort ?? null,
+    devicePath: camera.devicePath,
+    confidence: hasHardwareSerial ? "hardware-serial" : hasPathDisambiguator ? "usb-path-disambiguated" : "reported-stable-id",
+    notes: hasHardwareSerial
+      ? ["Matched by vendor/product/serial; device path is only an endpoint."]
+      : hasPathDisambiguator
+        ? ["Matched by reported stable id with USB path evidence; identical serial devices are not merged without matching path evidence."]
+        : ["Weak identity; explicit reattach is required if this endpoint changes."],
+  };
 }
 
 function legacyStableIdForReport(camera: Pick<AgentCameraInventoryItem, "legacyStableId" | "vendorId" | "productId" | "serial">): string | null {

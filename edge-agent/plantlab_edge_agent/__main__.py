@@ -138,6 +138,8 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
         "greenhouseSecretPresent": greenhouse_secret_path.exists(),
         "sensorDriverMode": sensor_modes["resolved"],
         "sensorDriverModes": sensor_modes,
+        "appliedSensorConfigRevision": cfg.applied_sensor_config_revision if cfg else None,
+        "lastKnownGoodSensorConfigRevision": cfg.last_known_good_sensor_config_revision if cfg else None,
         "sensors": [
             {
                 "key": sensor.key,
@@ -412,6 +414,8 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"Service-effective sensor driver mode: {modes['serviceEffective'] or 'unknown'}")
     print(f"Current shell override: {modes['currentProcess'] or 'none'}")
     print(f"Sensor driver mode: {summary['sensorDriverMode']}")
+    print(f"Applied sensor config revision: {summary['appliedSensorConfigRevision'] if summary['appliedSensorConfigRevision'] is not None else '(none)'}")
+    print(f"Last known good sensor config revision: {summary['lastKnownGoodSensorConfigRevision'] if summary['lastKnownGoodSensorConfigRevision'] is not None else '(none)'}")
     cache = summary["cameraInventoryCache"]
     print(f"Camera capability enabled: {'yes' if summary['cameraCapabilityEnabled'] else 'no'}")
     print(f"Cached camera inventory: {'present' if cache['valid'] else 'missing'} ({cache['cameraCount']} cameras)")

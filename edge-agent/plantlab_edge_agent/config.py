@@ -65,9 +65,12 @@ class EdgeAgentConfig:
     power_command_poll_interval_seconds: int = 5
     power_state_refresh_interval_seconds: int = 60
     sensor_test_poll_interval_seconds: int = 10
+    sensor_config_poll_interval_seconds: int = 10
     spool_cleanup_interval_seconds: int = 600
     sensor_sample_interval_seconds: int = 15
     environment_upload_interval_seconds: int = 45
+    applied_sensor_config_revision: Optional[int] = None
+    last_known_good_sensor_config_revision: Optional[int] = None
     max_spool_bytes: int = 512 * 1024 * 1024  # 512MB - a Pi Zero's whole SD card is usually 8-32GB, but this stays conservative.
     max_upload_bytes: int = 8 * 1024 * 1024  # A single frame should be a few hundred KB at 720p JPEG; 8MB is a generous cap, not a target.
 
@@ -106,11 +109,14 @@ def read_config() -> Optional[EdgeAgentConfig]:
         power_command_poll_interval_seconds=int(raw.get("powerCommandPollIntervalSeconds", 5)),
         power_state_refresh_interval_seconds=int(raw.get("powerStateRefreshIntervalSeconds", 60)),
         sensor_test_poll_interval_seconds=int(raw.get("sensorTestPollIntervalSeconds", 10)),
+        sensor_config_poll_interval_seconds=int(raw.get("sensorConfigPollIntervalSeconds", 10)),
         spool_cleanup_interval_seconds=int(raw.get("spoolCleanupIntervalSeconds", 600)),
         sensor_sample_interval_seconds=int(raw.get("sensorSampleIntervalSeconds", 15)),
         environment_upload_interval_seconds=int(raw.get("environmentUploadIntervalSeconds", 45)),
         max_spool_bytes=int(raw.get("maxSpoolBytes", 512 * 1024 * 1024)),
         max_upload_bytes=int(raw.get("maxUploadBytes", 8 * 1024 * 1024)),
+        applied_sensor_config_revision=_optional_int(raw.get("appliedSensorConfigRevision")),
+        last_known_good_sensor_config_revision=_optional_int(raw.get("lastKnownGoodSensorConfigRevision")),
     )
 
 
@@ -127,11 +133,14 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "powerCommandPollIntervalSeconds": config.power_command_poll_interval_seconds,
         "powerStateRefreshIntervalSeconds": config.power_state_refresh_interval_seconds,
         "sensorTestPollIntervalSeconds": config.sensor_test_poll_interval_seconds,
+        "sensorConfigPollIntervalSeconds": config.sensor_config_poll_interval_seconds,
         "spoolCleanupIntervalSeconds": config.spool_cleanup_interval_seconds,
         "sensorSampleIntervalSeconds": config.sensor_sample_interval_seconds,
         "environmentUploadIntervalSeconds": config.environment_upload_interval_seconds,
         "maxSpoolBytes": config.max_spool_bytes,
         "maxUploadBytes": config.max_upload_bytes,
+        "appliedSensorConfigRevision": config.applied_sensor_config_revision,
+        "lastKnownGoodSensorConfigRevision": config.last_known_good_sensor_config_revision,
     }
     if config.sensors:
         payload["sensors"] = [
@@ -274,6 +283,16 @@ def _required_string(value, label: str) -> str:
     return value.strip()
 
 
+def _optional_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
 def _validate_sensor_set(sensors: List[GreenhouseSensorConfig]) -> None:
     keys = set()
     gpios = set()
@@ -346,6 +365,8 @@ def validate_config(config: EdgeAgentConfig) -> List[str]:
         problems.append("sensorSampleIntervalSeconds must be positive.")
     if config.environment_upload_interval_seconds < 1:
         problems.append("environmentUploadIntervalSeconds must be positive.")
+    if config.sensor_config_poll_interval_seconds < 1:
+        problems.append("sensorConfigPollIntervalSeconds must be positive.")
     try:
         _validate_sensor_set(config.sensors)
     except ConfigError as exc:
