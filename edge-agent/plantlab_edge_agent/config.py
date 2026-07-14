@@ -63,6 +63,7 @@ class EdgeAgentConfig:
     camera_refresh_poll_interval_seconds: int = 60
     power_command_poll_interval_seconds: int = 5
     power_state_refresh_interval_seconds: int = 60
+    sensor_test_poll_interval_seconds: int = 10
     spool_cleanup_interval_seconds: int = 600
     sensor_sample_interval_seconds: int = 15
     environment_upload_interval_seconds: int = 45
@@ -103,6 +104,7 @@ def read_config() -> Optional[EdgeAgentConfig]:
         camera_refresh_poll_interval_seconds=int(raw.get("cameraRefreshPollIntervalSeconds", 60)),
         power_command_poll_interval_seconds=int(raw.get("powerCommandPollIntervalSeconds", 5)),
         power_state_refresh_interval_seconds=int(raw.get("powerStateRefreshIntervalSeconds", 60)),
+        sensor_test_poll_interval_seconds=int(raw.get("sensorTestPollIntervalSeconds", 10)),
         spool_cleanup_interval_seconds=int(raw.get("spoolCleanupIntervalSeconds", 600)),
         sensor_sample_interval_seconds=int(raw.get("sensorSampleIntervalSeconds", 15)),
         environment_upload_interval_seconds=int(raw.get("environmentUploadIntervalSeconds", 45)),
@@ -123,6 +125,7 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
         "cameraRefreshPollIntervalSeconds": config.camera_refresh_poll_interval_seconds,
         "powerCommandPollIntervalSeconds": config.power_command_poll_interval_seconds,
         "powerStateRefreshIntervalSeconds": config.power_state_refresh_interval_seconds,
+        "sensorTestPollIntervalSeconds": config.sensor_test_poll_interval_seconds,
         "spoolCleanupIntervalSeconds": config.spool_cleanup_interval_seconds,
         "sensorSampleIntervalSeconds": config.sensor_sample_interval_seconds,
         "environmentUploadIntervalSeconds": config.environment_upload_interval_seconds,

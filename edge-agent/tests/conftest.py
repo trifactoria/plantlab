@@ -49,8 +49,15 @@ class _FakeCoordinatorState:
         self.power_claimed = []
         self.power_completed = []
         self.power_failed = []
+        self.power_refresh_requested_at = None
         self.next_job_queue = []
         self.camera_refresh_requested_at = None
+        self.next_sensor_test_queue = []
+        self.sensor_test_claimed = []
+        self.sensor_test_started = []
+        self.sensor_test_reported = []
+        self.sensor_test_failed = []
+        self.node_environment_response = {"sensors": []}
 
     def authorized(self, headers) -> bool:
         auth = headers.get("Authorization", "")
@@ -142,6 +149,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "failed", "commandId": command_id})
             return
 
+        if self.path.startswith("/api/agents/sensor-tests/") and self.path.endswith("/claim"):
+            command_id = self.path.split("/")[4]
+            self.state.sensor_test_claimed.append(command_id)
+            self._send_json(200, {"status": "claimed", "commandId": command_id})
+            return
+
+        if self.path.startswith("/api/agents/sensor-tests/") and self.path.endswith("/start"):
+            command_id = self.path.split("/")[4]
+            self.state.sensor_test_started.append(command_id)
+            self._send_json(200, {"status": "running", "commandId": command_id})
+            return
+
+        if self.path.startswith("/api/agents/sensor-tests/") and self.path.endswith("/report"):
+            command_id = self.path.split("/")[4]
+            body = self._read_json_body()
+            self.state.sensor_test_reported.append({"commandId": command_id, **body})
+            self._send_json(200, {"status": "succeeded" if body.get("finalPass") else "failed", "commandId": command_id})
+            return
+
+        if self.path.startswith("/api/agents/sensor-tests/") and self.path.endswith("/fail"):
+            command_id = self.path.split("/")[4]
+            body = self._read_json_body()
+            self.state.sensor_test_failed.append({"commandId": command_id, **body})
+            self._send_json(200, {"status": "failed", "commandId": command_id})
+            return
+
         if self.path.startswith("/api/agents/jobs/") and self.path.endswith("/claim"):
             job_id = self.path.split("/")[4]
             body = self._read_json_body()
@@ -189,6 +222,22 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/api/agents/power/commands/next":
             command = self.state.next_power_command_queue.pop(0) if self.state.next_power_command_queue else None
             self._send_json(200, {"command": command})
+            return
+        if self.path == "/api/agents/power/refresh":
+            self._send_json(
+                200,
+                {
+                    "requested": self.state.power_refresh_requested_at is not None,
+                    "requestedAt": self.state.power_refresh_requested_at,
+                },
+            )
+            return
+        if self.path == "/api/agents/sensor-tests/next":
+            command = self.state.next_sensor_test_queue.pop(0) if self.state.next_sensor_test_queue else None
+            self._send_json(200, {"command": command})
+            return
+        if self.path.startswith("/api/nodes/") and self.path.endswith("/environment"):
+            self._send_json(200, self.state.node_environment_response)
             return
         if self.path == "/api/agents/cameras/refresh":
             self._send_json(

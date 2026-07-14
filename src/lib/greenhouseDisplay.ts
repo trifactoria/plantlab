@@ -12,7 +12,14 @@ export type EnvironmentSensor = {
   latestHumidityPct: number | null;
   lastAttemptAt: string | null;
   lastAcceptedAt: string | null;
+  lastDiagnosticCode?: string | null;
+  lastDiagnosticMessage?: string | null;
 };
+
+/** Counts active sensors whose current classification is not "fresh" - drives the home dashboard's "N sensors need attention" indicator. */
+export function countSensorsNeedingAttention<T extends { key: string }>(slots: ActiveSensorSlot<T & EnvironmentSensor>[]): number {
+  return slots.filter(({ sensor }) => sensorStatusTone(sensor) !== "fresh").length;
+}
 
 /**
  * The four currently-configured DHT22 sensors on greenhouse-zero, in

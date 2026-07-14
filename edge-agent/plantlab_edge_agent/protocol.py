@@ -154,6 +154,25 @@ class PowerCommand:
         )
 
 
+@dataclass
+class SensorTestCommand:
+    id: str
+    sensor_key: str
+    attempts_requested: int
+    interval_seconds: float
+    expires_at: str
+
+    @staticmethod
+    def from_wire(raw: dict) -> "SensorTestCommand":
+        return SensorTestCommand(
+            id=raw["id"],
+            sensor_key=raw["sensorKey"],
+            attempts_requested=raw["attemptsRequested"],
+            interval_seconds=raw["intervalSeconds"],
+            expires_at=raw["expiresAt"],
+        )
+
+
 class AgentProtocolClient:
     def __init__(self, coordinator_url: str, token: str):
         self.coordinator_url = coordinator_url.rstrip("/")
@@ -222,6 +241,26 @@ class AgentProtocolClient:
 
     def camera_inventory_refresh_request(self) -> dict:
         return request_json(self._url("/api/agents/cameras/refresh"), self.token, method="GET")
+
+    def power_state_refresh_request(self) -> dict:
+        return request_json(self._url("/api/agents/power/refresh"), self.token, method="GET")
+
+    def next_sensor_test(self) -> Optional[SensorTestCommand]:
+        result = request_json(self._url("/api/agents/sensor-tests/next"), self.token, method="GET")
+        command = result.get("command")
+        return SensorTestCommand.from_wire(command) if command else None
+
+    def claim_sensor_test(self, command_id: str) -> None:
+        request_json(self._url(f"/api/agents/sensor-tests/{command_id}/claim"), self.token, method="POST", body={})
+
+    def start_sensor_test(self, command_id: str) -> None:
+        request_json(self._url(f"/api/agents/sensor-tests/{command_id}/start"), self.token, method="POST", body={})
+
+    def report_sensor_test(self, command_id: str, payload: Dict[str, Any]) -> None:
+        request_json(self._url(f"/api/agents/sensor-tests/{command_id}/report"), self.token, method="POST", body=payload, timeout=15)
+
+    def fail_sensor_test(self, command_id: str, error_code: str, error_message: str) -> None:
+        request_json(self._url(f"/api/agents/sensor-tests/{command_id}/fail"), self.token, method="POST", body={"errorCode": error_code, "errorMessage": error_message})
 
     def next_job(self) -> Optional[Job]:
         result = request_json(self._url("/api/agents/jobs/next"), self.token, method="GET")

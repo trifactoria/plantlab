@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { CoordinatorDashboardData } from "@/lib/operations/coordinatorDashboard";
 import { formatDateTime } from "@/lib/format";
 
@@ -76,7 +77,11 @@ export function CoordinatorStatusPanel({
               <tbody>
                 {data.nodes.map((node) => (
                   <tr key={node.id} className="border-t border-stone-100">
-                    <td className="px-3 py-2 font-medium text-stone-950">{node.name}</td>
+                    <td className="px-3 py-2 font-medium text-stone-950">
+                      <Link href={`/nodes/${node.name}`} className="hover:underline">
+                        {node.name}
+                      </Link>
+                    </td>
                     <td className="px-3 py-2 text-stone-600">{node.role}</td>
                     <td className="px-3 py-2">
                       <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${STATUS_STYLES[node.statusLabel]}`}>

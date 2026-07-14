@@ -451,6 +451,8 @@ model PlantLabNode {
   lastInventoryAt             DateTime?
   /// Set by the coordinator CLI/UI to ask the agent to send inventory immediately on its next poll.
   inventoryRefreshRequestedAt DateTime?
+  /// Set by the node detail page's "Refresh power state" action to ask the agent to re-upload outlet state immediately, mirroring inventoryRefreshRequestedAt.
+  powerStateRefreshRequestedAt DateTime?
   createdAt                   DateTime  @default(now())
   updatedAt                   DateTime  @updatedAt
 
@@ -458,12 +460,13 @@ model PlantLabNode {
   cameras           NodeCamera[]
   sensors           NodeSensor[]
   outlets           NodeOutlet[]
-  powerCommands     PowerCommand[]
-  powerSchedules    PowerSchedule[]
-  sensorReadings    SensorReading[]
-  sensorDiagnostics SensorDiagnostic[]
-  assignments       NodeCameraAssignment[]
-  jobs              AgentCaptureJob[]
+  powerCommands      PowerCommand[]
+  powerSchedules     PowerSchedule[]
+  sensorReadings     SensorReading[]
+  sensorDiagnostics  SensorDiagnostic[]
+  sensorTestCommands SensorTestCommand[]
+  assignments        NodeCameraAssignment[]
+  jobs               AgentCaptureJob[]
 
   @@index([role])
   @@index([lastHeartbeatAt])
@@ -628,6 +631,18 @@ model SensorDiagnostic {
   humidityPct    Float?
   code           String?
   message        String?
+  /// Which attempt within a multi-attempt sequence produced this diagnostic
+  /// (1-based) - populated by sensor-test attempts; null for ordinary
+  /// single-shot continuous telemetry sampling, where the concept doesn't apply.
+  attemptNumber  Int?
+  /// Driver/backend that produced this event, e.g. "pigpio", "mock" - see edge-agent/plantlab_edge_agent/sensors/.
+  driver         String?
+  /// BCM GPIO configured at the time of this event. Denormalized from
+  /// NodeSensor.gpio so historical diagnostics stay accurate even if a
+  /// sensor's GPIO assignment is later reconfigured.
+  gpio           Int?
+  /// Wall-clock duration of the read attempt in milliseconds, when known.
+  durationMs     Int?
   receivedAt     DateTime @default(now())
 
   sensor NodeSensor   @relation(fields: [sensorId], references: [id], onDelete: Restrict)
@@ -637,6 +652,57 @@ model SensorDiagnostic {
   @@index([sensorId, capturedAt])
   @@index([nodeId, capturedAt])
   @@index([classification])
+}
+
+// A bounded, authenticated remote diagnostic command - "run N read attempts
+// against this sensor and report the results," equivalent in intent to the
+// local `plantlab-edge sensor test <key> --attempts N --interval S` CLI
+// command, but dispatched from the coordinator browser through the normal
+// agent command-queue protocol (mirrors PowerCommand's lifecycle exactly -
+// see src/lib/operations/powerProtocol.ts and sensorTestProtocol.ts).
+// "running" (absent from PowerCommand) exists because a sensor test takes
+// several seconds to tens of seconds to execute, unlike a near-instant
+// power toggle - the UI needs a distinct state between "claimed" and done.
+model SensorTestCommand {
+  id                String    @id @default(cuid())
+  nodeId            String
+  sensorKey         String
+  status            String    @default("pending") // pending | claimed | running | succeeded | failed | expired | cancelled
+  attemptsRequested Int
+  intervalSeconds   Float
+  requestedAt       DateTime  @default(now())
+  availableAt       DateTime  @default(now())
+  claimedAt         DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiresAt         DateTime
+  attemptCount      Int       @default(0)
+  idempotencyKey    String?
+  requestedBy       String?
+  /// Attempts actually executed, accepted count, failed count, and a
+  /// structured per-attempt array (classification/code/message/reading) -
+  /// JSON since this is opaque test-result detail read as a whole, not a
+  /// commonly-queried field (see AGENTS.md "use structured fields for
+  /// common searchable concepts" - the searchable concepts here are
+  /// sensorKey/status/requestedAt, which are already plain columns).
+  attemptsCompleted Int?
+  acceptedCount     Int?
+  failedCount       Int?
+  finalPass         Boolean?
+  effectiveDriver   String?
+  configuredGpio    Int?
+  attemptsJson      String?
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  node PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, idempotencyKey])
+  @@index([nodeId, sensorKey, status])
+  @@index([nodeId, status, availableAt])
+  @@index([expiresAt])
 }
 
 model NodeCredential {

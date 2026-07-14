@@ -131,6 +131,14 @@ export async function ingestEnvironmentTelemetry(
             humidityPct: event.humidityPct,
             code: event.diagnosticCode,
             message: event.diagnosticMessage,
+            // GPIO as currently configured at ingest time - denormalized so
+            // historical diagnostics stay accurate across reassignment.
+            // attemptNumber/driver/durationMs are populated for
+            // sensor-test-sourced diagnostics only (see
+            // sensorTestProtocol.ts) - ordinary continuous telemetry
+            // sampling doesn't have a retry-attempt concept and the edge
+            // driver doesn't currently measure/report per-read duration.
+            gpio: event.sensor.gpio,
           },
         });
         storedDiagnostics += 1;
@@ -168,6 +176,90 @@ export async function getLatestEnvironmentStatus(prisma: PrismaClient, nodeName:
       lastDiagnosticCode: sensor.lastDiagnosticCode,
       lastDiagnosticMessage: sensor.lastDiagnosticMessage,
     })),
+  };
+}
+
+export type SensorEventHistoryItem = {
+  kind: "accepted" | "diagnostic";
+  capturedAt: string;
+  classification: string;
+  temperatureC: number | null;
+  humidityPct: number | null;
+  code: string | null;
+  message: string | null;
+  attemptNumber: number | null;
+  driver: string | null;
+  gpio: number | null;
+  durationMs: number | null;
+};
+
+/** Full detail for one sensor's page - see /nodes/[nodeName]/sensors/[sensorKey]. */
+export async function getSensorDetail(prisma: PrismaClient, nodeName: string, sensorKey: string, historyLimit = 25) {
+  const node = await prisma.plantLabNode.findUnique({ where: { name: nodeName } });
+  if (!node) return { ok: false as const, status: 404, error: `No registered node named "${nodeName}".` };
+
+  const sensor = await prisma.nodeSensor.findUnique({ where: { nodeId_key: { nodeId: node.id, key: sensorKey } } });
+  if (!sensor) return { ok: false as const, status: 404, error: `Sensor "${sensorKey}" is not known for node "${nodeName}".` };
+
+  const [recentReadings, recentDiagnostics] = await Promise.all([
+    prisma.sensorReading.findMany({ where: { sensorId: sensor.id }, orderBy: { capturedAt: "desc" }, take: historyLimit }),
+    prisma.sensorDiagnostic.findMany({ where: { sensorId: sensor.id }, orderBy: { capturedAt: "desc" }, take: historyLimit }),
+  ]);
+
+  const events: SensorEventHistoryItem[] = [
+    ...recentReadings.map((reading): SensorEventHistoryItem => ({
+      kind: "accepted",
+      capturedAt: reading.capturedAt.toISOString(),
+      classification: "accepted",
+      temperatureC: reading.temperatureC,
+      humidityPct: reading.humidityPct,
+      code: null,
+      message: null,
+      attemptNumber: null,
+      driver: null,
+      gpio: null,
+      durationMs: null,
+    })),
+    ...recentDiagnostics.map((diagnostic): SensorEventHistoryItem => ({
+      kind: "diagnostic",
+      capturedAt: diagnostic.capturedAt.toISOString(),
+      classification: diagnostic.classification,
+      temperatureC: diagnostic.temperatureC,
+      humidityPct: diagnostic.humidityPct,
+      code: diagnostic.code,
+      message: diagnostic.message,
+      attemptNumber: diagnostic.attemptNumber,
+      driver: diagnostic.driver,
+      gpio: diagnostic.gpio,
+      durationMs: diagnostic.durationMs,
+    })),
+  ]
+    .sort((a, b) => (a.capturedAt < b.capturedAt ? 1 : -1))
+    .slice(0, historyLimit);
+
+  return {
+    ok: true as const,
+    node: { id: node.id, name: node.name, role: node.role },
+    sensor: {
+      key: sensor.key,
+      name: sensor.name,
+      type: sensor.type,
+      gpio: sensor.gpio,
+      placement: sensor.placement,
+      enabled: sensor.enabled,
+      latestClassification: sensor.latestClassification,
+      latestTemperatureC: sensor.latestTemperatureC,
+      latestHumidityPct: sensor.latestHumidityPct,
+      lastAttemptAt: sensor.lastAttemptAt?.toISOString() ?? null,
+      lastAcceptedAt: sensor.lastAcceptedAt?.toISOString() ?? null,
+      stale: sensor.latestClassification === "stale",
+      consecutiveFailures: sensor.consecutiveFailures,
+      consecutiveRejects: sensor.consecutiveRejects,
+      lastDiagnosticCode: sensor.lastDiagnosticCode,
+      lastDiagnosticMessage: sensor.lastDiagnosticMessage,
+      firstSeenAt: sensor.firstSeenAt.toISOString(),
+    },
+    events,
   };
 }
 

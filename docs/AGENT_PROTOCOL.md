@@ -328,6 +328,91 @@ This endpoint rejects permanent water `on`, excessive pulse durations,
 unknown outlets, disabled outlets, and duplicate active commands for the
 same outlet.
 
+## Sensor test commands
+
+A bounded, authenticated diagnostic command - the coordinator-triggered
+equivalent of `plantlab-edge sensor test <key> --attempts N --interval S`.
+Mirrors the power command lifecycle above almost exactly (see
+`src/lib/operations/sensorTestProtocol.ts`), plus one extra status,
+`running`, because a bounded multi-attempt test takes several seconds to
+tens of seconds, unlike a near-instant power toggle. Status values:
+`pending`, `claimed`, `running`, `succeeded`, `failed`, `expired`,
+`cancelled`. At most one active (`pending`/`claimed`/`running`) test is
+permitted per sensor at a time - a new request while one is active is
+rejected with `409`.
+
+### `GET /api/agents/sensor-tests/next`
+
+```json
+{ "command": { "id": "cmd_...", "sensorKey": "greenhouse-middle", "attemptsRequested": 5, "intervalSeconds": 3, "expiresAt": "2026-07-14T15:05:00.000Z" } }
+```
+
+### `POST /api/agents/sensor-tests/{id}/claim`
+
+Atomically claims a pending test. Idempotent for repeated claims by the
+same node while still claimed.
+
+### `POST /api/agents/sensor-tests/{id}/start`
+
+Marks a claimed test `running` - the agent calls this immediately before
+executing the bounded read-attempt loop, so the UI can distinguish "queued"
+from "actually in progress."
+
+### `POST /api/agents/sensor-tests/{id}/report`
+
+Marks a running (or still-claimed, if execution was effectively
+instantaneous) test complete with its full result:
+
+```json
+{
+  "attemptsCompleted": 5,
+  "acceptedCount": 0,
+  "failedCount": 5,
+  "finalPass": false,
+  "effectiveDriver": "pigpio",
+  "configuredGpio": 17,
+  "attempts": [
+    { "attempt": 1, "classification": "failed", "code": "sensor-no-response", "message": "No DHT22 response pulses were received.", "temperatureC": null, "humidityPct": null }
+  ]
+}
+```
+
+`finalPass` determines the resulting status: `succeeded` or `failed` - this
+is the test's own verdict, not a transport-level error (see `.../fail`
+below for that).
+
+### `POST /api/agents/sensor-tests/{id}/fail`
+
+Marks a pending/claimed/running test failed for an infrastructure reason
+(e.g. the sensor is not configured on this node, or the driver crashed
+before producing any attempt result) rather than a normal test verdict:
+
+```json
+{ "errorCode": "sensor-not-configured", "errorMessage": "Sensor greenhouse-middle is not present in this node's configuration." }
+```
+
+### `GET /api/agents/power/refresh`
+
+Mirrors `GET /api/agents/cameras/refresh` for outlet state - `{"requested": true, "requestedAt": "..."}` when the coordinator's "Refresh power state" node action has been triggered since the agent last uploaded outlet state.
+
+### `GET /api/nodes/{nodeName}/sensors/{sensorKey}`
+
+Full sensor detail for the sensor page: current state, recent accepted/diagnostic event history, and the active or most recent sensor test.
+
+### `POST /api/nodes/{nodeName}/sensors/{sensorKey}/test`
+
+Queues a sensor test from the browser. Body: `{ "attempts": 5, "intervalSeconds": 3 }` (both optional, defaulting to 5/3; attempts bounded to 1-10, interval to 0-10s).
+
+### `GET /api/nodes/{nodeName}`
+
+Node summary for the node detail page: identity/connectivity plus healthy/degraded/failed counts per subsystem (cameras, sensors, power, command queues).
+
+### `GET /api/nodes/{nodeName}/timeline?filter=all|sensors|power|cameras|agent`
+
+Unified recent-activity view composed from existing persisted rows
+(`SensorDiagnostic`, `PowerCommand`, `SensorTestCommand`, heartbeat/
+inventory timestamps) - not a separate logging system.
+
 ### `GET /api/agents/jobs/next`
 
 Returns the oldest queued `AgentCaptureJob` for this node, or

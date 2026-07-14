@@ -30,11 +30,10 @@ from .power.kasa import KasaPowerDriver, dependency_available as kasa_dependency
 from .power.models import WATER_MAX_PULSE_SECONDS
 from .power.runtime import PowerManager
 from .sensors import probe as sensor_probe
-from .sensors.base import CLASSIFICATION_ACCEPTED, RawEnvironmentalSample, SensorDriverError
+from .sensors.base import CLASSIFICATION_ACCEPTED
 from .sensors.dht22 import DHT22PigpioDriver
-from .sensors.mock import DriverUnavailableError
 from .sensors.runtime import DRIVER_MODE_DHT22, DRIVER_MODE_DISABLED, DRIVER_MODE_ENV, DRIVER_MODE_MOCK, selected_driver_mode
-from .sensors.validation import EnvironmentalSampleValidator
+from .sensors.test_runner import SensorTestResult, run_bounded_sensor_test
 
 try:
     from . import _install_meta
@@ -290,10 +289,98 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0 if cfg and not config.validate_config(cfg) and summary["credentialPresent"] else 1
 
 
-def cmd_doctor(_args: argparse.Namespace) -> int:
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Default: fast runtime checks plus a *reported* (not freshly tested)
+    per-sensor health summary from the coordinator's last-known
+    classifications - see docs/AGENT_PROTOCOL.md `GET /api/nodes/{name}/environment`.
+    --hardware/--all-sensors/--sensor actually exercise the hardware with
+    bounded attempts - see _run_hardware_checks(). Kept as separate,
+    explicit opt-in checks so the default `doctor` stays fast."""
     report = run_self_check(send_heartbeat=True)
     print_check_report(report)
+
+    cfg, _config_error = _load_config_safely()
+    _print_sensor_health_summary(cfg)
+
+    sensor_arg = getattr(args, "sensor", None)
+    hardware_requested = getattr(args, "hardware", False) or getattr(args, "all_sensors", False) or bool(sensor_arg)
+    if hardware_requested:
+        if not cfg:
+            print("Hardware sensor checks skipped: configuration unavailable.", file=sys.stderr)
+            return 1
+        keys = [sensor_arg] if sensor_arg else [sensor.key for sensor in cfg.sensors if sensor.enabled]
+        hardware_ok = _run_hardware_checks(cfg, keys, args.attempts, args.interval)
+        return 0 if report["ok"] and hardware_ok else 1
+
     return 0 if report["ok"] else 1
+
+
+def _print_sensor_health_summary(cfg: config.EdgeAgentConfig | None) -> None:
+    if not cfg or not cfg.coordinator_url or not cfg.sensors:
+        return
+    configured_keys = {sensor.key for sensor in cfg.sensors if sensor.enabled}
+    if not configured_keys:
+        return
+
+    print("")
+    try:
+        result = request_json(f"{cfg.coordinator_url.rstrip('/')}/api/nodes/{cfg.node_name}/environment", config.read_credential() or "", method="GET", timeout=5)
+    except ProtocolError as exc:
+        print("Sensor status: could not reach coordinator to check current sensor health.")
+        print(f"  {exc}")
+        return
+
+    sensors = result.get("sensors", []) if isinstance(result, dict) else []
+    relevant = [item for item in sensors if isinstance(item, dict) and item.get("key") in configured_keys]
+    healthy = sum(1 for item in relevant if item.get("latestClassification") == "accepted")
+    failing = len(relevant) - healthy
+
+    print(f"Configured sensors: {len(configured_keys)}")
+    print(f"Currently healthy: {healthy}")
+    print(f"Currently failing: {failing}")
+    if failing > 0:
+        print("WARN: individual sensor failures detected; run `plantlab-edge doctor --all-sensors` for details.")
+
+
+def _run_hardware_checks(cfg: config.EdgeAgentConfig, keys: list[str], attempts: int, interval: float) -> bool:
+    print("")
+    print("Hardware sensor checks:")
+    all_pass = True
+    for key in keys:
+        sensor = _find_sensor(cfg, key)
+        if sensor is None:
+            print(f"FAIL {key}: sensor-not-configured - not present in this node's configuration")
+            all_pass = False
+            continue
+        if not sensor.enabled:
+            print(f"SKIP {key}: disabled")
+            continue
+        if sensor.type != "dht22":
+            print(f"SKIP {key}: unsupported type {sensor.type}")
+            continue
+        driver = DHT22PigpioDriver(sensor)
+        result = run_bounded_sensor_test(driver, sensor, attempts, interval)
+        if result.final_pass:
+            print(f"PASS {key}")
+        else:
+            print(f"FAIL {key}: {_summarize_hardware_failure(result)}")
+            all_pass = False
+    return all_pass
+
+
+def _summarize_hardware_failure(result: SensorTestResult) -> str:
+    codes = [outcome.code for outcome in result.attempts if outcome.code]
+    total = len(result.attempts)
+    if codes and len(set(codes)) == 1:
+        code = codes[0]
+        if code == "sensor-no-response":
+            return f"no valid response in {total} attempts"
+        if code == "dht-checksum":
+            return f"checksum failures in {total} attempts"
+        if code == "dht-timeout":
+            return f"timed out in {total} attempts"
+        return f"{code} in {total} attempts"
+    return f"no valid readings in {total} attempts"
 
 
 def cmd_config_show(args: argparse.Namespace) -> int:
@@ -748,45 +835,14 @@ def cmd_sensor_test(args: argparse.Namespace) -> int:
     print("Backend: pigpio")
 
     driver = DHT22PigpioDriver(sensor)
-    validator = EnvironmentalSampleValidator(sensor)
-    accepted: list[RawEnvironmentalSample] = []
-    try:
-        for attempt in range(1, args.attempts + 1):
-            try:
-                raw = driver.read()
-            except DriverUnavailableError as exc:
-                print(f"Attempt {attempt}/{args.attempts}: {getattr(exc, 'code', 'driver-unavailable')} - {exc}")
-            except SensorDriverError as exc:
-                print(f"Attempt {attempt}/{args.attempts}: {exc.code} - {exc.safe_message}")
-            except Exception as exc:
-                if args.verbose:
-                    print(f"Attempt {attempt}/{args.attempts}: sensor-read-error - {type(exc).__name__}: {exc}")
-                else:
-                    print(f"Attempt {attempt}/{args.attempts}: sensor-read-error - sensor driver read failed")
-            else:
-                events = validator.evaluate(raw)
-                classification = events[-1].classification if events else "unknown"
-                detail = ""
-                diagnostic = events[-1].diagnostic_code if events else None
-                if diagnostic:
-                    detail = f" ({diagnostic})"
-                temp = raw.temperature_c
-                humidity = raw.humidity_pct
-                if isinstance(temp, (int, float)) and isinstance(humidity, (int, float)):
-                    print(f"Attempt {attempt}/{args.attempts}: {temp:.1f} C, {humidity:.1f}% RH - {classification}{detail}")
-                else:
-                    print(f"Attempt {attempt}/{args.attempts}: missing value - {classification}{detail}")
-                if classification == CLASSIFICATION_ACCEPTED:
-                    accepted.append(raw)
-            if attempt < args.attempts:
-                time.sleep(args.interval)
-    finally:
-        driver.close()
+    result = run_bounded_sensor_test(driver, sensor, args.attempts, args.interval, verbose=args.verbose)
+    _print_sensor_test_attempts(result, args.attempts)
 
-    if accepted:
-        latest = accepted[-1]
+    accepted_readings = [outcome for outcome in result.attempts if outcome.temperature_c is not None and outcome.humidity_pct is not None and outcome.classification == CLASSIFICATION_ACCEPTED]
+    if accepted_readings:
+        latest = accepted_readings[-1]
         fahrenheit = latest.temperature_c * 9 / 5 + 32 if latest.temperature_c is not None else None
-        print(f"PASS: {len(accepted)} valid reading{'s' if len(accepted) != 1 else ''}")
+        print(f"PASS: {len(accepted_readings)} valid reading{'s' if len(accepted_readings) != 1 else ''}")
         if latest.temperature_c is not None and fahrenheit is not None:
             print(f"Temperature: {latest.temperature_c:.1f} C / {fahrenheit:.1f} F")
         if latest.humidity_pct is not None:
@@ -794,6 +850,15 @@ def cmd_sensor_test(args: argparse.Namespace) -> int:
         return 0
     print("FAIL: no valid readings")
     return 1
+
+
+def _print_sensor_test_attempts(result, attempts_requested: int) -> None:
+    for outcome in result.attempts:
+        if outcome.temperature_c is not None and outcome.humidity_pct is not None:
+            detail = f" ({outcome.code})" if outcome.code and outcome.classification != CLASSIFICATION_ACCEPTED else ""
+            print(f"Attempt {outcome.attempt}/{attempts_requested}: {outcome.temperature_c:.1f} C, {outcome.humidity_pct:.1f}% RH - {outcome.classification}{detail}")
+        else:
+            print(f"Attempt {outcome.attempt}/{attempts_requested}: {outcome.code} - {outcome.message}")
 
 
 def _systemd_user_dir() -> Path:
@@ -914,7 +979,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="plantlab-edge")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="Show local edge-agent status without secrets.").set_defaults(func=cmd_status)
-    sub.add_parser("doctor", help="Run local edge-agent self-checks.").set_defaults(func=cmd_doctor)
+    doctor_parser = sub.add_parser("doctor", help="Run local edge-agent self-checks.")
+    doctor_parser.add_argument("--hardware", action="store_true", help="Also actually test every enabled configured sensor with bounded attempts.")
+    doctor_parser.add_argument("--all-sensors", action="store_true", dest="all_sensors", help="Alias for --hardware.")
+    doctor_parser.add_argument("--sensor", metavar="KEY", help="Actually test only this configured sensor.")
+    doctor_parser.add_argument("--attempts", type=int, default=5, help="Attempts per sensor for hardware checks (default: 5).")
+    doctor_parser.add_argument("--interval", type=float, default=3.0, help="Seconds between attempts for hardware checks (default: 3).")
+    doctor_parser.set_defaults(func=cmd_doctor)
     config_parser = sub.add_parser("config", help="Inspect local non-secret edge configuration.")
     config_sub = config_parser.add_subparsers(dest="config_command", required=True)
     config_show = config_sub.add_parser("show", help="Show resolved non-secret edge configuration.")

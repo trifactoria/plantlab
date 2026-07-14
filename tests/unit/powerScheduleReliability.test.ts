@@ -258,7 +258,9 @@ describe("normal scheduled command latency", () => {
     const schedule = await scheduleFor(registered.node.id, "lights");
     const command = await prisma.powerCommand.findUniqueOrThrow({ where: { id: schedule.lastCommandId! } });
     // The command must be immediately claimable (available now, not delayed).
-    expect(command.availableAt.getTime()).toBeLessThanOrEqual(dueAt.getTime());
+    // availableAt is a real DB now() default (not the scheduler's simulated
+    // `dueAt` clock), so it must be compared against real wall-clock time.
+    expect(command.availableAt.getTime()).toBeLessThanOrEqual(Date.now());
     expect(command.status).toBe("pending");
 
     await claimPowerCommand(prisma, registered.node.id, command.id);

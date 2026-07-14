@@ -106,7 +106,7 @@ export async function ingestPowerState(prisma: PrismaClient, nodeId: string, out
     );
   }
   if (outlets.length > 0) {
-    await prisma.plantLabNode.update({ where: { id: nodeId }, data: { updatedAt: now } }).catch(() => undefined);
+    await prisma.plantLabNode.update({ where: { id: nodeId }, data: { updatedAt: now, powerStateRefreshRequestedAt: null } }).catch(() => undefined);
   }
   return { acceptedOutlets: upserted.map((outlet) => outlet.key), count: upserted.length };
 }
@@ -338,6 +338,22 @@ export async function getLatestPowerStatus(prisma: PrismaClient, nodeName: strin
       };
     }),
   };
+}
+
+/** Mirrors requestCameraInventoryRefresh() in agentProtocol.ts - asks the agent to re-upload outlet state on its next poll instead of waiting for the routine ~60s interval. */
+export async function requestPowerStateRefresh(prisma: PrismaClient, nodeName: string) {
+  return prisma.plantLabNode.update({
+    where: { name: nodeName },
+    data: { powerStateRefreshRequestedAt: new Date() },
+  });
+}
+
+export async function getPowerStateRefreshRequest(prisma: PrismaClient, nodeId: string) {
+  const node = await prisma.plantLabNode.findUniqueOrThrow({
+    where: { id: nodeId },
+    select: { powerStateRefreshRequestedAt: true },
+  });
+  return node.powerStateRefreshRequestedAt;
 }
 
 function parseOutletState(raw: unknown, index: number, now: Date): PowerOutletStateReport {

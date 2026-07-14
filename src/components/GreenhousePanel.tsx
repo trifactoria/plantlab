@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { formatDateTime } from "@/lib/format";
 import {
   ACTIVE_GREENHOUSE_SENSORS,
   DAY_LABELS,
   celsiusToFahrenheit,
+  countSensorsNeedingAttention,
   filterActiveSensors,
   formatAge,
   formatDaysOfWeek,
@@ -14,6 +16,7 @@ import {
   SENSOR_STATUS_LABEL,
   type EnvironmentSensor,
 } from "@/lib/greenhouseDisplay";
+import { guidanceForCode } from "@/lib/sensorDiagnostics";
 import { ConfirmActionButton } from "./ConfirmActionButton";
 
 type PowerOutlet = {
@@ -282,11 +285,23 @@ export function GreenhousePanel({ nodeName }: { nodeName: string }) {
   const activeSlots = filterActiveSensors(sensors ?? []);
   const summary = summarizeEnvironment(activeSlots);
   const loading = sensors === null && outlets === null && !loadError;
+  const attentionCount = sensors ? countSensorsNeedingAttention(activeSlots) : 0;
 
   return (
     <div className="grid gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold text-stone-950">Greenhouse &mdash; {nodeName}</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-lg font-semibold text-stone-950">
+            <Link href={`/nodes/${nodeName}`} className="hover:underline">
+              Greenhouse &mdash; {nodeName}
+            </Link>
+          </h2>
+          {attentionCount > 0 ? (
+            <span className="rounded-md border border-amber-200 bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">
+              {attentionCount} sensor{attentionCount === 1 ? "" : "s"} need{attentionCount === 1 ? "s" : ""} attention
+            </span>
+          ) : null}
+        </div>
         {loading ? <span className="text-sm text-stone-600">Loading greenhouse status...</span> : null}
       </div>
 
@@ -298,9 +313,14 @@ export function GreenhousePanel({ nodeName }: { nodeName: string }) {
         {activeSlots.map(({ key, label, sensor }) => {
           const tone = sensorStatusTone(sensor);
           const hasReading = sensor && tone === "fresh" && sensor.latestTemperatureC !== null && sensor.latestHumidityPct !== null;
+          const guidance = tone !== "fresh" ? guidanceForCode(sensor?.lastDiagnosticCode) : null;
 
           return (
-            <div key={key} className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+            <Link
+              key={key}
+              href={`/nodes/${nodeName}/sensors/${key}`}
+              className="grid rounded-lg border border-stone-200 bg-white p-4 shadow-sm transition hover:border-emerald-300"
+            >
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <h3 className="font-semibold text-stone-950">{label}</h3>
@@ -327,16 +347,19 @@ export function GreenhousePanel({ nodeName }: { nodeName: string }) {
                   </div>
                 </div>
               ) : (
-                <p className="mt-3 text-sm text-stone-600">
-                  {tone === "unavailable" ? "No data received yet." : `No valid reading (${SENSOR_STATUS_LABEL[tone].toLowerCase()}).`}
-                </p>
+                <div className="mt-3 text-sm text-stone-600">
+                  <p>{tone === "unavailable" ? "No data received yet." : guidance?.label ?? `No valid reading (${SENSOR_STATUS_LABEL[tone].toLowerCase()}).`}</p>
+                  {sensor?.lastDiagnosticMessage ? <p className="mt-1 text-xs text-stone-500">{sensor.lastDiagnosticMessage}</p> : null}
+                </div>
               )}
 
               <p className="mt-3 text-xs text-stone-500">
                 Last accepted:{" "}
                 {sensor?.lastAcceptedAt ? `${formatAge(sensor.lastAcceptedAt)} (${formatDateTime(sensor.lastAcceptedAt)})` : "never"}
               </p>
-            </div>
+
+              {!hasReading ? <p className="mt-2 text-xs font-semibold text-emerald-700">View diagnostics &rarr;</p> : null}
+            </Link>
           );
         })}
       </div>

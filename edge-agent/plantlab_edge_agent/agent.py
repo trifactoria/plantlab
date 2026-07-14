@@ -31,6 +31,7 @@ from .camera_inventory import (
 from .protocol import AgentProtocolClient, ProtocolError
 from .power.runtime import PowerManager, poll_and_execute_power_command, upload_power_state
 from .sensors.runtime import EnvironmentalSensorManager, selected_driver_mode
+from .sensors.test_command_runtime import poll_and_execute_sensor_test
 from .spool import Spool
 
 logger = logging.getLogger("plantlab_edge_agent")
@@ -176,6 +177,26 @@ def maybe_refresh_inventory(cfg: config.EdgeAgentConfig, client: AgentProtocolCl
     return refresh_camera_inventory(cfg, client, reason=f"coordinator:{requested_at}")
 
 
+def maybe_refresh_power_state(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, power: PowerManager, state: dict) -> bool:
+    """Mirrors maybe_refresh_inventory() for the "Refresh power state" node
+    action - re-uploads outlet state immediately instead of waiting for the
+    routine power_state_refresh_interval_seconds cadence."""
+    if not power.enabled:
+        return False
+    try:
+        refresh = client.power_state_refresh_request()
+    except ProtocolError as exc:
+        logger.warning("Power refresh check failed: %s", exc)
+        return False
+    requested_at = refresh.get("requestedAt") if refresh.get("requested") else None
+    if not requested_at or not isinstance(requested_at, str):
+        return False
+    if requested_at == state.get("last_power_refresh_requested_at"):
+        return False
+    state["last_power_refresh_requested_at"] = requested_at
+    return upload_power_state(cfg, client, power, startup=power.last_state_upload_at <= 0)
+
+
 def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, spool: Spool) -> None:
     for record in spool.due_uploads():
         active = record
@@ -294,6 +315,8 @@ def run_loop(stop_check=lambda: False) -> None:
     next_capture_upload_at = now
     next_power_command_poll_at = now if power.enabled else float("inf")
     next_power_state_refresh_at = now if power.enabled else float("inf")
+    next_power_refresh_check_at = now if power.enabled else float("inf")
+    next_sensor_test_poll_at = now if cfg.sensors else float("inf")
     next_cleanup_at = now + max(60, cfg.spool_cleanup_interval_seconds)
     try:
         while not stopping["value"] and not stop_check():
@@ -319,6 +342,12 @@ def run_loop(stop_check=lambda: False) -> None:
             if now >= next_power_command_poll_at:
                 poll_and_execute_power_command(cfg, client, power)
                 next_power_command_poll_at = now + max(1, cfg.power_command_poll_interval_seconds)
+            if now >= next_power_refresh_check_at:
+                maybe_refresh_power_state(cfg, client, power, refresh_state)
+                next_power_refresh_check_at = now + max(1, cfg.power_command_poll_interval_seconds)
+            if now >= next_sensor_test_poll_at:
+                poll_and_execute_sensor_test(cfg, client)
+                next_sensor_test_poll_at = now + max(1, cfg.sensor_test_poll_interval_seconds)
             if now >= next_environment_upload_at:
                 process_environment_uploads(cfg, client, sensors, spool)
                 next_environment_upload_at = now + max(1, cfg.environment_upload_interval_seconds)
@@ -339,6 +368,8 @@ def run_loop(stop_check=lambda: False) -> None:
                 next_capture_upload_at,
                 next_power_command_poll_at,
                 next_power_state_refresh_at,
+                next_power_refresh_check_at,
+                next_sensor_test_poll_at,
                 next_cleanup_at,
             )
             sleep_for = max(0.0, min(MAX_IDLE_SLEEP_SECONDS, next_due - time.monotonic()))
