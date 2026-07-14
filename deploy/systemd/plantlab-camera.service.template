@@ -1,5 +1,5 @@
 [Unit]
-Description=PlantLab camera/scheduler service (multi-project capture + shared shelf-camera fan-out)
+Description=PlantLab camera/scheduler service (multi-project capture, shared shelf-camera fan-out, and greenhouse power schedules)
 After=network-online.target
 Wants=network-online.target
 

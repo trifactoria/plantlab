@@ -3,6 +3,7 @@ import { captureProjectPhoto } from "../src/lib/camera";
 import { CaptureScheduler, consoleLogger } from "../src/lib/captureService";
 import { CaptureSourceScheduler } from "../src/lib/captureSourceService";
 import { logResolvedPaths, resolveDataDir, resolveRuntimeLocksDir } from "../src/lib/paths.server";
+import { PowerScheduler } from "../src/lib/operations/powerSchedule";
 import { prisma } from "../src/lib/prisma";
 import { writeHeartbeat } from "../src/lib/serviceStatus";
 import { captureSourcePhoto } from "../src/lib/sourceCapture";
@@ -92,6 +93,12 @@ async function main() {
     logger: consoleLogger,
   });
 
+  // Persistent daily fan/light schedules (see src/lib/operations/powerSchedule.ts).
+  // Ticked here so schedules keep firing across coordinator restarts and
+  // browser closure, same as the capture schedulers above - it only ever
+  // creates PowerCommand rows for the existing edge command queue to pick up.
+  const powerScheduler = new PowerScheduler({ prisma, logger: consoleLogger });
+
   await writeHeartbeat(prisma, { startedAt });
 
   while (!stopping) {
@@ -129,13 +136,35 @@ async function main() {
       consoleLogger.error("Capture source scheduler tick failed", { error: lastError });
     }
 
+    try {
+      const powerResult = await powerScheduler.tick();
+
+      if (powerResult.dueCount > 0) {
+        const failures = powerResult.fired.filter((fired) => fired.status === "error");
+        consoleLogger.info("Power schedule cycle complete", {
+          dueCount: powerResult.dueCount,
+          succeeded: powerResult.fired.length - failures.length,
+          failed: failures.length,
+        });
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown power scheduler error";
+      consoleLogger.error("Power scheduler tick failed", { error: lastError });
+    }
+
     await writeHeartbeat(prisma, { startedAt, lastError });
 
     if (stopping) {
       break;
     }
 
-    await sleep(Math.min(scheduler.msUntilNextWake(REFRESH_INTERVAL_MS), sourceScheduler.msUntilNextWake(REFRESH_INTERVAL_MS)));
+    await sleep(
+      Math.min(
+        scheduler.msUntilNextWake(REFRESH_INTERVAL_MS),
+        sourceScheduler.msUntilNextWake(REFRESH_INTERVAL_MS),
+        powerScheduler.msUntilNextWake(REFRESH_INTERVAL_MS),
+      ),
+    );
   }
 
   consoleLogger.info("PlantLab capture service stopped");

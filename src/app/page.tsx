@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CoordinatorStatusPanel } from "@/components/CoordinatorStatusPanel";
+import { GreenhousePanel } from "@/components/GreenhousePanel";
 import { ProjectForm } from "@/components/ProjectForm";
 import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
 import { formatDateTime } from "@/lib/format";
@@ -23,6 +24,13 @@ export default async function HomePage() {
   const nodeConfig = await readNodeConfig();
   const isCoordinator = nodeConfig?.role === "coordinator";
   const coordinatorData = isCoordinator ? await getCoordinatorDashboardData(prisma) : null;
+  // Nodes with at least one configured Kasa outlet (e.g. greenhouse-zero) get
+  // a live sensor/power/timer panel here - see src/components/GreenhousePanel.tsx.
+  const greenhouseNodeNames = isCoordinator
+    ? (await prisma.plantLabNode.findMany({ where: { outlets: { some: {} } }, select: { name: true }, orderBy: { name: "asc" } })).map(
+        (node) => node.name,
+      )
+    : [];
 
   return (
     <main className="min-h-screen">
@@ -42,8 +50,11 @@ export default async function HomePage() {
 
       {isCoordinator && coordinatorData ? (
         <section className="section pb-0">
-          <div className="container">
+          <div className="container grid gap-6">
             <CoordinatorStatusPanel data={coordinatorData} localCameraServiceEnabled={canManageLocally} />
+            {greenhouseNodeNames.map((nodeName) => (
+              <GreenhousePanel key={nodeName} nodeName={nodeName} />
+            ))}
           </div>
         </section>
       ) : canManageLocally ? (

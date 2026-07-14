@@ -459,6 +459,7 @@ model PlantLabNode {
   sensors           NodeSensor[]
   outlets           NodeOutlet[]
   powerCommands     PowerCommand[]
+  powerSchedules    PowerSchedule[]
   sensorReadings    SensorReading[]
   sensorDiagnostics SensorDiagnostic[]
   assignments       NodeCameraAssignment[]
@@ -466,6 +467,38 @@ model PlantLabNode {
 
   @@index([role])
   @@index([lastHeartbeatAt])
+}
+
+// A persistent daily on/off schedule for a power outlet (fans/lights).
+// Ticked by PowerScheduler (src/lib/operations/powerSchedule.ts) from the
+// same long-running process as the capture schedulers (scripts/camera-service.ts)
+// so it survives coordinator restarts and browser closure. Each firing goes
+// through the normal PowerCommand queue - the scheduler never talks to Kasa
+// directly. lastRunDateKey (a "yyyy-LL-dd" string in timeZone) is the
+// restart-safe idempotency guard: a schedule fires at most once per local day.
+model PowerSchedule {
+  id             String    @id @default(cuid())
+  nodeId         String
+  outletKey      String
+  action         String
+  /// 24h local time, "HH:MM".
+  timeOfDay      String
+  /// Comma-separated days of week, 0=Sunday..6=Saturday. Defaults to every day.
+  daysOfWeek     String    @default("0,1,2,3,4,5,6")
+  timeZone       String    @default("America/New_York")
+  label          String?
+  enabled        Boolean   @default(true)
+  lastRunDateKey String?
+  lastRunAt      DateTime?
+  lastRunStatus  String?
+  lastRunError   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  node PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, outletKey])
+  @@index([nodeId, enabled])
 }
 
 model NodeOutlet {
