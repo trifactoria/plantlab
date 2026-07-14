@@ -66,6 +66,31 @@ def fake_kasa_module(device):
     return types.SimpleNamespace(Credentials=Credentials, DeviceConfig=DeviceConfig, Device=Device)
 
 
+def flaky_kasa_module(device, failures):
+    class Credentials:
+        def __init__(self, username, password):
+            self.username = username
+            self.password = password
+
+    class DeviceConfig:
+        def __init__(self, host, credentials):
+            self.host = host
+            self.credentials = credentials
+
+    class Device:
+        connect_calls = 0
+
+        @staticmethod
+        async def connect(config):
+            Device.connect_calls += 1
+            if failures:
+                raise failures.pop(0)
+            return device
+
+    module = types.SimpleNamespace(Credentials=Credentials, DeviceConfig=DeviceConfig, Device=Device)
+    return module
+
+
 def test_kasa_driver_connect_lists_and_switches(monkeypatch):
     device = FakeDevice()
     monkeypatch.setattr(kasa_module.importlib, "import_module", lambda _name: fake_kasa_module(device))
@@ -80,6 +105,39 @@ def test_kasa_driver_connect_lists_and_switches(monkeypatch):
     driver.turn_off("fans")
     assert driver.get_state("fans") is False
     driver.close()
+
+
+def test_kasa_driver_retries_transient_connect_timeout(monkeypatch):
+    device = FakeDevice()
+    module = flaky_kasa_module(device, [TimeoutError("timed out")])
+    monkeypatch.setattr(kasa_module.importlib, "import_module", lambda _name: module)
+    driver = KasaPowerDriver(
+        "192.168.1.72",
+        "user",
+        "secret",
+        {"fans": "greenhouse-fans", "water": "greenhouse-water"},
+        timeout_seconds=0.1,
+        connect_attempts=2,
+    )
+
+    driver.connect()
+
+    assert module.Device.connect_calls == 2
+    assert driver.list_outlets() == {"fans": False, "water": False}
+    driver.close()
+
+
+def test_kasa_driver_does_not_retry_auth_failure(monkeypatch):
+    device = FakeDevice()
+    module = flaky_kasa_module(device, [RuntimeError("authentication failed")])
+    monkeypatch.setattr(kasa_module.importlib, "import_module", lambda _name: module)
+    driver = KasaPowerDriver("192.168.1.72", "user", "secret", {"fans": "greenhouse-fans"}, connect_attempts=3)
+
+    with pytest.raises(PowerDriverError) as exc:
+        driver.connect()
+
+    assert exc.value.code == "power-authentication-failed"
+    assert module.Device.connect_calls == 1
 
 
 def test_kasa_driver_missing_alias_and_auth_failure(monkeypatch):

@@ -4,6 +4,7 @@ import asyncio
 import errno
 import importlib
 import socket
+import time
 from typing import Any, Optional
 
 from .base import PowerDriverError
@@ -13,12 +14,13 @@ PINNED_KASA_SPEC = KASA_SPEC
 
 
 class KasaPowerDriver:
-    def __init__(self, host: str, username: str, password: str, alias_map: dict[str, str], timeout_seconds: float = 8):
+    def __init__(self, host: str, username: str, password: str, alias_map: dict[str, str], timeout_seconds: float = 8, connect_attempts: int = 2):
         self.host = host
         self.username = username
         self.password = password
         self.alias_map = dict(alias_map)
         self.timeout_seconds = timeout_seconds
+        self.connect_attempts = max(1, int(connect_attempts))
         self._loop = asyncio.new_event_loop()
         self._device: Any = None
         self._children_by_alias: dict[str, Any] = {}
@@ -31,23 +33,20 @@ class KasaPowerDriver:
     def connect(self) -> None:
         if not self.username or not self.password:
             raise PowerDriverError("power-authentication-failed", "Kasa username/password are missing from greenhouse.env.")
-        try:
-            self._run(self._connect())
-        except PowerDriverError:
-            raise
-        except socket.gaierror as exc:
-            raise PowerDriverError("power-host-unreachable", "Kasa host could not be resolved.") from exc
-        except ConnectionRefusedError as exc:
-            raise PowerDriverError("power-connection-refused", "Kasa host refused the connection.") from exc
-        except TimeoutError as exc:
-            raise PowerDriverError("power-connection-timeout", "Timed out connecting to Kasa device.") from exc
-        except OSError as exc:
-            mapped = _map_os_error(exc)
-            if mapped:
-                raise mapped from exc
-            raise _map_kasa_exception(exc) from None
-        except Exception as exc:
-            raise _map_kasa_exception(exc) from None
+        last_error: PowerDriverError | None = None
+        for attempt in range(1, self.connect_attempts + 1):
+            try:
+                self._run(self._connect())
+                return
+            except Exception as exc:
+                mapped = _map_connect_exception(exc)
+                if not _is_transient_connect_error(mapped) or attempt >= self.connect_attempts:
+                    raise mapped from None
+                last_error = mapped
+                self._reset_after_failed_connect()
+                time.sleep(min(1.0, 0.2 * attempt))
+        if last_error:
+            raise last_error
 
     async def _connect(self) -> None:
         kasa = _load_kasa_module()
@@ -124,6 +123,14 @@ class KasaPowerDriver:
     def _run(self, awaitable: Any):
         return self._loop.run_until_complete(asyncio.wait_for(awaitable, timeout=self.timeout_seconds))
 
+    def _reset_after_failed_connect(self) -> None:
+        self._device = None
+        self._children_by_alias = {}
+        self._last_states = {}
+        if not self._loop.is_closed():
+            self._loop.close()
+        self._loop = asyncio.new_event_loop()
+
 
 def _load_kasa_module():
     try:
@@ -191,6 +198,24 @@ def _map_kasa_exception(exc: Exception) -> PowerDriverError:
     if "offline" in text or "device not found" in text:
         return PowerDriverError("power-device-offline", "Kasa device appears to be offline.")
     return PowerDriverError("power-transport-error", "Kasa transport failed.")
+
+
+def _map_connect_exception(exc: Exception) -> PowerDriverError:
+    if isinstance(exc, PowerDriverError):
+        return exc
+    if isinstance(exc, socket.gaierror):
+        return PowerDriverError("power-host-unreachable", "Kasa host could not be resolved.")
+    return _map_kasa_exception(exc)
+
+
+def _is_transient_connect_error(exc: PowerDriverError) -> bool:
+    return exc.code in {
+        "power-connection-timeout",
+        "power-host-unreachable",
+        "power-transport-error",
+        "power-transport-selection-failed",
+        "power-device-offline",
+    }
 
 
 def _map_os_error(exc: OSError) -> PowerDriverError | None:
