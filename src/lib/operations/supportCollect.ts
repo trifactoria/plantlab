@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -167,17 +168,39 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
     return;
   }
   if (mode === "fixture") {
-    const result = await execFileResult("pnpm", ["screenshots"], 120_000, process.cwd(), { ...process.env, PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1" });
-    await writeFile(path.join(dir, "fixture-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
-    manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
-    await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
+    const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "plantlab-screenshots-fixture-"));
+    try {
+      const fixtureDb = path.join(fixtureRoot, "prisma", "plantlab-test-playwright.db");
+      await mkdir(path.dirname(fixtureDb), { recursive: true });
+      const port = await findFreePort();
+      const env = {
+        ...process.env,
+        DATABASE_URL: `file:${fixtureDb}`,
+        PLANTLAB_ROOT_DIR: fixtureRoot,
+        PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1",
+        PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${port}`,
+        PLAYWRIGHT_REUSE_EXISTING_SERVER: "0",
+        PORT: String(port),
+      };
+      const migrate = await execFileResult("pnpm", ["prisma", "migrate", "deploy"], 120_000, process.cwd(), env);
+      await writeFile(path.join(dir, "fixture-migrate.txt"), redact(`${migrate.stdout}\n${migrate.stderr}`));
+      manifest.probes.push({ host: "local", role: "screenshots", command: "fixture prisma migrate deploy", ok: migrate.status === 0, status: migrate.status, path: path.join(dir, "fixture-migrate.txt") });
+      if (migrate.status !== 0) return;
+
+      const result = await execFileResult("pnpm", ["exec", "playwright", "test", "tests/screenshots.spec.ts"], 120_000, process.cwd(), env);
+      await writeFile(path.join(dir, "fixture-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
+      manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
+      await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
     return;
   }
   const result = await execFileResult(
     "ssh",
     [
       coordinatorHost,
-      "cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
+      "cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
     ],
     120_000,
   );
@@ -186,6 +209,21 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
   const copyResult = await execFileResult("scp", ["-r", `${coordinatorHost}:/home/andy/projects/plantlab/artifacts/screenshots`, path.join(dir, "artifacts")], 120_000);
   await writeFile(path.join(dir, "live-readonly-copy.txt"), redact(`${copyResult.stdout}\n${copyResult.stderr}`));
   manifest.probes.push({ host: coordinatorHost, role: "screenshots", command: "copy live-readonly screenshots", ok: copyResult.status === 0, status: copyResult.status, path: path.join(dir, "live-readonly-copy.txt") });
+}
+
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => {
+        if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Could not allocate a free localhost port."));
+      });
+    });
+  });
 }
 
 async function copyIfExists(from: string, to: string) {

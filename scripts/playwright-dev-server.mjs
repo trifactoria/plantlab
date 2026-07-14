@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const port = process.env.PORT ?? "3000";
+
 function run(command, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -29,7 +31,7 @@ await run("pnpm", ["exec", "next", "build"], {
   PLANTLAB_TEST_LOCAL_CAMERA_UI: "1",
 });
 
-const child = spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1"], {
+const child = spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", port], {
   stdio: "inherit",
   shell: false,
   env: {

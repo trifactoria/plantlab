@@ -33,6 +33,22 @@ export const DEV_IDS = {
 const TINY_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/Aaf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/Aaf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 
+function assertFixtureDatabase() {
+  const databaseUrl = process.env.DATABASE_URL ?? "";
+  const rootDir = process.env.PLANTLAB_ROOT_DIR ?? "";
+  const looksIsolated =
+    process.env.PLANTLAB_SCREENSHOTS_FIXTURE_ONLY === "1" &&
+    /plantlab-test|playwright|fixture|tmp/i.test(`${databaseUrl} ${rootDir}`) &&
+    !/\/home\/andy\/projects\/plantlab\/prisma\/dev\.db|file:\.\/dev\.db/i.test(databaseUrl);
+
+  if (!looksIsolated) {
+    throw new Error(
+      "Refusing to seed or clean screenshot fixture data outside an isolated fixture database. " +
+        "Set PLANTLAB_SCREENSHOTS_FIXTURE_ONLY=1 and use a test DATABASE_URL/PLANTLAB_ROOT_DIR.",
+    );
+  }
+}
+
 async function writeFixturePhoto(photoPath: string) {
   const width = 1600;
   const height = 900;
@@ -70,6 +86,7 @@ async function writeFixturePhoto(photoPath: string) {
 }
 
 export async function seedVisualData() {
+  assertFixtureDatabase();
   const root = process.cwd();
   const photoDirectory = path.join(root, "data", "playwright", "photos");
   const photoPath = path.join(photoDirectory, "2026-07-10_09-30-00.jpg");
@@ -347,6 +364,7 @@ export async function disconnectPrisma() {
 }
 
 export async function cleanupVisualData() {
+  assertFixtureDatabase();
   const photoDirectory = path.join(process.cwd(), "data", "playwright", "photos");
   const captureSourceDirectory = path.join(process.cwd(), "data", "playwright", "capture-source-photos");
   const sharedProjectDirectory = path.join(process.cwd(), "data", "playwright", "shared-project-photos");
@@ -392,6 +410,7 @@ function deterministicJitter(seed: number): number {
  * See tests/screenshots.spec.ts for the surfaces this backs.
  */
 export async function seedNodeVisualData(now: Date = new Date()) {
+  assertFixtureDatabase();
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
   const registered = await registerOrRotateNode(prisma, { name: NODE_VISUAL_NAME, role: "greenhouse-node", rotateCredential: true });
   const nodeId = registered.node.id;
@@ -662,6 +681,7 @@ export async function seedNodeVisualData(now: Date = new Date()) {
 
 /** Cascades to every row created by seedNodeVisualData() via onDelete: Cascade on PlantLabNode's relations. */
 export async function cleanupNodeVisualData() {
+  assertFixtureDatabase();
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
 }
 
