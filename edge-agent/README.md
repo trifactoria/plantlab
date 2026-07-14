@@ -199,6 +199,25 @@ install `python-kasa`. Greenhouse nodes with `power.provider = "kasa"` use:
 python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb
 ```
 
+The edge installer owns a dedicated interpreter at:
+
+```text
+~/.local/share/plantlab-edge-agent/.venv/bin/python
+```
+
+The venv is created with system site packages enabled so OS-installed
+`pigpio` remains importable on Raspberry Pi OS. The `plantlab-edge` wrapper,
+the systemd user service, attach-time probes, and Kasa dependency checks all
+use this interpreter. Re-running attach reuses a healthy venv and preserves
+`~/.local/share/plantlab-edge-agent/wheelhouse`; compatible wheels may be
+copied there during attach, while incompatible Python ABI or architecture
+wheels are ignored.
+
+Kasa readiness is not based on the displayed package version. PlantLab
+checks `python_kasa-*.dist-info/direct_url.json` and requires the Git
+repository and commit above exactly. A plain PyPI `python-kasa==0.10.2`
+installation is reported as the wrong source.
+
 Useful diagnostics and manual commands:
 
 ```sh
@@ -212,10 +231,13 @@ plantlab-edge power off lights
 plantlab-edge power pulse water --seconds 10
 ```
 
-`power probe` reports provider, host, credential-file presence, driver
-readiness, authentication result, detected device information, configured
-logical outlets, resolved Kasa aliases, and actual outlet state. It never
-prints credential values.
+`power probe` reports the edge Python executable, venv path, Kasa import
+path, Kasa source repository/commit/pin status, provider, host,
+credential-file presence, connectivity classification, authentication
+result, detected device information, configured logical outlets, resolved
+Kasa aliases, and actual outlet state. It never prints credential values.
+When a fixed Kasa host is configured, PlantLab expects that address to stay
+stable; reserve it in the router's DHCP settings.
 
 The edge agent reports actual observed outlet state to
 `POST /api/agents/power/state` and polls

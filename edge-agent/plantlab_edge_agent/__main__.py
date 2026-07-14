@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ from . import agent, camera, config
 from .camera_inventory import camera_inventory_cache_status, inventory_refresh_running
 from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
 from .power.base import PowerDriverError
+from .power.dependencies import edge_python_info, inspect_imports, inspect_kasa_pin
 from .power.kasa import KasaPowerDriver, dependency_available as kasa_dependency_available
 from .power.models import WATER_MAX_PULSE_SECONDS
 from .power.runtime import PowerManager
@@ -47,9 +49,76 @@ def _load_config_safely():
         return None, str(exc)
 
 
+def sensor_driver_mode_summary() -> dict[str, str | None]:
+    current = os.environ.get(DRIVER_MODE_ENV)
+    configured = _configured_sensor_driver_mode()
+    service_effective = _service_effective_sensor_driver_mode()
+    resolved = current or service_effective or configured or selected_driver_mode()
+    return {
+        "configured": configured,
+        "serviceEffective": service_effective,
+        "currentProcess": current,
+        "resolved": resolved,
+    }
+
+
+def _configured_sensor_driver_mode() -> str | None:
+    dropin_dir = _systemd_user_dir() / "plantlab-edge-agent.service.d"
+    if not dropin_dir.exists():
+        return None
+    found: str | None = None
+    for path in sorted(dropin_dir.glob("*.conf")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        value = _extract_systemd_environment_value(text, DRIVER_MODE_ENV)
+        if value:
+            found = value
+    return found
+
+
+def _service_effective_sensor_driver_mode() -> str | None:
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", "plantlab-edge-agent.service", "-p", "Environment", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return _extract_systemd_environment_value(result.stdout, DRIVER_MODE_ENV)
+
+
+def _extract_systemd_environment_value(text: str, key: str) -> str | None:
+    for raw_line in text.replace("\0", "\n").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("Environment="):
+            line = line[len("Environment=") :]
+        for token in _split_systemd_environment(line):
+            if token.startswith(f"{key}="):
+                return token.split("=", 1)[1].strip().strip('"').strip("'") or None
+    return None
+
+
+def _split_systemd_environment(value: str) -> list[str]:
+    try:
+        import shlex
+
+        return shlex.split(value)
+    except Exception:
+        return value.split()
+
+
 def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
     token = config.read_credential()
     greenhouse_secret_path = config.CONFIG_DIR / "greenhouse.env"
+    sensor_modes = sensor_driver_mode_summary()
     return {
         "configPath": str(config.CONFIG_PATH),
         "credentialPath": str(config.CREDENTIAL_PATH),
@@ -68,7 +137,8 @@ def _config_summary(cfg: config.EdgeAgentConfig | None) -> dict:
         "credentialLength": len(token) if token else 0,
         "greenhouseSecretPath": str(greenhouse_secret_path),
         "greenhouseSecretPresent": greenhouse_secret_path.exists(),
-        "sensorDriverMode": selected_driver_mode(),
+        "sensorDriverMode": sensor_modes["resolved"],
+        "sensorDriverModes": sensor_modes,
         "sensors": [
             {
                 "key": sensor.key,
@@ -250,6 +320,10 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         print(f"Power outlets: {', '.join(f'{key}={value}' for key, value in outlets.items()) if outlets else '(none)'}")
     else:
         print("Power: not configured")
+    modes = summary["sensorDriverModes"]
+    print(f"Configured sensor driver mode: {modes['configured'] or 'none'}")
+    print(f"Service-effective sensor driver mode: {modes['serviceEffective'] or 'unknown'}")
+    print(f"Current shell override: {modes['currentProcess'] or 'none'}")
     print(f"Sensor driver mode: {summary['sensorDriverMode']}")
     cache = summary["cameraInventoryCache"]
     print(f"Camera capability enabled: {'yes' if summary['cameraCapabilityEnabled'] else 'no'}")
@@ -425,7 +499,12 @@ def _load_power_config() -> tuple[config.EdgeAgentConfig | None, str | None]:
 
 def _power_probe_payload(cfg: config.EdgeAgentConfig | None) -> dict:
     secrets = config.read_greenhouse_secrets()
+    kasa_pin = inspect_kasa_pin()
+    edge_python = edge_python_info()
     payload = {
+        "edgePython": edge_python,
+        "dependencyImports": inspect_imports(),
+        "kasaDependency": kasa_pin.to_dict(),
         "provider": cfg.power.provider if cfg and cfg.power else None,
         "host": cfg.power.host if cfg and cfg.power else None,
         "credentialFile": {
@@ -434,7 +513,9 @@ def _power_probe_payload(cfg: config.EdgeAgentConfig | None) -> dict:
             "hasKasaUsername": bool(secrets.get("KASA_USERNAME")),
             "hasKasaPassword": bool(secrets.get("KASA_PASSWORD")),
         },
-        "driverImportReady": kasa_dependency_available(),
+        "driverImportReady": kasa_pin.status == "ready",
+        "connectivity": "not-attempted",
+        "dhcpReservationWarning": None,
         "authentication": "not-attempted",
         "device": None,
         "encryption": None,
@@ -450,6 +531,8 @@ def _power_probe_payload(cfg: config.EdgeAgentConfig | None) -> dict:
         payload["errorCode"] = "power-configuration-invalid"
         payload["errorMessage"] = "Power is not configured."
         return payload
+    payload["dhcpReservationWarning"] = "PlantLab expects the configured Kasa host to remain stable. Reserve this address in the router's DHCP settings."
+    payload["connectivity"] = _classify_kasa_connectivity(cfg.power.host)
     driver = KasaPowerDriver(cfg.power.host, secrets.get("KASA_USERNAME", ""), secrets.get("KASA_PASSWORD", ""), cfg.power.outlets)
     try:
         driver.connect()
@@ -478,6 +561,27 @@ def _power_probe_payload(cfg: config.EdgeAgentConfig | None) -> dict:
     return payload
 
 
+def _classify_kasa_connectivity(host: str, port: int = 9999, timeout_seconds: float = 1.5) -> str:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return "tcp-connectable"
+    except socket.timeout:
+        return "connection-timeout"
+    except ConnectionRefusedError:
+        return "connection-refused"
+    except socket.gaierror:
+        return "host-unreachable"
+    except OSError as exc:
+        message = str(exc).lower()
+        if "unreachable" in message or "no route" in message or "network is down" in message:
+            return "host-unreachable"
+        if "timed out" in message or "timeout" in message:
+            return "connection-timeout"
+        if "refused" in message:
+            return "connection-refused"
+        return "unknown"
+
+
 def cmd_power_probe(args: argparse.Namespace) -> int:
     cfg, config_error = _load_config_safely()
     payload = _power_probe_payload(cfg if not config_error else None)
@@ -487,8 +591,21 @@ def cmd_power_probe(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
+        edge_python = payload["edgePython"]
+        kasa_dep = payload["kasaDependency"]
+        print(f"Edge Python: {edge_python.get('executable') or '(unknown)'}")
+        if edge_python.get("venvPath"):
+            print(f"Venv path: {edge_python['venvPath']}")
+        print("Kasa dependency:")
+        print(f"  source: {kasa_dep.get('source_type') or '(unknown)'}")
+        print(f"  repository: {kasa_dep.get('repository') or '(none)'}")
+        print(f"  commit: {kasa_dep.get('commit') or '(none)'}")
+        print(f"  status: {kasa_dep.get('status')}")
+        if kasa_dep.get("import_path"):
+            print(f"  import path: {kasa_dep['import_path']}")
         print(f"Provider: {payload['provider'] or '(not configured)'}")
         print(f"Host: {payload['host'] or '(none)'}")
+        print(f"Connectivity: {payload['connectivity']}")
         cred = payload["credentialFile"]
         print(f"Credential file: {'present' if cred['present'] else 'missing'}")
         print(f"Required credential keys: {'present' if cred['hasKasaUsername'] and cred['hasKasaPassword'] else 'missing'}")
@@ -498,6 +615,11 @@ def cmd_power_probe(args: argparse.Namespace) -> int:
         if payload["encryption"] or payload["loginVersion"]:
             print(f"Transport: {payload['encryption'] or 'unknown'} login {payload['loginVersion'] or 'unknown'}")
         print(f"Authentication: {payload['authentication']}")
+        if payload.get("dhcpReservationWarning"):
+            print(f"Warning: {payload['dhcpReservationWarning']}")
+        if payload["errorCode"] == "power-host-unreachable":
+            print(f"Configured Kasa host {payload['host']} is unreachable.")
+            print("Verify the strip is online and that its DHCP reservation has not changed.")
         for outlet in payload["outlets"]:
             state = "ON" if outlet["actualState"] is True else "OFF" if outlet["actualState"] is False else "UNKNOWN"
             print(f"{outlet['key']:6} -> {outlet['providerAlias']:20} {state}")

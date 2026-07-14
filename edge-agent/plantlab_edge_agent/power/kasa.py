@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import importlib
 import socket
 from typing import Any, Optional
 
 from .base import PowerDriverError
+from .dependencies import KASA_PIN_READY, KASA_SPEC, inspect_kasa_pin
 
-PINNED_KASA_SPEC = "python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb"
+PINNED_KASA_SPEC = KASA_SPEC
 
 
 class KasaPowerDriver:
@@ -34,8 +36,15 @@ class KasaPowerDriver:
             raise
         except socket.gaierror as exc:
             raise PowerDriverError("power-host-unreachable", "Kasa host could not be resolved.") from exc
+        except ConnectionRefusedError as exc:
+            raise PowerDriverError("power-connection-refused", "Kasa host refused the connection.") from exc
         except TimeoutError as exc:
-            raise PowerDriverError("power-host-unreachable", "Timed out connecting to Kasa device.") from exc
+            raise PowerDriverError("power-connection-timeout", "Timed out connecting to Kasa device.") from exc
+        except OSError as exc:
+            mapped = _map_os_error(exc)
+            if mapped:
+                raise mapped from exc
+            raise _map_kasa_exception(exc) from None
         except Exception as exc:
             raise _map_kasa_exception(exc) from None
 
@@ -150,17 +159,40 @@ def _child_state(child: Any) -> bool:
 def _map_kasa_exception(exc: Exception) -> PowerDriverError:
     if isinstance(exc, PowerDriverError):
         return exc
+    if isinstance(exc, ConnectionRefusedError):
+        return PowerDriverError("power-connection-refused", "Kasa host refused the connection.")
+    if isinstance(exc, TimeoutError):
+        return PowerDriverError("power-connection-timeout", "Timed out connecting to Kasa device.")
+    if isinstance(exc, OSError):
+        mapped = _map_os_error(exc)
+        if mapped:
+            return mapped
     text = str(exc).lower()
-    if "auth" in text or "credential" in text or "login" in text:
+    if "auth" in text or "credential" in text or "invalid username" in text or "invalid password" in text:
         return PowerDriverError("power-authentication-failed", "Kasa authentication failed.")
-    if "timeout" in text or "unreachable" in text or "no route" in text or "refused" in text:
+    if "refused" in text:
+        return PowerDriverError("power-connection-refused", "Kasa host refused the connection.")
+    if "timeout" in text or "timed out" in text:
+        return PowerDriverError("power-connection-timeout", "Timed out connecting to Kasa device.")
+    if "unreachable" in text or "no route" in text or "network is down" in text:
         return PowerDriverError("power-host-unreachable", "Kasa host is unreachable.")
+    if "transport" in text or "klap" in text or "protocol" in text:
+        return PowerDriverError("power-transport-selection-failed", "Kasa transport selection failed.")
+    if "offline" in text or "device not found" in text:
+        return PowerDriverError("power-device-offline", "Kasa device appears to be offline.")
     return PowerDriverError("power-transport-error", "Kasa transport failed.")
 
 
+def _map_os_error(exc: OSError) -> PowerDriverError | None:
+    code = getattr(exc, "errno", None)
+    if code in (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN):
+        return PowerDriverError("power-host-unreachable", "Kasa host is unreachable.")
+    if code == errno.ECONNREFUSED:
+        return PowerDriverError("power-connection-refused", "Kasa host refused the connection.")
+    if code == errno.ETIMEDOUT:
+        return PowerDriverError("power-connection-timeout", "Timed out connecting to Kasa device.")
+    return None
+
+
 def dependency_available() -> bool:
-    try:
-        _load_kasa_module()
-        return True
-    except PowerDriverError:
-        return False
+    return inspect_kasa_pin().status == KASA_PIN_READY

@@ -9,8 +9,10 @@ import { ensureValidNodeCredential, rotateAndInstallCredential, waitForNodeHeart
 import { discoverCoordinatorUrl } from "../../lib/operations/coordinatorDiscovery";
 import {
   copyEdgeAgentDirectory,
+  copyEdgeWheelhouse,
   edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectRemoteEdgeRuntime,
   inspectRemoteDht22Support,
   inspectEdgeAgentService,
   inspectRemoteKasaSupport,
@@ -29,6 +31,7 @@ import {
   writeRemoteGreenhouseSecrets,
   type EdgeAttachTimeoutPolicy,
   type EdgeInstallReconciliation,
+  type RemoteEdgeRuntimeStatus,
 } from "../../lib/operations/edgeAgentInstall";
 import {
   deriveCapabilitiesFromEdgeConfig,
@@ -857,6 +860,37 @@ async function runEdgeAgentAttach(input: {
     `${installStatus}: source edge-agent ${sourceVersion.version ?? "(unknown)"} ${sourceVersion.contentHash?.slice(0, 12) ?? "(no hash)"}; installed ${installedAfter?.version ?? "(unknown)"} ${installedAfter?.contentHash?.slice(0, 12) ?? "(no hash)"}.`,
   );
 
+  let edgeRuntime: RemoteEdgeRuntimeStatus | null = await inspectRemoteEdgeRuntime(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch((error) => {
+    steps.fail("Edge runtime", sanitizeError(error));
+    return null;
+  });
+  if (!edgeRuntime?.ok) {
+    steps.fail("Edge runtime", edgeRuntime?.detail || "Dedicated edge-agent venv is not ready.");
+    await restoreStoppedService();
+    printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+    process.exitCode = 1;
+    return;
+  }
+  steps.complete(
+    "Edge runtime",
+    `${edgeRuntime.pythonPath ?? "(unknown python)"} ${edgeRuntime.pythonVersion ?? ""} ${edgeRuntime.architecture ?? ""}; system site packages ${edgeRuntime.systemSitePackages ? "enabled" : "disabled"}; pigpio ${edgeRuntime.pigpioImport ? "importable" : "missing"}.`,
+  );
+  if (role === "greenhouse-node" && greenhouseSelection?.power?.provider === "kasa") {
+    const wheelCopy = await copyEdgeWheelhouse(sshHost, edgeRuntime, { timeoutMs: timeoutPolicy.copyMs }).catch((error) => ({
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
+      status: 124,
+    }));
+    if (wheelCopy.status !== 0) {
+      steps.fail("Edge wheelhouse", (wheelCopy.stderr.trim() || wheelCopy.stdout.trim() || "Could not copy compatible wheelhouse.").slice(0, 2000));
+      await restoreStoppedService();
+      printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
+      process.exitCode = 1;
+      return;
+    }
+    steps.complete("Edge wheelhouse", wheelCopy.stdout.trim() || "Remote wheelhouse preserved.");
+  }
+
   // Verify the local `plantlab-edge` command is actually usable (Part 3) -
   // a plain non-interactive SSH command never sources ~/.profile, so this
   // checks a real login shell (bash -lc) rather than trusting PATH alone.
@@ -1042,7 +1076,7 @@ async function runEdgeAgentAttach(input: {
     console.log("Checking Kasa power backend...");
     let kasa = await inspectRemoteKasaSupport(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
     if (!kasa.dependencyAvailable || !kasa.pinnedCommitInstalled) {
-      console.log(`Kasa runtime backend: ${kasa.dependencyAvailable ? "wrong version" : "missing"} (${kasa.detail})`);
+      console.log(`Kasa runtime backend: ${kasa.pinStatus} (${kasa.detail})`);
       if (await confirmOrYes("Install or update Kasa runtime support? [Y/n] ", options.yes, true)) {
         const installKasa = await installRemoteKasaSupport(sshHost, { timeoutMs: timeoutPolicy.installMs }).catch((error) => ({
           stdout: "",
@@ -1060,7 +1094,7 @@ async function runEdgeAgentAttach(input: {
       }
     }
     if (!kasa.dependencyAvailable || !kasa.pinnedCommitInstalled) {
-      steps.fail("Kasa backend", "Pinned python-kasa dependency is not installed.");
+      steps.fail("Kasa backend", `Pinned python-kasa dependency is not ready (${kasa.pinStatus}).`);
       await restoreStoppedService();
       printAttachIncomplete(steps, sshHost, `plantlab node attach ${sshHost}`);
       process.exitCode = 1;

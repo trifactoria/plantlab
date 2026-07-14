@@ -23,6 +23,8 @@ INSTALL_DIR="${PLANTLAB_EDGE_INSTALL_DIR:-$HOME/.local/share/plantlab-edge-agent
 CONFIG_DIR="$HOME/.config/plantlab"
 SPOOL_ROOT="${PLANTLAB_EDGE_SPOOL_ROOT:-$HOME/.local/state/plantlab-edge-agent}"
 USER_BIN_DIR="${PLANTLAB_EDGE_USER_BIN_DIR:-$HOME/.local/bin}"
+VENV_DIR="$INSTALL_DIR/.venv"
+WHEELHOUSE_DIR="$INSTALL_DIR/wheelhouse"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 echo "PlantLab Edge Agent installer"
@@ -53,6 +55,53 @@ fi
 echo ""
 echo "Installing to $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
+mkdir -p "$WHEELHOUSE_DIR"
+
+base_python="${PLANTLAB_EDGE_BASE_PYTHON:-/usr/bin/python3}"
+if [ ! -x "$base_python" ]; then
+  base_python="$PYTHON_BIN"
+fi
+
+venv_valid=false
+if [ -x "$VENV_DIR/bin/python" ] && [ -f "$VENV_DIR/pyvenv.cfg" ] && grep -qi '^include-system-site-packages *= *true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
+  if "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+import platform, sys
+raise SystemExit(0 if sys.prefix != sys.base_prefix and platform.machine() else 1)
+PY
+  then
+    venv_valid=true
+  fi
+fi
+
+if [ "$venv_valid" = false ]; then
+  echo "Preparing dedicated edge-agent venv at $VENV_DIR ..."
+  rm -rf "$VENV_DIR"
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --python "$base_python" --system-site-packages "$VENV_DIR"
+  else
+    "$base_python" -m venv --system-site-packages "$VENV_DIR"
+  fi
+else
+  echo "PASS: reusing healthy edge-agent venv at $VENV_DIR."
+fi
+EDGE_PYTHON="$VENV_DIR/bin/python"
+if [ ! -x "$EDGE_PYTHON" ]; then
+  echo "FATAL: edge-agent venv interpreter was not created at $EDGE_PYTHON" >&2
+  exit 1
+fi
+if ! grep -qi '^include-system-site-packages *= *true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
+  echo "FATAL: edge-agent venv is missing system site packages; pigpio must remain importable from the OS package." >&2
+  exit 1
+fi
+echo "PASS: edge Python is $EDGE_PYTHON ($($EDGE_PYTHON --version 2>&1))."
+if "$EDGE_PYTHON" - <<'PY' >/dev/null 2>&1
+import pigpio
+PY
+then
+  echo "PASS: pigpio imports through the edge venv."
+else
+  echo "WARN: pigpio does not import through the edge venv. DHT22 support will remain unavailable until python3-pigpio/pigpiod are installed."
+fi
 PACKAGE_SOURCE="$SCRIPT_DIR/plantlab_edge_agent"
 PACKAGE_TARGET="$INSTALL_DIR/plantlab_edge_agent"
 PACKAGE_TMP="$INSTALL_DIR/plantlab_edge_agent.tmp.$$"
@@ -149,10 +198,12 @@ fi
 echo ""
 echo "Installing local command ..."
 mkdir -p "$USER_BIN_DIR"
-cat > "$USER_BIN_DIR/plantlab-edge" <<EOF
+WRAPPER_TMP="$(mktemp "$USER_BIN_DIR/plantlab-edge.tmp.XXXXXX")"
+cat > "$WRAPPER_TMP" <<EOF
 #!/bin/sh
-PYTHONPATH="$INSTALL_DIR" PLANTLAB_EDGE_CONFIG_DIR="$CONFIG_DIR" exec "$PYTHON_BIN" -m plantlab_edge_agent "\$@"
+PYTHONPATH="$INSTALL_DIR" PLANTLAB_EDGE_CONFIG_DIR="$CONFIG_DIR" exec "$EDGE_PYTHON" -m plantlab_edge_agent "\$@"
 EOF
+mv "$WRAPPER_TMP" "$USER_BIN_DIR/plantlab-edge"
 chmod 755 "$USER_BIN_DIR/plantlab-edge"
 echo "PASS: plantlab-edge installed at $USER_BIN_DIR/plantlab-edge."
 
@@ -212,7 +263,7 @@ echo "Installing systemd --user unit ..."
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$UNIT_DIR"
 UNIT_TMP="$(mktemp "$UNIT_DIR/plantlab-edge-agent.service.tmp.XXXXXX")"
-sed "s|__PYTHON_BIN__|$PYTHON_BIN|g" "$SCRIPT_DIR/systemd/plantlab-edge-agent.service.template" > "$UNIT_TMP"
+sed "s|__PYTHON_BIN__|$EDGE_PYTHON|g" "$SCRIPT_DIR/systemd/plantlab-edge-agent.service.template" > "$UNIT_TMP"
 # Same mktemp+mv pattern as the TS agent's systemdUnits.ts - never write
 # through an existing mask symlink with a plain redirect.
 mv "$UNIT_TMP" "$UNIT_DIR/plantlab-edge-agent.service"
@@ -245,8 +296,8 @@ fi
 systemctl --user daemon-reload 2>/dev/null || echo "WARN: systemctl --user daemon-reload failed - is a user systemd session available? Try: loginctl enable-linger \$(whoami) then log back in."
 
 echo ""
-PYTHONPATH="$INSTALL_DIR" "$PYTHON_BIN" -m plantlab_edge_agent version
-PYTHONPATH="$INSTALL_DIR" "$PYTHON_BIN" -m plantlab_edge_agent install-check || true
+PYTHONPATH="$INSTALL_DIR" "$EDGE_PYTHON" -m plantlab_edge_agent version
+PYTHONPATH="$INSTALL_DIR" "$EDGE_PYTHON" -m plantlab_edge_agent install-check || true
 
 echo ""
 echo "Edge agent installed."

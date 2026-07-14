@@ -4,7 +4,7 @@ import pytest
 
 from plantlab_edge_agent.power.base import PowerDriverError
 from plantlab_edge_agent.power import kasa as kasa_module
-from plantlab_edge_agent.power.kasa import KasaPowerDriver
+from plantlab_edge_agent.power.kasa import KasaPowerDriver, _map_kasa_exception
 
 
 class FakeChild:
@@ -92,3 +92,11 @@ def test_kasa_driver_unavailable(monkeypatch):
     with pytest.raises(PowerDriverError) as exc:
         driver.connect()
     assert exc.value.code == "power-driver-unavailable"
+
+
+def test_kasa_error_mapping_distinguishes_network_and_auth():
+    assert _map_kasa_exception(TimeoutError("timed out")).code == "power-connection-timeout"
+    assert _map_kasa_exception(ConnectionRefusedError("refused")).code == "power-connection-refused"
+    assert _map_kasa_exception(OSError("No route to host")).code == "power-host-unreachable"
+    assert _map_kasa_exception(RuntimeError("authentication failed")).code == "power-authentication-failed"
+    assert _map_kasa_exception(RuntimeError("KLAP transport selection failed")).code == "power-transport-selection-failed"

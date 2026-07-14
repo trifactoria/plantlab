@@ -7,6 +7,7 @@ import {
   convergeEdgeAgentConfig,
   edgeAttachTimeoutPolicy,
   edgeAgentInstallChangeStatus,
+  inspectRemoteEdgeRuntime,
   inspectRemoteDht22Support,
   inspectEdgeAgentService,
   inspectRemoteKasaSupport,
@@ -21,6 +22,7 @@ import {
   startEdgeAgentService,
   stopEdgeAgentService,
   writeRemoteGreenhouseSecrets,
+  wheelFilenameCompatible,
 } from "../../src/lib/operations/edgeAgentInstall";
 import { createFakeRemoteHome, createFakeSsh, type FakeSsh } from "./helpers/fakeSsh";
 import { createFakeSystemctl, prependPath, type FakeSystemctl } from "./helpers/fakeSystemctl";
@@ -87,6 +89,7 @@ describe("edge-agent install mirror", () => {
     });
     expect(install.status).toBe(0);
     expect(install.stdout).toContain("PASS: package mirrored exactly");
+    expect(install.stdout).toContain("edge Python is");
 
     expect(await exists(path.join(installedPackage, "stale_old_module.py"))).toBe(false);
     expect(await exists(path.join(installedPackage, "__pycache__"))).toBe(false);
@@ -100,6 +103,25 @@ describe("edge-agent install mirror", () => {
     expect(installed?.contentHash).toBe(source.contentHash);
     expect(edgeAgentInstallChangeStatus(source, null)).toBe("UPDATED");
     expect(edgeAgentInstallChangeStatus(source, installed)).toBe("UNCHANGED");
+
+    const wrapper = await readFile(path.join(remoteHome.home, ".local", "bin", "plantlab-edge"), "utf8");
+    expect(wrapper).toContain(`${installRoot}/.venv/bin/python`);
+    expect(wrapper).not.toContain("exec /usr/bin/python3");
+    const unit = await readFile(path.join(remoteHome.home, ".config", "systemd", "user", "plantlab-edge-agent.service"), "utf8");
+    expect(unit).toContain(`${installRoot}/.venv/bin/python -m plantlab_edge_agent run`);
+
+    const runtime = await inspectRemoteEdgeRuntime("greenhouse-zero");
+    expect(runtime.ok).toBe(true);
+    expect(runtime.pythonPath).toBe(`${installRoot}/.venv/bin/python`);
+    expect(runtime.systemSitePackages).toBe(true);
+  });
+
+  it("classifies wheel compatibility by Python ABI and architecture", () => {
+    const target = { pythonMajor: 3, pythonMinor: 13, architecture: "armv6l" };
+    expect(wheelFilenameCompatible("aiohttp-3.14.1-cp313-cp313-linux_armv6l.whl", target)).toBe(true);
+    expect(wheelFilenameCompatible("cffi-2.1.0-cp311-cp311-linux_armv6l.whl", target)).toBe(false);
+    expect(wheelFilenameCompatible("cryptography-49.0.0-cp313-abi3-linux_x86_64.whl", target)).toBe(false);
+    expect(wheelFilenameCompatible("yarl-1.20.1-py3-none-any.whl", target)).toBe(true);
   });
 
   it("converges edge-agent config by preserving unknown fields and existing greenhouse sections", async () => {
@@ -286,6 +308,14 @@ cat <<'JSON'
 {
   "provider": "kasa",
   "host": "192.168.1.72",
+  "kasaDependency": {
+    "status": "ready",
+    "source_type": "git",
+    "repository": "https://github.com/python-kasa/python-kasa.git",
+    "commit": "8b1f6b8c40588584f5d89df37e4610e2ece9a8cb",
+    "import_ready": true,
+    "detail": "python-kasa exact Git pin is installed and importable."
+  },
   "credentialFile": {"path": "/home/pi/.config/plantlab/greenhouse.env", "present": true, "hasKasaUsername": true, "hasKasaPassword": true},
   "driverImportReady": true,
   "authentication": "successful",
@@ -304,23 +334,6 @@ exit 1
 `;
     await writeFile(path.join(fakeBin, "plantlab-edge"), fakePlantlabEdge, { mode: 0o755 });
     await writeFile(path.join(wrapperDir, "plantlab-edge"), fakePlantlabEdge, { mode: 0o755 });
-    await writeFile(
-      path.join(fakeBin, "python3"),
-      `#!/bin/sh
-tmp="$(mktemp)"
-cat > "$tmp"
-if grep -q 'distribution("python-kasa")' "$tmp"; then
-  rm -f "$tmp"
-  printf '{"url":"https://github.com/python-kasa/python-kasa.git","vcs_info":{"commit_id":"8b1f6b8c40588584f5d89df37e4610e2ece9a8cb"}}\\n'
-  exit 0
-fi
-/usr/bin/python3 "$@" < "$tmp"
-status=$?
-rm -f "$tmp"
-exit "$status"
-`,
-      { mode: 0o755 },
-    );
 
     const status = await inspectRemoteKasaSupport("greenhouse-zero");
 
@@ -332,10 +345,17 @@ exit "$status"
   });
 
   it("skips Kasa dependency installation when pinned python-kasa is already installed", async () => {
+    const venvBin = path.join(remoteHome.home, ".local", "share", "plantlab-edge-agent", ".venv", "bin");
+    await mkdir(venvBin, { recursive: true });
     await writeFile(
-      path.join(fakeBin, "python3"),
+      path.join(venvBin, "python"),
       `#!/bin/sh
-cat >/dev/null
+script="$(cat)"
+case "$script" in
+  *'md.distribution("python-kasa")'*)
+    exit 0
+    ;;
+esac
 exit 0
 `,
       { mode: 0o755 },

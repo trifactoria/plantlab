@@ -16,7 +16,7 @@
 
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { access, mkdir, readFile, readdir } from "node:fs/promises";
 import { runLocalCommand, runRemoteShell, validateSshHost, type CommandResult } from "./shellExec";
 import { shellQuote } from "./systemdUnits";
 import {
@@ -31,8 +31,12 @@ if (typeof window !== "undefined") {
 }
 
 const REMOTE_EDGE_AGENT_DIR = "plantlab-edge-agent";
-const PINNED_KASA_SPEC = "python-kasa @ git+https://github.com/python-kasa/python-kasa.git@8b1f6b8c40588584f5d89df37e4610e2ece9a8cb";
-const PINNED_KASA_COMMIT = "8b1f6b8c40588584f5d89df37e4610e2ece9a8cb";
+export const EDGE_INSTALL_DIR = ".local/share/plantlab-edge-agent";
+export const EDGE_VENV_RELATIVE_PYTHON = `${EDGE_INSTALL_DIR}/.venv/bin/python`;
+export const EDGE_WHEELHOUSE_DIR = `${EDGE_INSTALL_DIR}/wheelhouse`;
+export const PINNED_KASA_REPOSITORY = "https://github.com/python-kasa/python-kasa.git";
+export const PINNED_KASA_COMMIT = "8b1f6b8c40588584f5d89df37e4610e2ece9a8cb";
+export const PINNED_KASA_SPEC = `python-kasa @ git+${PINNED_KASA_REPOSITORY}@${PINNED_KASA_COMMIT}`;
 
 export type EdgeAttachTimeoutPolicy = {
   lowResource: boolean;
@@ -87,6 +91,49 @@ function envTimeout(raw: string | undefined, fallback: number): number {
 
 export function localEdgeAgentDir(): string {
   return path.join(process.cwd(), "edge-agent");
+}
+
+export function localWheelhouseDir(): string {
+  return path.join(process.cwd(), "wheelhouse");
+}
+
+export function wheelFilenameCompatible(
+  filename: string,
+  target: { pythonMajor: number; pythonMinor: number; architecture: string },
+): boolean {
+  if (!filename.endsWith(".whl")) return false;
+  const parts = filename.slice(0, -4).split("-");
+  if (parts.length < 5) return false;
+  const pythonTags = parts[parts.length - 3].split(".");
+  const abiTags = parts[parts.length - 2].split(".");
+  const platformTags = parts[parts.length - 1].split(".");
+  const cpTag = `cp${target.pythonMajor}${target.pythonMinor}`;
+  const pythonOk = pythonTags.includes("py3") || pythonTags.includes(cpTag);
+  const abiOk = abiTags.includes("none") || abiTags.includes(cpTag) || abiTags.includes("abi3");
+  const arch = target.architecture.toLowerCase();
+  const platformOk = platformTags.includes("any") || platformTags.some((tag) => platformTagMatchesArchitecture(tag.toLowerCase(), arch));
+  return pythonOk && abiOk && platformOk;
+}
+
+function platformTagMatchesArchitecture(tag: string, arch: string): boolean {
+  if (arch.includes("armv6")) return tag.includes("armv6") || tag.includes("linux_armv6l");
+  if (arch.includes("armv7")) return tag.includes("armv7") || tag.includes("linux_armv7l");
+  if (arch === "aarch64" || arch === "arm64") return tag.includes("aarch64") || tag.includes("arm64");
+  if (arch === "x86_64" || arch === "amd64") return tag.includes("x86_64") || tag.includes("amd64");
+  return false;
+}
+
+async function localWheelhouseFilesForTarget(target: { pythonMajor: number; pythonMinor: number; architecture: string }): Promise<string[]> {
+  const dir = localWheelhouseDir();
+  try {
+    await access(dir);
+  } catch {
+    return [];
+  }
+  const entries = await readdir(dir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && wheelFilenameCompatible(entry.name, target))
+    .map((entry) => path.join(dir, entry.name));
 }
 
 export type EdgeAgentVersionInfo = {
@@ -454,6 +501,128 @@ printf 'RESOLVED=%s\n' "$resolved"
     wrapperPath: wrapperPathMatch?.[1]?.trim() || `/home/${remoteUser || sshHost}/.local/bin/plantlab-edge`,
     wrapperExists: wrapperExistsMatch?.[1]?.trim() === "true",
   };
+}
+
+export type RemoteEdgeRuntimeStatus = {
+  ok: boolean;
+  venvPath: string | null;
+  pythonPath: string | null;
+  pythonVersion: string | null;
+  pythonMajor: number | null;
+  pythonMinor: number | null;
+  architecture: string | null;
+  systemSitePackages: boolean;
+  pigpioImport: boolean;
+  imports: Array<{ module: string; ok: boolean; path?: string | null; version?: string | null; error?: string | null }>;
+  detail: string;
+};
+
+export async function inspectRemoteEdgeRuntime(sshHost: string, options: { timeoutMs?: number } = {}): Promise<RemoteEdgeRuntimeStatus> {
+  validateSshHost(sshHost);
+  const script = String.raw`
+set -u
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+venv_path="$home_dir/__EDGE_INSTALL_DIR__/.venv"
+venv_python="$venv_path/bin/python"
+if [ ! -x "$venv_python" ]; then
+  python3 - <<'PY' "$venv_path" "$venv_python"
+import json, sys
+print(json.dumps({"ok": False, "venvPath": sys.argv[1], "pythonPath": sys.argv[2], "detail": "edge venv python is missing"}))
+PY
+  exit 0
+fi
+"$venv_python" - <<'PY' "$venv_path" "$venv_python"
+import importlib, json, platform, sys
+from pathlib import Path
+venv_path, python_path = sys.argv[1:3]
+cfg = Path(venv_path) / "pyvenv.cfg"
+system_site = False
+try:
+    system_site = "include-system-site-packages = true" in cfg.read_text(encoding="utf-8").lower()
+except Exception:
+    pass
+imports = []
+for name in ("pigpio", "aiohttp", "cffi", "cryptography", "kasa"):
+    try:
+        module = importlib.import_module(name)
+        imports.append({"module": name, "ok": True, "path": getattr(module, "__file__", None), "version": str(getattr(module, "__version__", "") or "") or None})
+    except Exception as exc:
+        imports.append({"module": name, "ok": False, "error": str(exc)[:200]})
+pigpio_ok = any(item["module"] == "pigpio" and item["ok"] for item in imports)
+payload = {
+  "ok": sys.prefix != sys.base_prefix and system_site,
+  "venvPath": venv_path,
+  "pythonPath": python_path,
+  "pythonVersion": sys.version.split()[0],
+  "pythonMajor": sys.version_info.major,
+  "pythonMinor": sys.version_info.minor,
+  "architecture": platform.machine(),
+  "systemSitePackages": system_site,
+  "pigpioImport": pigpio_ok,
+  "imports": imports,
+  "detail": "edge venv ready" if sys.prefix != sys.base_prefix and system_site else "edge venv is missing system-site-packages or is not a venv",
+}
+print(json.dumps(payload))
+PY
+`.replace("__EDGE_INSTALL_DIR__", EDGE_INSTALL_DIR);
+  const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 20_000 }).catch((error) => ({
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+    status: 255,
+  }));
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      venvPath: null,
+      pythonPath: null,
+      pythonVersion: null,
+      pythonMajor: null,
+      pythonMinor: null,
+      architecture: null,
+      systemSitePackages: false,
+      pigpioImport: false,
+      imports: [],
+      detail: (result.stderr.trim() || "Could not inspect edge runtime.").slice(0, 2000),
+    };
+  }
+  let parsed: Partial<RemoteEdgeRuntimeStatus> = {};
+  try {
+    parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as Partial<RemoteEdgeRuntimeStatus>;
+  } catch {
+    parsed = { detail: "edge runtime inspection returned malformed JSON" };
+  }
+  return {
+    ok: parsed.ok === true,
+    venvPath: typeof parsed.venvPath === "string" ? parsed.venvPath : null,
+    pythonPath: typeof parsed.pythonPath === "string" ? parsed.pythonPath : null,
+    pythonVersion: typeof parsed.pythonVersion === "string" ? parsed.pythonVersion : null,
+    pythonMajor: typeof parsed.pythonMajor === "number" ? parsed.pythonMajor : null,
+    pythonMinor: typeof parsed.pythonMinor === "number" ? parsed.pythonMinor : null,
+    architecture: typeof parsed.architecture === "string" ? parsed.architecture : null,
+    systemSitePackages: parsed.systemSitePackages === true,
+    pigpioImport: parsed.pigpioImport === true,
+    imports: Array.isArray(parsed.imports) ? parsed.imports : [],
+    detail: typeof parsed.detail === "string" ? parsed.detail : "edge runtime inspected",
+  };
+}
+
+export async function copyEdgeWheelhouse(sshHost: string, runtime: RemoteEdgeRuntimeStatus, options: { timeoutMs?: number } = {}): Promise<CommandResult> {
+  validateSshHost(sshHost);
+  if (!runtime.pythonMajor || !runtime.pythonMinor || !runtime.architecture) {
+    return { status: 0, stdout: "No compatible local wheelhouse copied; remote Python target is unknown.\n", stderr: "" };
+  }
+  const files = await localWheelhouseFilesForTarget({ pythonMajor: runtime.pythonMajor, pythonMinor: runtime.pythonMinor, architecture: runtime.architecture });
+  if (files.length === 0) {
+    return { status: 0, stdout: "No compatible local wheelhouse wheels found; preserving remote wheelhouse.\n", stderr: "" };
+  }
+  const mkdirResult = await runRemoteShell(sshHost, `mkdir -p ~/${EDGE_WHEELHOUSE_DIR}`, [], { timeoutMs: Math.min(options.timeoutMs ?? 30_000, 60_000) });
+  if (mkdirResult.status !== 0) return mkdirResult;
+  for (const file of files) {
+    const copy = await runLocalCommand("scp", ["-o", "BatchMode=yes", file, `${sshHost}:${EDGE_WHEELHOUSE_DIR}/`], { timeoutMs: options.timeoutMs ?? 120_000 });
+    if (copy.status !== 0) return copy;
+  }
+  return { status: 0, stdout: `Copied ${files.length} compatible wheel(s) to ~/${EDGE_WHEELHOUSE_DIR}.\n`, stderr: "" };
 }
 
 export type EdgeConfigConvergenceResult = {
@@ -832,6 +1001,12 @@ export async function installRemoteDht22Support(sshHost: string, options: { time
   validateSshHost(sshHost);
   const script = String.raw`
 set -eu
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+venv_python="$home_dir/__EDGE_VENV_RELATIVE_PYTHON__"
+if [ ! -x "$venv_python" ]; then
+  venv_python="$(command -v python3)"
+fi
 run_root() {
   if [ "$(id -u)" = "0" ]; then
     "$@"
@@ -842,7 +1017,7 @@ run_root() {
     return 77
   fi
 }
-if python3 - <<'PY' >/dev/null 2>&1
+if "$venv_python" - <<'PY' >/dev/null 2>&1
 import pigpio
 pi = pigpio.pi()
 try:
@@ -861,7 +1036,7 @@ if command -v apt-get >/dev/null 2>&1; then
   run_root apt-get update
   run_root apt-get install -y pigpio python3-pigpio
 fi
-if ! python3 - <<'PY' >/dev/null 2>&1
+if ! "$venv_python" - <<'PY' >/dev/null 2>&1
 import pigpio
 PY
 then
@@ -892,7 +1067,7 @@ then
     run_root pigpiod || true
   fi
 fi
-python3 - <<'PY'
+"$venv_python" - <<'PY'
 import pigpio
 pi = pigpio.pi()
 try:
@@ -905,7 +1080,7 @@ finally:
         pass
 print("DHT22 backend ready.")
 PY
-`;
+`.replaceAll("__EDGE_VENV_RELATIVE_PYTHON__", EDGE_VENV_RELATIVE_PYTHON);
   return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 180_000 });
 }
 
@@ -947,6 +1122,7 @@ export type RemoteKasaSupportStatus = {
   ok: boolean;
   dependencyAvailable: boolean;
   pinnedCommitInstalled: boolean;
+  pinStatus: "ready" | "missing" | "wrong-source" | "wrong-commit" | "broken" | "unknown" | string;
   probeReady: boolean;
   credentialFilePresent: boolean;
   credentialKeysPresent: boolean;
@@ -960,6 +1136,7 @@ export async function inspectRemoteKasaSupport(sshHost: string, options: { timeo
 set -u
 home_dir="${"${HOME:-}"}"
 if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+venv_python="$home_dir/__EDGE_VENV_RELATIVE_PYTHON__"
 probe_json=""
 if command -v bash >/dev/null 2>&1; then
   probe_json="$(bash -lc 'plantlab-edge power probe --json' 2>/dev/null || true)"
@@ -967,26 +1144,22 @@ fi
 if [ -z "$probe_json" ] && [ -x "$home_dir/.local/bin/plantlab-edge" ]; then
   probe_json="$("$home_dir/.local/bin/plantlab-edge" power probe --json 2>/dev/null || true)"
 fi
-direct_url="$(python3 - <<'PY' 2>/dev/null || true
-import importlib.metadata as md
-try:
-    dist = md.distribution("python-kasa")
-    print(dist.read_text("direct_url.json") or "")
-except Exception:
-    pass
-PY
-)"
-python3 - "$probe_json" "$direct_url" <<'PY'
+if [ -z "$probe_json" ] && [ -x "$venv_python" ]; then
+  probe_json="$(PYTHONPATH="$home_dir/__EDGE_INSTALL_DIR__" "$venv_python" -m plantlab_edge_agent power probe --json 2>/dev/null || true)"
+fi
+python3 - "$probe_json" <<'PY'
 import json, sys
-probe_json, direct_url = sys.argv[1:3]
-payload = {"probe": None, "probeError": None, "directUrl": direct_url}
+probe_json = sys.argv[1]
+payload = {"probe": None, "probeError": None}
 try:
     payload["probe"] = json.loads(probe_json) if probe_json.strip() else None
 except Exception as exc:
     payload["probeError"] = str(exc)
 print(json.dumps(payload))
 PY
-`;
+`
+    .replaceAll("__EDGE_VENV_RELATIVE_PYTHON__", EDGE_VENV_RELATIVE_PYTHON)
+    .replaceAll("__EDGE_INSTALL_DIR__", EDGE_INSTALL_DIR);
   const result = await runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 30_000 }).catch((error) => ({
     stdout: "",
     stderr: error instanceof Error ? error.message : String(error),
@@ -997,13 +1170,14 @@ PY
       ok: false,
       dependencyAvailable: false,
       pinnedCommitInstalled: false,
+      pinStatus: "unknown",
       probeReady: false,
       credentialFilePresent: false,
       credentialKeysPresent: false,
       detail: (result.stderr.trim() || "Could not inspect Kasa support.").slice(0, 2000),
     };
   }
-  let parsed: { probe?: Record<string, unknown> | null; probeError?: string | null; directUrl?: string } = {};
+  let parsed: { probe?: Record<string, unknown> | null; probeError?: string | null } = {};
   try {
     parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
   } catch {
@@ -1011,13 +1185,18 @@ PY
   }
   const probe = parsed.probe ?? null;
   const credentialFile = probe?.credentialFile && typeof probe.credentialFile === "object" && !Array.isArray(probe.credentialFile) ? (probe.credentialFile as Record<string, unknown>) : {};
-  const directUrl = typeof parsed.directUrl === "string" ? parsed.directUrl : "";
+  const kasaDependency = probe?.kasaDependency && typeof probe.kasaDependency === "object" && !Array.isArray(probe.kasaDependency) ? (probe.kasaDependency as Record<string, unknown>) : {};
+  const pinStatus = typeof kasaDependency.status === "string" ? kasaDependency.status : probe?.driverImportReady === true ? "unknown" : "missing";
   const dependencyAvailable = probe?.driverImportReady === true;
-  const pinnedCommitInstalled = directUrl.includes(PINNED_KASA_COMMIT);
+  const pinnedCommitInstalled =
+    pinStatus === "ready" &&
+    kasaDependency.repository === PINNED_KASA_REPOSITORY &&
+    kasaDependency.commit === PINNED_KASA_COMMIT;
   return {
     ok: Boolean(probe),
     dependencyAvailable,
     pinnedCommitInstalled,
+    pinStatus,
     probeReady: probe?.ready === true,
     credentialFilePresent: credentialFile.present === true,
     credentialKeysPresent: credentialFile.hasKasaUsername === true && credentialFile.hasKasaPassword === true,
@@ -1026,6 +1205,8 @@ PY
         ? probe.errorMessage
         : probe?.ready === true
           ? "Kasa power backend is ready."
+          : typeof kasaDependency.detail === "string"
+            ? kasaDependency.detail
           : parsed.probeError || "plantlab-edge power probe did not report readiness.",
     raw: probe ?? parsed,
   };
@@ -1037,39 +1218,88 @@ export async function installRemoteKasaSupport(sshHost: string, options: { timeo
 set -eu
 spec=__SPEC__
 commit=__COMMIT__
-if python3 - <<'PY' "$commit" >/dev/null 2>&1
+repo=__REPO__
+home_dir="${"${HOME:-}"}"
+if [ -z "$home_dir" ]; then home_dir="$(getent passwd "$(id -un)" | cut -d: -f6)"; fi
+venv_python="$home_dir/__EDGE_VENV_RELATIVE_PYTHON__"
+wheelhouse="$home_dir/__EDGE_WHEELHOUSE_DIR__"
+if [ ! -x "$venv_python" ]; then
+  echo "Edge-agent venv python is missing at $venv_python. Run edge install first." >&2
+  exit 78
+fi
+if "$venv_python" - <<'PY' "$commit" "$repo" >/dev/null 2>&1
 import importlib.metadata as md
+import importlib
+import json
 import sys
-commit = sys.argv[1]
+commit, repo = sys.argv[1:3]
 dist = md.distribution("python-kasa")
-direct = dist.read_text("direct_url.json") or ""
-raise SystemExit(0 if commit in direct else 2)
+direct = json.loads(dist.read_text("direct_url.json") or "{}")
+if direct.get("url") != repo or direct.get("vcs_info", {}).get("commit_id") != commit:
+    raise SystemExit(2)
+kasa = importlib.import_module("kasa")
+for attr in ("Device", "DeviceConfig", "Credentials"):
+    if not hasattr(kasa, attr):
+        raise SystemExit(3)
 PY
 then
   echo "python-kasa pinned commit already installed."
   exit 0
 fi
-if ! python3 -m pip --version >/dev/null 2>&1; then
-  echo "python3 -m pip is required to install python-kasa." >&2
+if ! "$venv_python" -m pip --version >/dev/null 2>&1; then
+  echo "pip is required in the edge-agent venv to install python-kasa." >&2
   exit 78
 fi
-python3 -m pip install --user --upgrade "$spec"
-python3 - <<'PY' "$commit"
+deps_missing=false
+"$venv_python" - <<'PY' || deps_missing=true
+import aiohttp
+import cffi
+import cryptography
+PY
+if [ "$deps_missing" = true ]; then
+  if [ ! -d "$wheelhouse" ]; then
+    echo "Kasa dependency imports are missing and no PlantLab wheelhouse exists at $wheelhouse." >&2
+    exit 79
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install --python "$venv_python" --no-index --find-links "$wheelhouse" 'aiohttp==3.14.1' 'cffi==2.1.0' 'cryptography==49.0.0'
+  else
+    "$venv_python" -m pip install --no-index --find-links "$wheelhouse" 'aiohttp==3.14.1' 'cffi==2.1.0' 'cryptography==49.0.0'
+  fi
+fi
+if command -v uv >/dev/null 2>&1; then
+  uv pip install --python "$venv_python" --no-deps --force-reinstall "$spec"
+else
+  "$venv_python" -m pip install --no-deps --force-reinstall "$spec"
+fi
+"$venv_python" - <<'PY' "$commit" "$repo"
 import importlib.metadata as md
+import importlib
+import json
 import sys
-commit = sys.argv[1]
+commit, repo = sys.argv[1:3]
 dist = md.distribution("python-kasa")
-direct = dist.read_text("direct_url.json") or ""
-if commit not in direct:
+direct = json.loads(dist.read_text("direct_url.json") or "{}")
+if direct.get("url") != repo or direct.get("vcs_info", {}).get("commit_id") != commit:
     raise SystemExit("python-kasa installed, but pinned git commit was not recorded")
-import kasa
+for name in ("aiohttp", "cffi", "cryptography", "kasa"):
+    importlib.import_module(name)
+kasa = importlib.import_module("kasa")
 for attr in ("Device", "DeviceConfig", "Credentials"):
     if not hasattr(kasa, attr):
         raise SystemExit(f"python-kasa missing required API: {attr}")
 print("python-kasa pinned backend ready.")
 PY
+if command -v uv >/dev/null 2>&1; then
+  uv pip check --python "$venv_python"
+else
+  "$venv_python" -m pip check
+fi
 `
     .replace("__SPEC__", shellQuote(PINNED_KASA_SPEC))
-    .replace("__COMMIT__", shellQuote(PINNED_KASA_COMMIT));
+    .replace("__COMMIT__", shellQuote(PINNED_KASA_COMMIT))
+    .replace("__REPO__", shellQuote(PINNED_KASA_REPOSITORY))
+    .replaceAll("__EDGE_VENV_RELATIVE_PYTHON__", EDGE_VENV_RELATIVE_PYTHON)
+    .replaceAll("__EDGE_WHEELHOUSE_DIR__", EDGE_WHEELHOUSE_DIR);
   return runRemoteShell(sshHost, script, [], { timeoutMs: options.timeoutMs ?? 180_000 });
 }

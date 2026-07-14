@@ -66,6 +66,20 @@ def test_config_show_displays_greenhouse_sections_without_secrets(isolated_confi
     assert 'KASA_PASSWORD="secret"' not in output
 
 
+def test_config_show_reads_sensor_driver_mode_from_systemd_dropin(monkeypatch, isolated_config, fake_coordinator, tmp_path, capsys):
+    monkeypatch.setenv("PLANTLAB_EDGE_SYSTEMD_USER_DIR", str(tmp_path))
+    dropin_dir = tmp_path / "plantlab-edge-agent.service.d"
+    dropin_dir.mkdir(parents=True)
+    (dropin_dir / "greenhouse-sensor-driver.conf").write_text("[Service]\nEnvironment=PLANTLAB_GREENHOUSE_SENSOR_DRIVER=dht22\n")
+    _write_ready_config(isolated_config, fake_coordinator)
+
+    assert cli.main(["config", "show"]) == 0
+    output = capsys.readouterr().out
+    assert "Configured sensor driver mode: dht22" in output
+    assert "Current shell override: none" in output
+    assert "Sensor driver mode: dht22" in output
+
+
 def test_status_fails_when_coordinator_url_is_missing(isolated_config, capsys):
     config.write_config(
         config.EdgeAgentConfig(
@@ -247,10 +261,14 @@ def test_power_probe_does_not_print_credentials(monkeypatch, isolated_config, ca
 
     monkeypatch.setattr(cli, "KasaPowerDriver", FakeKasaDriver)
     monkeypatch.setattr(cli, "kasa_dependency_available", lambda: True)
+    monkeypatch.setattr(cli, "inspect_kasa_pin", lambda: type("Pin", (), {"status": "ready", "to_dict": lambda self: {"status": "ready", "source_type": "git", "repository": "https://github.com/python-kasa/python-kasa.git", "commit": "8b1f6b8c40588584f5d89df37e4610e2ece9a8cb", "import_path": "/venv/kasa/__init__.py"}})())
+    monkeypatch.setattr(cli, "_classify_kasa_connectivity", lambda _host: "tcp-connectable")
 
     assert cli.main(["power", "probe"]) == 0
     output = capsys.readouterr().out
     assert "KP303" in output
+    assert "Kasa dependency:" in output
+    assert "status: ready" in output
     assert "greenhouse-fans" in output
     assert "user@example.com" not in output
     assert "secret" not in output
