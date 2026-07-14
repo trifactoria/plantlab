@@ -174,6 +174,13 @@ Examples:
       const coordinatorUrl = typeof config.coordinatorUrl === "string" ? config.coordinatorUrl : "";
       const installResult = await runEdgeAgentInstall(sshHost, { role, nodeName, coordinatorUrl }, { timeoutMs: timeoutPolicy.installMs });
       if (installResult.status !== 0) throw new Error(installResult.stderr || installResult.stdout || "Edge installer failed.");
+      const serviceState = await inspectEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs }).catch(() => null);
+      if (serviceState?.active) {
+        const stop = await stopEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+        if (stop.status !== 0) throw new Error(stop.stderr || "Could not stop plantlab-edge-agent.service for restart.");
+      }
+      const start = await startEdgeAgentService(sshHost, { timeoutMs: timeoutPolicy.serviceMs });
+      if (start.status !== 0) throw new Error(start.stderr || "Could not start plantlab-edge-agent.service after deploy.");
       const installedAfter = await readInstalledEdgeAgentVersion(sshHost);
       console.log(`Deployed edge-agent to ${sshHost}.`);
       console.log(`Previous: ${installedBefore?.contentHash?.slice(0, 12) ?? "(unknown)"}`);
