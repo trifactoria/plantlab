@@ -36,9 +36,11 @@ const TINY_JPEG_BASE64 =
 function assertFixtureDatabase() {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   const rootDir = process.env.PLANTLAB_ROOT_DIR ?? "";
+  const isVitestIsolated = process.env.VITEST === "true" && /plantlab-test/i.test(databaseUrl);
+  const isScreenshotFixture =
+    process.env.PLANTLAB_SCREENSHOTS_FIXTURE_ONLY === "1" && /plantlab-test|playwright|fixture|tmp/i.test(`${databaseUrl} ${rootDir}`);
   const looksIsolated =
-    process.env.PLANTLAB_SCREENSHOTS_FIXTURE_ONLY === "1" &&
-    /plantlab-test|playwright|fixture|tmp/i.test(`${databaseUrl} ${rootDir}`) &&
+    (isVitestIsolated || isScreenshotFixture) &&
     !/\/home\/andy\/projects\/plantlab\/prisma\/dev\.db|file:\.\/dev\.db/i.test(databaseUrl);
 
   if (!looksIsolated) {
