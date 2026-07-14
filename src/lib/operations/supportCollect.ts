@@ -123,8 +123,8 @@ function hostCommands(host: string, role: string) {
       { path: "doctor/edge-doctor.txt", remote: "bash -lc 'plantlab-edge doctor' 2>&1" },
       { path: "config/effective.json", remote: "bash -lc 'plantlab-edge config show --json' 2>&1" },
       { path: "sensors/hardware.txt", remote: "bash -lc 'plantlab-edge doctor --hardware --attempts 1 --interval 0.1' 2>&1" },
-      { path: "cameras/inventory.json", remote: "bash -lc 'plantlab-edge camera list --json' 2>&1" },
-      { path: "power/status.json", remote: "bash -lc 'plantlab-edge power status --json' 2>&1" },
+      { path: "cameras/inventory.json", remote: "bash -lc 'cat ~/.local/state/plantlab-edge-agent/camera-inventory-cache.json' 2>&1" },
+      { path: "power/status.txt", remote: "bash -lc 'plantlab-edge power status' 2>&1" },
       { path: "services/edge-agent.txt", remote: "systemctl --user status plantlab-edge-agent.service --no-pager -l 2>&1 | tail -160" },
       { path: "logs/edge-agent.txt", remote: "journalctl --user -u plantlab-edge-agent.service -n 200 --no-pager 2>&1" },
     ];
