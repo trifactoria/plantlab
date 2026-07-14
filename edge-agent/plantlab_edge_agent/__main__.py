@@ -23,11 +23,11 @@ from pathlib import Path
 
 from . import agent, camera, config
 from .camera_inventory import camera_inventory_cache_status, inventory_refresh_running
-from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, ProtocolError, platform_info, request_json
+from .protocol import AGENT_RUNTIME, AGENT_VERSION, PROTOCOL_VERSION, AgentProtocolClient, PowerCommand, ProtocolError, platform_info, request_json
 from .power.base import PowerDriverError
 from .power.dependencies import edge_python_info, inspect_imports, inspect_kasa_pin
 from .power.kasa import KasaPowerDriver, dependency_available as kasa_dependency_available
-from .power.models import WATER_MAX_PULSE_SECONDS
+from .power.models import OUTLET_KEYS, WATER_MAX_PULSE_SECONDS
 from .power.runtime import PowerManager
 from .sensors import probe as sensor_probe
 from .sensors.base import CLASSIFICATION_ACCEPTED
@@ -739,12 +739,9 @@ def cmd_power_on_off(args: argparse.Namespace) -> int:
     if error or cfg is None:
         print(f"Power command unavailable: {error}", file=sys.stderr)
         return 1
-    if args.outlet_key == "water" and args.action == "on":
-        print("Water outlets do not permit unbounded ON commands. Use: plantlab-edge power pulse water --seconds N", file=sys.stderr)
-        return 1
     manager = PowerManager(cfg)
     try:
-        result = manager._set(args.outlet_key, args.action == "on")
+        result = manager.execute(PowerCommand(f"cli-{args.action}-{args.outlet_key}", args.outlet_key, args.action, None, "manual-cli"))
         if not result.ok:
             print(f"FAIL: {result.error_code}: {result.error_message}", file=sys.stderr)
             return 1
@@ -759,19 +756,16 @@ def cmd_power_pulse(args: argparse.Namespace) -> int:
     if error or cfg is None:
         print(f"Power command unavailable: {error}", file=sys.stderr)
         return 1
-    if args.outlet_key != "water":
-        print("Pulse is currently supported only for the water outlet.", file=sys.stderr)
-        return 1
     if args.seconds <= 0 or args.seconds > WATER_MAX_PULSE_SECONDS:
         print(f"--seconds must be from 1 to {WATER_MAX_PULSE_SECONDS}.", file=sys.stderr)
         return 1
     manager = PowerManager(cfg)
     try:
-        result = manager._pulse("water", args.seconds)
+        result = manager.execute(PowerCommand(f"cli-pulse-{args.outlet_key}", args.outlet_key, "pulse", args.seconds, "manual-cli"))
         if not result.ok:
             print(f"FAIL: {result.error_code}: {result.error_message}", file=sys.stderr)
             return 1
-        print(f"PASS: water pulsed for {args.seconds} second(s) and verified OFF")
+        print(f"PASS: {args.outlet_key} pulsed for {args.seconds} second(s) and verified OFF")
         return 0
     finally:
         manager.close()
@@ -1004,14 +998,14 @@ def build_parser() -> argparse.ArgumentParser:
     power_probe.add_argument("--json", action="store_true", help="Print structured JSON.")
     power_probe.set_defaults(func=cmd_power_probe)
     power_sub.add_parser("status", help="Read current configured outlet states.").set_defaults(func=cmd_power_status)
-    power_on = power_sub.add_parser("on", help="Turn a non-water outlet on and verify actual state.")
-    power_on.add_argument("outlet_key", choices=["fans", "lights", "water"])
+    power_on = power_sub.add_parser("on", help="Turn an outlet on when its configured behavior permits unbounded ON.")
+    power_on.add_argument("outlet_key", choices=list(OUTLET_KEYS))
     power_on.set_defaults(func=cmd_power_on_off, action="on")
     power_off = power_sub.add_parser("off", help="Turn an outlet off and verify actual state.")
-    power_off.add_argument("outlet_key", choices=["fans", "lights", "water"])
+    power_off.add_argument("outlet_key", choices=list(OUTLET_KEYS))
     power_off.set_defaults(func=cmd_power_on_off, action="off")
-    power_pulse = power_sub.add_parser("pulse", help="Pulse the water outlet for a bounded duration and verify OFF.")
-    power_pulse.add_argument("outlet_key", choices=["water"])
+    power_pulse = power_sub.add_parser("pulse", help="Pulse an outlet with pulse-only behavior for a bounded duration and verify OFF.")
+    power_pulse.add_argument("outlet_key", choices=list(OUTLET_KEYS))
     power_pulse.add_argument("--seconds", type=int, required=True)
     power_pulse.set_defaults(func=cmd_power_pulse)
     sensor_parser = sub.add_parser("sensor", help="Environmental sensor diagnostics.")

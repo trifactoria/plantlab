@@ -39,10 +39,18 @@ describe("greenhouse edge-agent configuration", () => {
       provider: "kasa",
       host: "192.168.1.72",
       outlets: { fans: "greenhouse-fans" },
+      outletBehaviors: { fans: "normal" },
+    });
+    expect(parseGreenhousePower({ provider: "kasa", host: "192.168.1.72", outlets: { water: "greenhouse-water" }, outletBehaviors: { water: "pulse-only" } })).toEqual({
+      provider: "kasa",
+      host: "192.168.1.72",
+      outlets: { water: "greenhouse-water" },
+      outletBehaviors: { water: "pulse-only" },
     });
     expect(() => parseGreenhousePower({ provider: "other", host: "x" })).toThrow(/Unsupported power provider/);
     expect(() => parseGreenhousePower({ provider: "kasa", host: "x", outlets: { heater: "x" } })).toThrow(/Unsupported power outlet key/);
     expect(() => parseGreenhousePower({ provider: "kasa", host: "x", outlets: { fans: "" } })).toThrow(/non-empty string/);
+    expect(() => parseGreenhousePower({ provider: "kasa", host: "x", outlets: { fans: "x" }, outletBehaviors: { fans: "always-on" } })).toThrow(/outletBehaviors/);
   });
 
   it("derives capabilities only from valid configured greenhouse functionality", () => {
@@ -92,6 +100,7 @@ describe("greenhouse edge-agent configuration", () => {
     expect(merged.coordinatorUrl).toBe("http://coordinator:3000");
     expect(merged.sensors).toEqual([sensor]);
     expect(merged.power).toMatchObject({ provider: "kasa", host: "192.168.1.72", outlets: { fans: "greenhouse-fans" }, futurePowerField: "keep" });
+    expect(merged.power).toMatchObject({ outletBehaviors: { fans: "normal" } });
     expect(merged.unknownTopLevel).toEqual({ nested: true });
     expect(merged.heartbeatIntervalSeconds).toBe(17);
     expect(merged.capabilities).toEqual(["camera", "temperature", "humidity", "relay", "fan"]);

@@ -47,12 +47,36 @@ describe("power schedule CRUD API", () => {
     expect(body.schedule.nextRunAt).not.toBeNull();
   });
 
-  it("rejects scheduling the reserved water outlet", async () => {
+  it("allows scheduling a normal outlet named water", async () => {
     await setUpNode("greenhouse-schedule-water");
     const response = await createSchedule(jsonRequest("POST", { outletKey: "water", action: "on", timeOfDay: "07:00" }), {
       params: Promise.resolve({ nodeName: "greenhouse-schedule-water" }),
     });
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.schedule).toMatchObject({ outletKey: "water", action: "on" });
+  });
+
+  it("rejects permanent ON schedules for explicitly pulse-only outlets", async () => {
+    const registered = await setUpNode("greenhouse-schedule-pulse-only");
+    await ingestPowerState(
+      prisma,
+      registered.node.id,
+      parsePowerStateReport(
+        { outlets: [{ key: "water", name: "Water", provider: "kasa", providerAlias: "water", behavior: "pulse-only" }] },
+        new Date("2026-07-14T00:00:00.000Z"),
+      ),
+    );
+
+    const response = await createSchedule(jsonRequest("POST", { outletKey: "water", action: "on", timeOfDay: "07:00" }), {
+      params: Promise.resolve({ nodeName: "greenhouse-schedule-pulse-only" }),
+    });
     expect(response.status).toBe(400);
+
+    const off = await createSchedule(jsonRequest("POST", { outletKey: "water", action: "off", timeOfDay: "07:01" }), {
+      params: Promise.resolve({ nodeName: "greenhouse-schedule-pulse-only" }),
+    });
+    expect(off.status).toBe(201);
   });
 
   it("rejects invalid time-of-day format", async () => {

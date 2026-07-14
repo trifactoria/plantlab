@@ -1,7 +1,7 @@
 import { DateTime } from "luxon";
 import { isValidTimeZone, timeInputToMinutes } from "./timezone";
 
-export const SCHEDULABLE_OUTLET_KEYS = ["fans", "lights"] as const;
+export const SCHEDULABLE_OUTLET_KEYS = ["fans", "water", "lights"] as const;
 export type SchedulableOutletKey = (typeof SCHEDULABLE_OUTLET_KEYS)[number];
 export const SCHEDULE_ACTIONS = ["on", "off"] as const;
 export type ScheduleAction = (typeof SCHEDULE_ACTIONS)[number];

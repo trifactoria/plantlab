@@ -1,4 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
+import {
+  canUsePermanentOff,
+  canUsePermanentOn,
+  canUsePulse,
+  outletBehaviorOrDefault,
+  normalizeOutletBehavior,
+  type OutletBehavior,
+} from "../outletBehavior";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/powerProtocol.ts is server-only operational code.");
@@ -8,7 +16,8 @@ export const POWER_ACTIONS = ["on", "off", "pulse", "refresh"] as const;
 export type PowerAction = (typeof POWER_ACTIONS)[number];
 export const POWER_COMMAND_STATUSES = ["pending", "claimed", "succeeded", "failed", "expired", "cancelled"] as const;
 export const POWER_OUTLET_KEYS = ["fans", "water", "lights"] as const;
-export const WATER_MAX_PULSE_SECONDS = 120;
+export const MAX_PULSE_SECONDS = 120;
+export const WATER_MAX_PULSE_SECONDS = MAX_PULSE_SECONDS;
 
 const STATE_BATCH_MAX = 20;
 const STRING_MAX = 200;
@@ -39,6 +48,7 @@ export type PowerOutletStateReport = {
   provider: string;
   providerAlias: string;
   enabled: boolean;
+  behavior: OutletBehavior;
   safetyClass: string;
   actualState: boolean | null;
   stateObservedAt: Date | null;
@@ -83,6 +93,7 @@ export async function ingestPowerState(prisma: PrismaClient, nodeId: string, out
           provider: outlet.provider,
           providerAlias: outlet.providerAlias,
           enabled: outlet.enabled,
+          behavior: outlet.behavior,
           safetyClass: outlet.safetyClass,
           actualState: outlet.actualState,
           stateObservedAt: outlet.stateObservedAt,
@@ -95,6 +106,7 @@ export async function ingestPowerState(prisma: PrismaClient, nodeId: string, out
           provider: outlet.provider,
           providerAlias: outlet.providerAlias,
           enabled: outlet.enabled,
+          behavior: outlet.behavior,
           safetyClass: outlet.safetyClass,
           actualState: outlet.actualState,
           stateObservedAt: outlet.stateObservedAt,
@@ -131,15 +143,12 @@ export async function createPowerCommand(
   if (!outlet) return { ok: false as const, status: 404, error: `Outlet "${outletKey}" is not known for node "${nodeName}".` };
   if (!outlet.enabled) return { ok: false as const, status: 409, error: `Outlet "${outletKey}" is disabled.` };
 
-  const durationSeconds = parseCommandDuration(action, outletKey, input.durationSeconds);
-  if (!durationSeconds.ok) return durationSeconds;
+  const behavior = outletBehaviorOrDefault(outlet.behavior);
+  const behaviorError = validateActionForBehavior(action, behavior);
+  if (behaviorError) return behaviorError;
 
-  if (outlet.safetyClass === "water" && action === "on") {
-    return { ok: false as const, status: 400, error: "Water outlets do not permit unbounded ON commands. Use pulse with a bounded duration." };
-  }
-  if (outletKey === "water" && action === "on") {
-    return { ok: false as const, status: 400, error: "Water outlets do not permit unbounded ON commands. Use pulse with a bounded duration." };
-  }
+  const durationSeconds = parseCommandDuration(action, input.durationSeconds);
+  if (!durationSeconds.ok) return durationSeconds;
 
   const idempotencyKey = cleanOptionalString(input.idempotencyKey, "idempotencyKey", 120);
   if (idempotencyKey) {
@@ -319,6 +328,7 @@ export async function getLatestPowerStatus(prisma: PrismaClient, nodeName: strin
         provider: outlet.provider,
         providerAlias: outlet.providerAlias,
         enabled: outlet.enabled,
+        behavior: outletBehaviorOrDefault(outlet.behavior),
         safetyClass: outlet.safetyClass,
         actualState: outlet.actualState,
         stateObservedAt: outlet.stateObservedAt?.toISOString() ?? null,
@@ -375,7 +385,8 @@ function parseOutletState(raw: unknown, index: number, now: Date): PowerOutletSt
     provider: requiredString(raw.provider, `outlets[${index}].provider`, 50),
     providerAlias: requiredString(raw.providerAlias, `outlets[${index}].providerAlias`, STRING_MAX),
     enabled: raw.enabled === undefined ? true : requireBoolean(raw.enabled, `outlets[${index}].enabled`),
-    safetyClass: optionalString(raw.safetyClass, `outlets[${index}].safetyClass`, 50) ?? (key === "water" ? "water" : "switch"),
+    behavior: parseBehavior(raw.behavior, `outlets[${index}].behavior`),
+    safetyClass: optionalString(raw.safetyClass, `outlets[${index}].safetyClass`, 50) ?? "switch",
     actualState: raw.actualState === undefined ? null : raw.actualState,
     stateObservedAt,
     available: raw.available === undefined ? raw.actualState !== null && raw.actualState !== undefined : raw.available,
@@ -484,16 +495,28 @@ async function recoverStaleClaimedCommands(prisma: PrismaClient, nodeId: string,
   }
 }
 
-function parseCommandDuration(action: PowerAction, outletKey: string, raw: number | null | undefined) {
+function parseCommandDuration(action: PowerAction, raw: number | null | undefined) {
   if (action !== "pulse") {
     if (raw !== undefined && raw !== null) return { ok: false as const, status: 400, error: "durationSeconds is only valid for pulse commands." };
     return { ok: true as const, value: null };
   }
   if (!Number.isInteger(raw) || typeof raw !== "number") return { ok: false as const, status: 400, error: "pulse commands require integer durationSeconds." };
   if (raw <= 0) return { ok: false as const, status: 400, error: "durationSeconds must be greater than zero." };
-  if (raw > WATER_MAX_PULSE_SECONDS) return { ok: false as const, status: 400, error: `durationSeconds must be at most ${WATER_MAX_PULSE_SECONDS}.` };
-  if (outletKey !== "water") return { ok: false as const, status: 400, error: "pulse is currently supported only for the water outlet." };
+  if (raw > MAX_PULSE_SECONDS) return { ok: false as const, status: 400, error: `durationSeconds must be at most ${MAX_PULSE_SECONDS}.` };
   return { ok: true as const, value: raw };
+}
+
+function validateActionForBehavior(action: PowerAction, behavior: OutletBehavior) {
+  if (action === "on" && !canUsePermanentOn(behavior)) {
+    return { ok: false as const, status: 400, error: `Outlet behavior "${behavior}" does not permit unbounded ON commands. Use pulse with a bounded duration when supported.` };
+  }
+  if (action === "off" && !canUsePermanentOff(behavior)) {
+    return { ok: false as const, status: 400, error: `Outlet behavior "${behavior}" does not permit OFF commands.` };
+  }
+  if (action === "pulse" && !canUsePulse(behavior)) {
+    return { ok: false as const, status: 400, error: `Outlet behavior "${behavior}" does not permit pulse commands.` };
+  }
+  return null;
 }
 
 function normalizeAction(value: unknown): PowerAction | null {
@@ -525,6 +548,13 @@ function optionalString(value: unknown, label: string, maxLength: number): strin
   if (!trimmed) return null;
   if (trimmed.length > maxLength) throw new Error(`${label} must be ${maxLength} characters or fewer.`);
   return trimmed;
+}
+
+function parseBehavior(value: unknown, label: string): OutletBehavior {
+  if (value === undefined || value === null || value === "") return outletBehaviorOrDefault(value);
+  const parsed = normalizeOutletBehavior(value);
+  if (!parsed) throw new Error(`${label} must be one of normal, pulse-only.`);
+  return parsed;
 }
 
 function cleanOptionalString(value: unknown, label: string, maxLength: number): string | null {

@@ -245,11 +245,11 @@ The edge agent reports actual observed outlet state to
 sensor sampling. Kasa connection failures do not stop camera capture or
 environmental telemetry.
 
-Water is safety-limited on the node. `plantlab-edge power on water` is
-rejected; use `power pulse water --seconds N`. The hard maximum pulse is
-120 seconds. The runtime turns water OFF in a `finally` path and verifies
-OFF after a pulse. At startup, if the water outlet is unexpectedly ON, the
-edge agent forces it OFF and reports the resulting state/error.
+Outlet behavior is explicit configuration, not inferred from the key. A
+`normal` outlet accepts ordinary `on`/`off` commands and schedules. A
+`pulse-only` outlet rejects unbounded `on`, accepts bounded `pulse`, turns
+OFF in a `finally` path, verifies OFF after a pulse, and is forced OFF at
+startup if it is unexpectedly ON. The hard maximum pulse is 120 seconds.
 
 ## DHT22 wiring
 

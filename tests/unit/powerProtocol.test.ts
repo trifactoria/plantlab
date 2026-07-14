@@ -70,7 +70,7 @@ describe("power protocol", () => {
     expect(ok.status).toBe(200);
   });
 
-  it("creates bounded manual commands and forbids permanent water on", async () => {
+  it("creates bounded manual commands and treats normal water as an ordinary outlet", async () => {
     const registered = await registerOrRotateNode(prisma, { name: "greenhouse-power-command", role: "greenhouse-node", rotateCredential: true });
     await ingestPowerState(
       prisma,
@@ -89,16 +89,60 @@ describe("power protocol", () => {
     const fans = await createPowerCommand(prisma, "greenhouse-power-command", { outletKey: "fans", action: "on", idempotencyKey: "same-command" });
     const reusedAgain = await createPowerCommand(prisma, "greenhouse-power-command", { outletKey: "fans", action: "on", idempotencyKey: "same-command" });
     const waterOn = await createPowerCommand(prisma, "greenhouse-power-command", { outletKey: "water", action: "on" });
-    const tooLong = await createPowerCommand(prisma, "greenhouse-power-command", { outletKey: "water", action: "pulse", durationSeconds: WATER_MAX_PULSE_SECONDS + 1 });
 
     expect(fans.ok).toBe(true);
     expect(reusedAgain.ok).toBe(true);
+    expect(waterOn.ok).toBe(true);
     if (!fans.ok || !reusedAgain.ok) throw new Error("expected idempotent command creation to succeed");
     expect(reusedAgain.status).toBe(200);
     expect(reusedAgain.command.id).toBe(fans.command.id);
-    expect(waterOn.ok).toBe(false);
-    expect(waterOn.status).toBe(400);
+
+    const offNode = await registerOrRotateNode(prisma, { name: "greenhouse-power-command-off", role: "greenhouse-node", rotateCredential: true });
+    await ingestPowerState(prisma, offNode.node.id, parsePowerStateReport({ outlets: [outlet({ key: "water", name: "Water", providerAlias: "greenhouse-water", safetyClass: "water" })] }, new Date("2026-07-13T15:31:00.000Z")));
+    const waterOff = await createPowerCommand(prisma, "greenhouse-power-command-off", { outletKey: "water", action: "off" });
+    expect(waterOff.ok).toBe(true);
+  });
+
+  it("uses explicit pulse-only behavior rather than outlet key for permanent-on and pulse validation", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-power-pulse-only", role: "greenhouse-node", rotateCredential: true });
+    await ingestPowerState(
+      prisma,
+      registered.node.id,
+      parsePowerStateReport(
+        {
+          outlets: [
+            outlet({ key: "fans", name: "Fans", providerAlias: "greenhouse-fans", behavior: "pulse-only" }),
+            outlet({ key: "water", name: "Water", providerAlias: "greenhouse-water", behavior: "normal", safetyClass: "water" }),
+          ],
+        },
+        new Date("2026-07-13T15:31:00.000Z"),
+      ),
+    );
+
+    const fansOn = await createPowerCommand(prisma, "greenhouse-power-pulse-only", { outletKey: "fans", action: "on" });
+    const fansPulse = await createPowerCommand(prisma, "greenhouse-power-pulse-only", { outletKey: "fans", action: "pulse", durationSeconds: 10 });
+    const waterOn = await createPowerCommand(prisma, "greenhouse-power-pulse-only", { outletKey: "water", action: "on" });
+    const waterPulse = await createPowerCommand(prisma, "greenhouse-power-pulse-only", { outletKey: "water", action: "pulse", durationSeconds: 10 });
+    const tooLong = await createPowerCommand(prisma, "greenhouse-power-pulse-only", { outletKey: "fans", action: "pulse", durationSeconds: WATER_MAX_PULSE_SECONDS + 1 });
+
+    expect(fansOn.ok).toBe(false);
+    expect(fansOn.status).toBe(400);
+    expect(fansPulse.ok).toBe(true);
+    expect(waterOn.ok).toBe(true);
+    expect(waterPulse.ok).toBe(false);
     expect(tooLong.ok).toBe(false);
+  });
+
+  it("defaults older power reports without behavior to normal and exposes behavior in the node API", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-power-legacy-behavior", role: "greenhouse-node", rotateCredential: true });
+    await ingestPowerState(prisma, registered.node.id, parsePowerStateReport({ outlets: [outlet({ key: "water", safetyClass: "water" })] }, new Date("2026-07-13T15:31:00.000Z")));
+
+    const stored = await prisma.nodeOutlet.findUniqueOrThrow({ where: { nodeId_key: { nodeId: registered.node.id, key: "water" } } });
+    expect(stored.behavior).toBe("normal");
+
+    const response = await getNodePower(new Request("http://localhost"), { params: Promise.resolve({ nodeName: "greenhouse-power-legacy-behavior" }) });
+    const body = await response.json();
+    expect(body.outlets[0]).toMatchObject({ key: "water", behavior: "normal", safetyClass: "water" });
   });
 
   it("lets the authenticated agent claim and complete a command idempotently", async () => {

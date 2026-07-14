@@ -22,7 +22,7 @@ describe("powerSchedule config helpers", () => {
     const ok = validatePowerScheduleConfig({ outletKey: "lights", action: "on", timeOfDay: "07:00", daysOfWeek: EVERY_DAY, timeZone: "America/New_York" });
     expect(ok).toEqual([]);
 
-    expect(validatePowerScheduleConfig({ outletKey: "water", action: "on", timeOfDay: "07:00", daysOfWeek: EVERY_DAY, timeZone: "America/New_York" }).length).toBeGreaterThan(0);
+    expect(validatePowerScheduleConfig({ outletKey: "water", action: "on", timeOfDay: "07:00", daysOfWeek: EVERY_DAY, timeZone: "America/New_York" })).toEqual([]);
     expect(validatePowerScheduleConfig({ outletKey: "lights", action: "pulse", timeOfDay: "07:00", daysOfWeek: EVERY_DAY, timeZone: "America/New_York" }).length).toBeGreaterThan(0);
     expect(validatePowerScheduleConfig({ outletKey: "lights", action: "on", timeOfDay: "25:00", daysOfWeek: EVERY_DAY, timeZone: "America/New_York" }).length).toBeGreaterThan(0);
     expect(validatePowerScheduleConfig({ outletKey: "lights", action: "on", timeOfDay: "07:00", daysOfWeek: EVERY_DAY, timeZone: "Not/AZone" }).length).toBeGreaterThan(0);

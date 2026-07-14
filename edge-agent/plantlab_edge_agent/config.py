@@ -47,6 +47,7 @@ class GreenhousePowerConfig:
     provider: str
     host: str
     outlets: Dict[str, str] = field(default_factory=dict)
+    outlet_behaviors: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -145,7 +146,12 @@ def config_to_payload(config: EdgeAgentConfig) -> dict:
             for sensor in config.sensors
         ]
     if config.power:
-        payload["power"] = {"provider": config.power.provider, "host": config.power.host, "outlets": dict(config.power.outlets)}
+        payload["power"] = {
+            "provider": config.power.provider,
+            "host": config.power.host,
+            "outlets": dict(config.power.outlets),
+            "outletBehaviors": dict(config.power.outlet_behaviors),
+        }
     return payload
 
 
@@ -220,7 +226,21 @@ def parse_power(raw) -> Optional[GreenhousePowerConfig]:
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"power.outlets.{key} must be a non-empty string when present.")
         outlets[key] = value.strip()
-    return GreenhousePowerConfig(provider=provider, host=host, outlets=outlets)
+    outlet_behaviors_raw = raw.get("outletBehaviors", {})
+    if not isinstance(outlet_behaviors_raw, dict):
+        raise ConfigError("power.outletBehaviors must be an object.")
+    outlet_behaviors: Dict[str, str] = {}
+    for key, value in outlet_behaviors_raw.items():
+        if key not in ("fans", "water", "lights"):
+            raise ConfigError(f'Unsupported power outlet behavior key "{key}". Supported keys: fans, water, lights.')
+        if key not in outlets:
+            raise ConfigError(f"power.outletBehaviors.{key} cannot be set because power.outlets.{key} is not configured.")
+        if value not in ("normal", "pulse-only"):
+            raise ConfigError(f"power.outletBehaviors.{key} must be one of normal, pulse-only.")
+        outlet_behaviors[key] = value
+    for key in outlets:
+        outlet_behaviors.setdefault(key, "normal")
+    return GreenhousePowerConfig(provider=provider, host=host, outlets=outlets, outlet_behaviors=outlet_behaviors)
 
 
 def derive_capabilities(

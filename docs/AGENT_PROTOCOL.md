@@ -232,6 +232,7 @@ greenhouse node. Credentials never cross this endpoint.
       "provider": "kasa",
       "providerAlias": "greenhouse-fans",
       "enabled": true,
+      "behavior": "normal",
       "safetyClass": "switch",
       "actualState": false,
       "stateObservedAt": "2026-07-13T15:30:00.000Z",
@@ -245,6 +246,16 @@ greenhouse node. Credentials never cross this endpoint.
 
 The coordinator upserts `NodeOutlet` rows by `(nodeId, key)`. This is
 actual observed state, not desired state.
+
+`behavior` is the explicit command/schedule policy. Supported values:
+
+- `normal` - unbounded `on`, `off`, manual commands, and daily schedules are
+  allowed.
+- `pulse-only` - unbounded `on` and permanent-ON schedules are rejected;
+  bounded `pulse` and `off` are allowed.
+
+Older reports that omit `behavior` default to `normal`. The string `water`,
+the outlet display name, and `safetyClass` do not imply restrictions.
 
 ### `GET /api/agents/power/commands/next`
 
@@ -262,8 +273,8 @@ Cheap authenticated poll for the next pending manual power command:
 }
 ```
 
-Actions are `on`, `off`, `pulse`, and `refresh`. Water outlets never accept
-an unbounded `on` command. Pulse duration is capped at 120 seconds by both
+Actions are `on`, `off`, `pulse`, and `refresh`. Outlet behavior decides
+which actions are accepted. Pulse duration is capped at 120 seconds by both
 the coordinator and the edge node.
 
 ### `POST /api/agents/power/commands/{id}/claim`
@@ -302,6 +313,7 @@ Future-UI retrieval boundary for actual outlet state and active command:
     {
       "key": "fans",
       "providerAlias": "greenhouse-fans",
+      "behavior": "normal",
       "actualState": false,
       "stateObservedAt": "2026-07-13T15:30:00.000Z",
       "available": true,
@@ -324,9 +336,78 @@ Queues a bounded manual command for a node-owned outlet:
 { "action": "pulse", "durationSeconds": 10 }
 ```
 
-This endpoint rejects permanent water `on`, excessive pulse durations,
-unknown outlets, disabled outlets, and duplicate active commands for the
-same outlet.
+This endpoint rejects actions disallowed by explicit outlet behavior,
+excessive pulse durations, unknown outlets, disabled outlets, and duplicate
+active commands for the same outlet.
+
+### `GET /api/nodes/{nodeName}/metrics/history`
+
+Reusable numeric time-series retrieval for accepted measurements. Initial
+metrics are `temperatureC` and `humidityPct`; future numeric PlantLab
+metrics should follow the same `subjectKey + metric` series shape.
+
+Query parameters:
+
+- `sensorKeys=greenhouse-outside,greenhouse-bottom` - required, up to 20
+  known sensor keys for the node. Disabled/retired sensors remain queryable
+  if their historical `NodeSensor` row still exists.
+- `metrics=temperatureC,humidityPct` - required.
+- `from=<ISO timestamp>` and `to=<ISO timestamp>` - optional; defaults to
+  the previous 24 hours ending at request time. Ranges must be positive and
+  31 days or less.
+- `resolution=raw|5m|15m|1h` - optional, defaults to `raw`.
+- `timeZone=America/New_York` - optional display metadata only. Storage,
+  filtering, and bucket boundaries are UTC.
+
+Response:
+
+```json
+{
+  "node": { "name": "greenhouse-zero" },
+  "range": {
+    "from": "2026-07-13T12:00:00.000Z",
+    "to": "2026-07-14T12:00:00.000Z",
+    "resolution": "15m",
+    "timeZone": "America/New_York",
+    "bucketSemantics": "utc"
+  },
+  "series": [
+    {
+      "key": "greenhouse-outside:temperatureC",
+      "subjectKey": "greenhouse-outside",
+      "metric": "temperatureC",
+      "label": "Outside temperature",
+      "unit": "celsius",
+      "points": [
+        {
+          "at": "2026-07-14T10:00:00.000Z",
+          "value": 22.4,
+          "count": 3,
+          "min": 22.1,
+          "max": 22.8,
+          "mean": 22.4,
+          "first": 22.1,
+          "last": 22.8
+        }
+      ]
+    }
+  ]
+}
+```
+
+`raw` points contain only `at` and `value`. Bucketed points use `mean` as
+the canonical `value` and also include `count`, `min`, `max`, `mean`,
+`first`, and `last`. Missing intervals are omitted rather than fabricated.
+Only `SensorReading` rows are used; rejected, failed, stale, suspect, and
+driver-unavailable diagnostics never become numeric plotted values.
+
+Recommended UI pairings:
+
+- 1 hour: `raw`
+- 6 hours: `raw` or `5m`
+- 24 hours: `15m`
+- 7 days: `1h`
+- 30 days: `1h` now, with coarser future resolutions if needed
 
 ## Sensor test commands
 

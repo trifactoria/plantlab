@@ -8,6 +8,7 @@ import {
   type PowerScheduleConfig,
 } from "../powerSchedule";
 import { DEFAULT_TIME_ZONE } from "../timezone";
+import { canUsePermanentOff, canUsePermanentOn, outletBehaviorOrDefault } from "../outletBehavior";
 import { createPowerCommand } from "./powerProtocol";
 
 if (typeof window !== "undefined") {
@@ -73,6 +74,8 @@ export async function createPowerSchedule(prisma: PrismaClient, nodeName: string
   if (!outlet) {
     return { ok: false as const, status: 404, error: `Outlet "${config.outletKey}" is not known for node "${nodeName}".` };
   }
+  const behaviorError = validateScheduleActionForOutlet(config.action, outletBehaviorOrDefault(outlet.behavior));
+  if (behaviorError) return behaviorError;
 
   const schedule = await prisma.powerSchedule.create({
     data: {
@@ -116,6 +119,8 @@ export async function updatePowerSchedule(prisma: PrismaClient, nodeName: string
   if (!outlet) {
     return { ok: false as const, status: 404, error: `Outlet "${config.outletKey}" is not known for node "${nodeName}".` };
   }
+  const behaviorError = validateScheduleActionForOutlet(config.action, outletBehaviorOrDefault(outlet.behavior));
+  if (behaviorError) return behaviorError;
 
   const label = parsed.value.label !== undefined ? parsed.value.label : existing.label;
   const enabled = parsed.value.enabled !== undefined ? parsed.value.enabled : existing.enabled;
@@ -346,6 +351,16 @@ function serializeSchedule(schedule: PowerSchedule, lastCommand: PowerCommand | 
     lastCommand: serializeLastCommand(lastCommand),
     nextRunAt: nextScheduledRun(config, new Date())?.toISOString() ?? null,
   };
+}
+
+function validateScheduleActionForOutlet(action: string, behavior: ReturnType<typeof outletBehaviorOrDefault>) {
+  if (action === "on" && !canUsePermanentOn(behavior)) {
+    return { ok: false as const, status: 400, error: `Outlet behavior "${behavior}" does not permit permanent ON schedules.` };
+  }
+  if (action === "off" && !canUsePermanentOff(behavior)) {
+    return { ok: false as const, status: 400, error: `Outlet behavior "${behavior}" does not permit OFF schedules.` };
+  }
+  return null;
 }
 
 function parseRawInput(raw: unknown): ParseResult {

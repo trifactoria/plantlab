@@ -1,4 +1,5 @@
 import { isValidCapability, type NodeCapability } from "./capabilities";
+import { DEFAULT_OUTLET_BEHAVIOR, normalizeOutletBehavior, type OutletBehavior } from "../outletBehavior";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/greenhouseConfig.ts is server-only operational code.");
@@ -22,6 +23,7 @@ export type GreenhousePowerConfig = {
   provider: "kasa";
   host: string;
   outlets: Partial<Record<GreenhouseOutletKey, string>>;
+  outletBehaviors?: Partial<Record<GreenhouseOutletKey, OutletBehavior>>;
 };
 
 export type GreenhouseConfigSummary = {
@@ -96,7 +98,8 @@ export function parseGreenhousePower(raw: unknown): GreenhousePowerConfig | null
       outlets[key] = value.trim();
     }
   }
-  return { provider, host, outlets };
+  const outletBehaviors = parseOutletBehaviors(raw.outletBehaviors, outlets);
+  return { provider, host, outlets, outletBehaviors };
 }
 
 export function validateGreenhouseConfig(raw: Record<string, unknown>): GreenhouseValidationResult {
@@ -182,7 +185,9 @@ export function mergeEdgeAgentConfig(existing: Record<string, unknown>, input: E
     delete next.power;
   } else if (input.power !== undefined) {
     if (input.power === null) delete next.power;
-    else next.power = { provider: input.power.provider, host: input.power.host, outlets: { ...input.power.outlets } };
+    else next.power = { provider: input.power.provider, host: input.power.host, outlets: { ...input.power.outlets }, outletBehaviors: materializeOutletBehaviors(input.power.outlets, input.power.outletBehaviors) };
+  } else if (isRecord(next.power)) {
+    next.power = normalizePowerConfigForMerge(next.power);
   }
 
   next.capabilities = deriveCapabilitiesFromEdgeConfig({
@@ -248,6 +253,7 @@ export function redactedGreenhouseSummary(raw: Record<string, unknown>, options:
           provider: summary.power.provider,
           host: summary.power.host,
           outlets: summary.power.outlets,
+          outletBehaviors: summary.power.outletBehaviors,
         }
       : null,
     greenhouseSecretFileExists: options.secretFileExists,
@@ -312,6 +318,57 @@ function isGreenhouseSensorType(value: string): value is GreenhouseSensorType {
 
 function isGreenhouseOutletKey(value: string): value is GreenhouseOutletKey {
   return (GREENHOUSE_OUTLET_KEYS as readonly string[]).includes(value);
+}
+
+function parseOutletBehaviors(raw: unknown, outlets: Partial<Record<GreenhouseOutletKey, string>>): Partial<Record<GreenhouseOutletKey, OutletBehavior>> {
+  if (raw !== undefined && raw !== null && !isRecord(raw)) {
+    throw new Error("power.outletBehaviors must be an object.");
+  }
+  const result: Partial<Record<GreenhouseOutletKey, OutletBehavior>> = {};
+  for (const key of GREENHOUSE_OUTLET_KEYS) {
+    if (!outlets[key]) continue;
+    const value = isRecord(raw) ? raw[key] : undefined;
+    if (value === undefined || value === null || value === "") {
+      result[key] = DEFAULT_OUTLET_BEHAVIOR;
+      continue;
+    }
+    const behavior = normalizeOutletBehavior(value);
+    if (!behavior) {
+      throw new Error(`power.outletBehaviors.${key} must be one of normal, pulse-only.`);
+    }
+    result[key] = behavior;
+  }
+  if (isRecord(raw)) {
+    for (const key of Object.keys(raw)) {
+      if (!isGreenhouseOutletKey(key)) {
+        throw new Error(`Unsupported power outlet behavior key "${key}". Supported keys: ${GREENHOUSE_OUTLET_KEYS.join(", ")}.`);
+      }
+      if (!outlets[key]) {
+        throw new Error(`power.outletBehaviors.${key} cannot be set because power.outlets.${key} is not configured.`);
+      }
+    }
+  }
+  return result;
+}
+
+function materializeOutletBehaviors(
+  outlets: Partial<Record<GreenhouseOutletKey, string>>,
+  configured: Partial<Record<GreenhouseOutletKey, OutletBehavior>> | undefined,
+): Partial<Record<GreenhouseOutletKey, OutletBehavior>> {
+  const result: Partial<Record<GreenhouseOutletKey, OutletBehavior>> = {};
+  for (const key of GREENHOUSE_OUTLET_KEYS) {
+    if (outlets[key]) result[key] = configured?.[key] ?? DEFAULT_OUTLET_BEHAVIOR;
+  }
+  return result;
+}
+
+function normalizePowerConfigForMerge(raw: Record<string, unknown>): Record<string, unknown> {
+  const parsed = parseGreenhousePower(raw);
+  if (!parsed) return raw;
+  return {
+    ...raw,
+    outletBehaviors: materializeOutletBehaviors(parsed.outlets, parsed.outletBehaviors),
+  };
 }
 
 function uniqueCapabilities(values: NodeCapability[]): NodeCapability[] {

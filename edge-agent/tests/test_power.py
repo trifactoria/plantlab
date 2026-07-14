@@ -37,7 +37,7 @@ class FakePowerDriver:
         self.states[outlet] = False
 
 
-def _cfg(tmp_path, fake_coordinator=None):
+def _cfg(tmp_path, fake_coordinator=None, outlet_behaviors=None):
     return config.EdgeAgentConfig(
         role="greenhouse-node",
         node_name="greenhouse-zero",
@@ -48,6 +48,7 @@ def _cfg(tmp_path, fake_coordinator=None):
             provider="kasa",
             host="192.168.1.72",
             outlets={"fans": "greenhouse-fans", "water": "greenhouse-water", "lights": "greenhouse-lights"},
+            outlet_behaviors=outlet_behaviors or {"fans": "normal", "water": "normal", "lights": "normal"},
         ),
     )
 
@@ -86,13 +87,36 @@ def test_on_off_verifies_actual_state(tmp_path):
     assert driver.actions == [("on", "fans"), ("off", "fans")]
 
 
-def test_plain_water_on_is_rejected(tmp_path):
+def test_plain_water_on_is_allowed_when_behavior_is_normal(tmp_path):
     manager = PowerManager(_cfg(tmp_path), driver_factory=lambda _power: FakePowerDriver({"water": False}))
 
     result = manager.execute(PowerCommand("cmd-water", "water", "on", None, "later"))
 
-    assert result.ok is False
-    assert result.error_code == "power-configuration-invalid"
+    assert result.ok is True
+    assert result.actual_state is True
+
+
+def test_pulse_only_behavior_rejects_unbounded_on_independent_of_key(tmp_path):
+    manager = PowerManager(_cfg(tmp_path, outlet_behaviors={"fans": "pulse-only", "water": "normal", "lights": "normal"}), driver_factory=lambda _power: FakePowerDriver({"fans": False, "water": False}))
+
+    fans_on = manager.execute(PowerCommand("cmd-fans", "fans", "on", None, "later"))
+    water_on = manager.execute(PowerCommand("cmd-water", "water", "on", None, "later"))
+
+    assert fans_on.ok is False
+    assert fans_on.error_code == "power-configuration-invalid"
+    assert water_on.ok is True
+
+
+def test_pulse_requires_explicit_pulse_only_behavior(tmp_path):
+    manager = PowerManager(_cfg(tmp_path, outlet_behaviors={"fans": "pulse-only", "water": "normal", "lights": "normal"}), driver_factory=lambda _power: FakePowerDriver({"fans": False, "water": False}))
+
+    fans = manager.execute(PowerCommand("cmd-pulse-fans", "fans", "pulse", 1, "later"))
+    water = manager.execute(PowerCommand("cmd-pulse-water", "water", "pulse", 1, "later"))
+
+    assert fans.ok is True
+    assert fans.actual_state is False
+    assert water.ok is False
+    assert water.error_code == "power-configuration-invalid"
 
 
 def test_water_pulse_turns_off_in_finally_when_verification_fails(tmp_path):
@@ -103,7 +127,7 @@ def test_water_pulse_turns_off_in_finally_when_verification_fails(tmp_path):
             return super().get_state(outlet)
 
     driver = FailingAfterOn({"water": False})
-    manager = PowerManager(_cfg(tmp_path), driver_factory=lambda _power: driver)
+    manager = PowerManager(_cfg(tmp_path, outlet_behaviors={"fans": "normal", "water": "pulse-only", "lights": "normal"}), driver_factory=lambda _power: driver)
 
     result = manager.execute(PowerCommand("cmd-pulse", "water", "pulse", 1, "later"))
 
@@ -112,14 +136,24 @@ def test_water_pulse_turns_off_in_finally_when_verification_fails(tmp_path):
     assert driver.states["water"] is False
 
 
-def test_startup_unexpected_water_on_forces_off(tmp_path):
+def test_startup_unexpected_pulse_only_outlet_on_forces_off(tmp_path):
     driver = FakePowerDriver({"fans": False, "water": True, "lights": False})
-    manager = PowerManager(_cfg(tmp_path), driver_factory=lambda _power: driver)
+    manager = PowerManager(_cfg(tmp_path, outlet_behaviors={"fans": "normal", "water": "pulse-only", "lights": "normal"}), driver_factory=lambda _power: driver)
 
     states = manager.startup_safety_check()
 
     assert ("off", "water") in driver.actions
     assert next(state for state in states if state.key == "water").actual_state is False
+
+
+def test_startup_normal_water_on_is_reported_not_forced_off(tmp_path):
+    driver = FakePowerDriver({"fans": False, "water": True, "lights": False})
+    manager = PowerManager(_cfg(tmp_path), driver_factory=lambda _power: driver)
+
+    states = manager.startup_safety_check()
+
+    assert ("off", "water") not in driver.actions
+    assert next(state for state in states if state.key == "water").actual_state is True
 
 
 def test_power_state_upload_and_command_execution(fake_coordinator, tmp_path):
@@ -140,7 +174,7 @@ def test_power_state_upload_and_command_execution(fake_coordinator, tmp_path):
 
 
 def test_water_pulse_duration_is_bounded(tmp_path):
-    manager = PowerManager(_cfg(tmp_path), driver_factory=lambda _power: FakePowerDriver({"water": False}))
+    manager = PowerManager(_cfg(tmp_path, outlet_behaviors={"fans": "normal", "water": "pulse-only", "lights": "normal"}), driver_factory=lambda _power: FakePowerDriver({"water": False}))
 
     result = manager.execute(PowerCommand("cmd-long", "water", "pulse", 999, "later"))
 

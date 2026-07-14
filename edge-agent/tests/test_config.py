@@ -95,7 +95,35 @@ def test_new_power_config_loads_and_derives_capabilities(isolated_config):
     assert read_back.power is not None
     assert read_back.power.provider == "kasa"
     assert read_back.power.outlets["fans"] == "greenhouse-fans"
+    assert read_back.power.outlet_behaviors == {"fans": "normal", "water": "normal", "lights": "normal"}
     assert read_back.capabilities == ["camera", "relay", "fan", "light", "pump"]
+
+
+def test_power_config_accepts_explicit_outlet_behaviors(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "power": {
+    "provider": "kasa",
+    "host": "192.168.1.72",
+    "outlets": {"water": "greenhouse-water"},
+    "outletBehaviors": {"water": "pulse-only"}
+  }
+}
+"""
+    )
+
+    read_back = config.read_config()
+
+    assert read_back is not None
+    assert read_back.power is not None
+    assert read_back.power.outlet_behaviors == {"water": "pulse-only"}
 
 
 def test_invalid_sensor_config_fails_clearly(isolated_config):
@@ -136,6 +164,25 @@ def test_invalid_power_config_fails_clearly(isolated_config):
     )
 
     with pytest.raises(config.ConfigError, match="power.outlets.fans"):
+        config.read_config()
+
+
+def test_invalid_power_outlet_behavior_fails_clearly(isolated_config):
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.write_text(
+        """
+{
+  "role": "greenhouse-node",
+  "nodeName": "greenhouse-zero",
+  "coordinatorUrl": "http://coordinator:3000",
+  "spoolRoot": "/tmp/spool",
+  "capabilities": ["camera"],
+  "power": {"provider": "kasa", "host": "192.168.1.72", "outlets": {"fans": "greenhouse-fans"}, "outletBehaviors": {"fans": "always-on"}}
+}
+"""
+    )
+
+    with pytest.raises(config.ConfigError, match="power.outletBehaviors.fans"):
         config.read_config()
 
 

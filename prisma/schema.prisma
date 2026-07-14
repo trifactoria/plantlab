@@ -520,6 +520,9 @@ model NodeOutlet {
   provider             String
   providerAlias        String
   enabled              Boolean  @default(true)
+  /// Explicit behavior policy for command/schedule validation. Supported
+  /// values today: "normal" and "pulse-only". Do not infer behavior from key.
+  behavior             String   @default("normal")
   safetyClass          String   @default("switch")
   actualState          Boolean?
   stateObservedAt      DateTime?
@@ -535,6 +538,7 @@ model NodeOutlet {
   @@unique([nodeId, key])
   @@index([nodeId])
   @@index([available])
+  @@index([behavior])
 }
 
 model PowerCommand {
@@ -618,6 +622,7 @@ model SensorReading {
   @@unique([nodeId, eventId])
   @@index([sensorId, capturedAt])
   @@index([nodeId, capturedAt])
+  @@index([nodeId, sensorId, capturedAt])
 }
 
 model SensorDiagnostic {

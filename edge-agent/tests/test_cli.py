@@ -298,7 +298,7 @@ def test_power_probe_does_not_print_credentials(monkeypatch, isolated_config, ca
     assert "secret" not in output
 
 
-def test_power_status_and_manual_water_on_rejection(monkeypatch, isolated_config, capsys):
+def test_power_status_and_manual_water_on(monkeypatch, isolated_config, capsys):
     config.write_config(
         config.EdgeAgentConfig(
             role="greenhouse-node",
@@ -306,7 +306,7 @@ def test_power_status_and_manual_water_on_rejection(monkeypatch, isolated_config
             coordinator_url="http://coordinator",
             spool_root=str(isolated_config / "spool"),
             capabilities=["relay", "pump"],
-            power=config.GreenhousePowerConfig(provider="kasa", host="192.168.1.72", outlets={"water": "greenhouse-water"}),
+            power=config.GreenhousePowerConfig(provider="kasa", host="192.168.1.72", outlets={"water": "greenhouse-water"}, outlet_behaviors={"water": "normal"}),
         )
     )
 
@@ -317,7 +317,10 @@ def test_power_status_and_manual_water_on_rejection(monkeypatch, isolated_config
         def refresh_states(self):
             from plantlab_edge_agent.power.models import OutletState, utc_now
 
-            return [OutletState("water", "Water", "kasa", "greenhouse-water", True, "water", False, utc_now(), True)]
+            return [OutletState("water", "Water", "kasa", "greenhouse-water", True, "normal", "switch", False, utc_now(), True)]
+
+        def execute(self, command):
+            return type("Result", (), {"ok": True, "actual_state": command.action == "on", "error_code": None, "error_message": None})()
 
         def close(self):
             return None
@@ -326,5 +329,5 @@ def test_power_status_and_manual_water_on_rejection(monkeypatch, isolated_config
 
     assert cli.main(["power", "status"]) == 0
     assert "greenhouse-water" in capsys.readouterr().out
-    assert cli.main(["power", "on", "water"]) == 1
-    assert "Water outlets do not permit unbounded ON" in capsys.readouterr().err
+    assert cli.main(["power", "on", "water"]) == 0
+    assert "PASS: water verified ON" in capsys.readouterr().out

@@ -9,7 +9,7 @@ from .. import config
 from ..protocol import AgentProtocolClient, PowerCommand, ProtocolError
 from .base import PowerDriver, PowerDriverError
 from .kasa import KasaPowerDriver
-from .models import OUTLET_KEYS, WATER_MAX_PULSE_SECONDS, OutletState, outlet_name, safety_class_for_key, utc_now
+from .models import OUTLET_KEYS, WATER_MAX_PULSE_SECONDS, OutletState, behavior_or_default, outlet_name, safety_class_for_key, utc_now
 
 logger = logging.getLogger("plantlab_edge_agent")
 
@@ -49,6 +49,11 @@ class PowerManager:
             return []
         return [(key, self.power_config.outlets[key]) for key in OUTLET_KEYS if self.power_config.outlets.get(key)]
 
+    def outlet_behavior(self, outlet: str) -> str:
+        if not self.power_config:
+            return "normal"
+        return behavior_or_default(self.power_config.outlet_behaviors.get(outlet))
+
     def state_report_due(self, now: Optional[float] = None) -> bool:
         if not self.enabled:
             return False
@@ -76,6 +81,7 @@ class PowerManager:
                     provider=self.power_config.provider,
                     provider_alias=alias,
                     enabled=True,
+                    behavior=self.outlet_behavior(key),
                     safety_class=safety_class_for_key(key),
                     actual_state=states.get(key),
                     state_observed_at=now,
@@ -88,17 +94,18 @@ class PowerManager:
             return self._error_states(exc)
 
     def startup_safety_check(self) -> list[OutletState]:
-        if not self.enabled or not self.power_config or "water" not in self.power_config.outlets:
+        if not self.enabled or not self.power_config:
             return self.refresh_states()
         try:
             driver = self._driver()
             states = driver.list_outlets()
-            if states.get("water") is True:
-                logger.warning("Water outlet was ON at startup; forcing OFF.")
-                driver.turn_off("water")
-                states = driver.list_outlets()
-                if states.get("water") is not False:
-                    raise PowerDriverError("power-state-verification-failed", "Water outlet did not verify OFF after startup safety shutoff.")
+            for outlet, _alias in self.configured_outlets():
+                if self.outlet_behavior(outlet) == "pulse-only" and states.get(outlet) is True:
+                    logger.warning("Pulse-only outlet %s was ON at startup; forcing OFF.", outlet)
+                    driver.turn_off(outlet)
+                    states = driver.list_outlets()
+                    if states.get(outlet) is not False:
+                        raise PowerDriverError("power-state-verification-failed", f"{outlet} did not verify OFF after startup safety shutoff.")
             self._last_reported_error = None
             return self.refresh_states()
         except PowerDriverError as exc:
@@ -108,9 +115,12 @@ class PowerManager:
     def execute(self, command: PowerCommand) -> PowerCommandExecution:
         if not self.enabled:
             return PowerCommandExecution(False, None, "power-configuration-invalid", "Power is not configured on this node.")
-        if command.outlet_key == "water" and command.action == "on":
-            return PowerCommandExecution(False, None, "power-configuration-invalid", "Water outlets do not permit unbounded ON commands.")
+        behavior = self.outlet_behavior(command.outlet_key)
+        if command.action == "on" and behavior != "normal":
+            return PowerCommandExecution(False, None, "power-configuration-invalid", f'Outlet behavior "{behavior}" does not permit unbounded ON commands.')
         if command.action == "pulse":
+            if behavior != "pulse-only":
+                return PowerCommandExecution(False, None, "power-configuration-invalid", f'Outlet behavior "{behavior}" does not permit pulse commands.')
             return self._pulse(command.outlet_key, command.duration_seconds)
         if command.action == "on":
             return self._set(command.outlet_key, True)
@@ -139,32 +149,30 @@ class PowerManager:
             return PowerCommandExecution(False, None, exc.code, exc.safe_message)
 
     def _pulse(self, outlet: str, duration_seconds: Optional[int]) -> PowerCommandExecution:
-        if outlet != "water":
-            return PowerCommandExecution(False, None, "power-configuration-invalid", "Pulse is currently supported only for the water outlet.")
         if not isinstance(duration_seconds, int) or duration_seconds <= 0:
-            return PowerCommandExecution(False, None, "power-configuration-invalid", "Water pulse duration must be greater than zero.")
+            return PowerCommandExecution(False, None, "power-configuration-invalid", "Pulse duration must be greater than zero.")
         if duration_seconds > WATER_MAX_PULSE_SECONDS:
-            return PowerCommandExecution(False, None, "power-configuration-invalid", f"Water pulse duration must be at most {WATER_MAX_PULSE_SECONDS} seconds.")
+            return PowerCommandExecution(False, None, "power-configuration-invalid", f"Pulse duration must be at most {WATER_MAX_PULSE_SECONDS} seconds.")
         driver: Optional[PowerDriver] = None
         try:
             driver = self._driver()
-            driver.turn_on("water")
-            actual_on = driver.get_state("water")
+            driver.turn_on(outlet)
+            actual_on = driver.get_state(outlet)
             if actual_on is not True:
-                return PowerCommandExecution(False, actual_on, "power-state-verification-failed", "Water outlet did not verify ON before pulse.")
+                return PowerCommandExecution(False, actual_on, "power-state-verification-failed", f"{outlet} did not verify ON before pulse.")
             try:
                 time.sleep(duration_seconds)
             finally:
-                driver.turn_off("water")
-            actual_off = driver.get_state("water")
+                driver.turn_off(outlet)
+            actual_off = driver.get_state(outlet)
             if actual_off is not False:
-                return PowerCommandExecution(False, actual_off, "power-state-verification-failed", "Water outlet did not verify OFF after pulse.")
+                return PowerCommandExecution(False, actual_off, "power-state-verification-failed", f"{outlet} did not verify OFF after pulse.")
             return PowerCommandExecution(True, False)
         except PowerDriverError as exc:
             self._mark_connection_failure(exc)
             if driver is not None:
                 try:
-                    driver.turn_off("water")
+                    driver.turn_off(outlet)
                 except Exception:
                     pass
             return PowerCommandExecution(False, None, exc.code, exc.safe_message)
@@ -200,6 +208,7 @@ class PowerManager:
                 provider=self.power_config.provider,
                 provider_alias=alias,
                 enabled=True,
+                behavior=self.outlet_behavior(key),
                 safety_class=safety_class_for_key(key),
                 actual_state=None,
                 state_observed_at=now,
