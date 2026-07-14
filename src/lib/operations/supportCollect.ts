@@ -27,6 +27,12 @@ type ProbeResult = {
   error?: string;
 };
 
+type HostCommand = {
+  path: string;
+  remote: string;
+  timeoutMs?: number;
+};
+
 const DEFAULT_HOSTS = [
   { host: "xps", role: "standalone" },
   { host: "plantlab", role: "coordinator" },
@@ -96,11 +102,11 @@ async function collectHost(root: string, manifest: { probes: ProbeResult[] }, ho
   await mkdir(dir, { recursive: true });
   const commands = hostCommands(host, role);
   for (const item of commands) {
-    await runProbe(manifest, host, role, "ssh", [host, item.remote], path.join(dir, item.path));
+    await runProbe(manifest, host, role, "ssh", [host, item.remote], path.join(dir, item.path), item.timeoutMs);
   }
 }
 
-function hostCommands(host: string, role: string) {
+function hostCommands(host: string, role: string): HostCommand[] {
   const common = [
     { path: "system/hostname.txt", remote: "hostname; date -Is; timedatectl 2>/dev/null | sed -n '1,8p'; df -h ." },
     { path: "system/git.txt", remote: "cd ~/projects/plantlab 2>/dev/null || cd ~/plantlab 2>/dev/null || cd /home/andy/projects/plantlab 2>/dev/null || exit 0; git status --short --branch; git rev-parse HEAD" },
@@ -124,7 +130,7 @@ function hostCommands(host: string, role: string) {
       { path: "config/effective.json", remote: "bash -lc 'plantlab-edge config show --json' 2>&1" },
       { path: "sensors/hardware.txt", remote: "bash -lc 'plantlab-edge doctor --hardware --attempts 1 --interval 0.1' 2>&1" },
       { path: "cameras/inventory.json", remote: "bash -lc 'cat ~/.local/state/plantlab-edge-agent/camera-inventory-cache.json' 2>&1" },
-      { path: "power/status.txt", remote: "bash -lc 'plantlab-edge power status' 2>&1" },
+      { path: "power/status.txt", remote: "bash -lc 'plantlab-edge power status' 2>&1", timeoutMs: 45_000 },
       { path: "services/edge-agent.txt", remote: "systemctl --user status plantlab-edge-agent.service --no-pager -l 2>&1 | tail -160" },
       { path: "logs/edge-agent.txt", remote: "journalctl --user -u plantlab-edge-agent.service -n 200 --no-pager 2>&1" },
     ];
