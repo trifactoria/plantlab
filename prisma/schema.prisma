@@ -492,12 +492,20 @@ model PowerSchedule {
   lastRunAt      DateTime?
   lastRunStatus  String?
   lastRunError   String?
+  /// PowerCommand.id created by the most recent firing of this schedule.
+  /// Plain id reference (no Prisma relation) rather than timestamp-guessing -
+  /// lets the schedule API/UI show the command's real, live lifecycle status
+  /// (pending/claimed/succeeded/failed/expired/cancelled) instead of a
+  /// hardcoded "queued". Reset to null whenever an edit changes what the
+  /// schedule would actually do - see updatePowerSchedule().
+  lastCommandId  String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   node PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
   @@index([nodeId, outletKey])
+  @@index([lastCommandId])
   @@index([nodeId, enabled])
 }
 

@@ -235,27 +235,94 @@ def upload_power_state(cfg: config.EdgeAgentConfig, client: AgentProtocolClient,
         return False
 
 
+RESULT_UPLOAD_RETRY_ATTEMPTS = 3
+RESULT_UPLOAD_RETRY_BACKOFF_SECONDS = 0.5
+
+
 def poll_and_execute_power_command(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, manager: PowerManager) -> None:
     if not manager.enabled:
         return
+
+    poll_started = time.monotonic()
+    logger.info("Power command poll started")
     try:
         command = client.next_power_command()
     except ProtocolError as exc:
+        # Transient (network blip, coordinator restart mid-request, etc.) -
+        # the next tick (power_command_poll_interval_seconds, default 5s)
+        # retries automatically; nothing was claimed, so nothing is stuck.
         logger.warning("Power command poll failed: %s", exc)
         return
     if command is None:
         return
+    logger.info(
+        "Power command received: command=%s outlet=%s action=%s elapsed=%.2fs",
+        command.id,
+        command.outlet_key,
+        command.action,
+        time.monotonic() - poll_started,
+    )
+
+    claim_started = time.monotonic()
     try:
         client.claim_power_command(command.id)
     except ProtocolError as exc:
+        # Not claimed (or claim status unknown) - do not execute. If the
+        # claim actually succeeded server-side despite this client-side
+        # error, the coordinator's stale-claim recovery will reopen it for
+        # a future poll rather than leaving it stuck.
         logger.warning("Could not claim power command %s: %s", command.id, exc)
         return
-    result = manager.execute(command)
-    observed_at = utc_now().isoformat().replace("+00:00", "Z")
+    logger.info("Power command claim succeeded: command=%s elapsed=%.2fs", command.id, time.monotonic() - claim_started)
+
+    exec_started = time.monotonic()
+    logger.info("Kasa execution started: command=%s outlet=%s action=%s", command.id, command.outlet_key, command.action)
     try:
-        if result.ok:
-            client.complete_power_command(command.id, result.actual_state, observed_at)
-        else:
-            client.fail_power_command(command.id, result.error_code or "power-command-failed", result.error_message or "Power command failed.", result.actual_state, observed_at)
-    except ProtocolError as exc:
-        logger.warning("Power command acknowledgement failed: command=%s error=%s", command.id, exc)
+        result = manager.execute(command)
+    except Exception as exc:  # noqa: BLE001 - a claimed command must always be resolved (complete/fail), never left to strand the whole agent loop on an unexpected driver/library error
+        logger.error("Power command execution raised an unexpected error: command=%s error=%s", command.id, exc)
+        result = PowerCommandExecution(False, None, "power-command-unexpected-error", "Unexpected error executing power command.")
+    logger.info(
+        "Kasa execution finished: command=%s ok=%s elapsed=%.2fs",
+        command.id,
+        result.ok,
+        time.monotonic() - exec_started,
+    )
+
+    observed_at = utc_now().isoformat().replace("+00:00", "Z")
+    _report_power_result(client, command, result, observed_at)
+
+
+def _report_power_result(client: AgentProtocolClient, command: PowerCommand, result: PowerCommandExecution, observed_at: str) -> None:
+    """Uploads the command's completion/failure with a few bounded retries.
+
+    Once claimed, a command is only ever redelivered by the coordinator's
+    stale-claim recovery (STALE_CLAIM_MS in powerProtocol.ts) - the edge
+    loop itself will not see this command again on its next poll. A short
+    local retry here resolves most transient upload blips immediately
+    (normal round trip is a few seconds; total retry budget here is under
+    2 seconds) without waiting on that coordinator-side recovery window.
+    """
+    last_error: Optional[ProtocolError] = None
+    for attempt in range(1, RESULT_UPLOAD_RETRY_ATTEMPTS + 1):
+        try:
+            if result.ok:
+                client.complete_power_command(command.id, result.actual_state, observed_at)
+            else:
+                client.fail_power_command(command.id, result.error_code or "power-command-failed", result.error_message or "Power command failed.", result.actual_state, observed_at)
+            if attempt > 1:
+                logger.info("Power command result upload succeeded after retry: command=%s attempt=%d", command.id, attempt)
+            else:
+                logger.info("Power command result upload succeeded: command=%s", command.id)
+            return
+        except ProtocolError as exc:
+            last_error = exc
+            if attempt < RESULT_UPLOAD_RETRY_ATTEMPTS:
+                logger.warning("Power command result upload retry: command=%s attempt=%d error=%s", command.id, attempt, exc)
+                time.sleep(RESULT_UPLOAD_RETRY_BACKOFF_SECONDS * attempt)
+    logger.warning(
+        "Power command result upload failed after %d attempts: command=%s error=%s - relying on coordinator stale-claim recovery",
+        RESULT_UPLOAD_RETRY_ATTEMPTS,
+        command.id,
+        last_error,
+    )

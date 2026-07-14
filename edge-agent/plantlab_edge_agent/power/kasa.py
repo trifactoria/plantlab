@@ -90,7 +90,10 @@ class KasaPowerDriver:
     def get_state(self, outlet: str) -> bool:
         if outlet in self._last_states:
             return self._last_states[outlet]
-        return self.list_outlets()[outlet]
+        try:
+            return self.list_outlets()[outlet]
+        except KeyError:
+            raise PowerDriverError("power-outlet-missing", f"Configured outlet {outlet} is missing from the Kasa device.") from None
 
     def turn_on(self, outlet: str) -> None:
         self._set_state(outlet, True)

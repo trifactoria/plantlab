@@ -1,4 +1,4 @@
-import type { PowerSchedule, PrismaClient } from "@prisma/client";
+import type { PowerCommand, PowerSchedule, PrismaClient } from "@prisma/client";
 import {
   isScheduleDueNow,
   nextScheduledRun,
@@ -43,7 +43,8 @@ export async function listPowerSchedules(prisma: PrismaClient, nodeName: string)
     where: { nodeId: node.id },
     orderBy: [{ outletKey: "asc" }, { timeOfDay: "asc" }],
   });
-  return schedules.map(serializeSchedule);
+  const commandsById = await fetchLastCommands(prisma, schedules);
+  return schedules.map((schedule) => serializeSchedule(schedule, schedule.lastCommandId ? (commandsById.get(schedule.lastCommandId) ?? null) : null));
 }
 
 export async function createPowerSchedule(prisma: PrismaClient, nodeName: string, raw: unknown) {
@@ -85,7 +86,7 @@ export async function createPowerSchedule(prisma: PrismaClient, nodeName: string
       enabled: parsed.value.enabled ?? true,
     },
   });
-  return { ok: true as const, status: 201, schedule: serializeSchedule(schedule) };
+  return { ok: true as const, status: 201, schedule: serializeSchedule(schedule, null) };
 }
 
 export async function updatePowerSchedule(prisma: PrismaClient, nodeName: string, scheduleId: string, raw: unknown) {
@@ -119,19 +120,42 @@ export async function updatePowerSchedule(prisma: PrismaClient, nodeName: string
   const label = parsed.value.label !== undefined ? parsed.value.label : existing.label;
   const enabled = parsed.value.enabled !== undefined ? parsed.value.enabled : existing.enabled;
 
+  // Root-cause fix for the 2026-07-14 stuck-timer incident: lastRunDateKey
+  // guards "has THIS configuration already fired today" (see
+  // isScheduleDueNow). If an edit changes what the schedule actually does
+  // (outlet/action/time/days/timezone) but this guard is left pointing at
+  // an earlier, different firing (e.g. editing a schedule from "lights ON"
+  // to "lights OFF" right after the ON fired), the edited action silently
+  // never fires for the rest of that local day - isScheduleDueNow sees
+  // lastRunDateKey already matching today and skips it, while the UI kept
+  // showing the stale "queued" status from the unrelated earlier firing.
+  // Reset all run-tracking fields whenever the due-relevant configuration
+  // changes, so "already ran today" always describes the current config.
+  const serializedDays = serializeDaysOfWeek(config.daysOfWeek);
+  const dueConfigChanged =
+    config.outletKey !== existing.outletKey ||
+    config.action !== existing.action ||
+    config.timeOfDay !== existing.timeOfDay ||
+    serializedDays !== existing.daysOfWeek ||
+    config.timeZone !== existing.timeZone;
+
   const updated = await prisma.powerSchedule.update({
     where: { id: scheduleId },
     data: {
       outletKey: config.outletKey,
       action: config.action,
       timeOfDay: config.timeOfDay,
-      daysOfWeek: serializeDaysOfWeek(config.daysOfWeek),
+      daysOfWeek: serializedDays,
       timeZone: config.timeZone,
       label,
       enabled,
+      ...(dueConfigChanged
+        ? { lastRunDateKey: null, lastRunAt: null, lastRunStatus: null, lastRunError: null, lastCommandId: null }
+        : {}),
     },
   });
-  return { ok: true as const, status: 200, schedule: serializeSchedule(updated) };
+  const lastCommand = updated.lastCommandId ? await prisma.powerCommand.findUnique({ where: { id: updated.lastCommandId } }) : null;
+  return { ok: true as const, status: 200, schedule: serializeSchedule(updated, lastCommand) };
 }
 
 export async function deletePowerSchedule(prisma: PrismaClient, nodeName: string, scheduleId: string) {
@@ -191,17 +215,35 @@ export class PowerScheduler {
       const { due, todayKey } = isScheduleDueNow(config, schedule.lastRunDateKey, checkedAt);
       if (!due) continue;
 
+      const dueAt = Date.now();
+      this.logger.info("schedule due", {
+        scheduleId: schedule.id,
+        node: schedule.node.name,
+        outletKey: schedule.outletKey,
+        action: schedule.action,
+      });
+
+      // updatedAt is included so that editing a schedule in place (which
+      // resets lastRunDateKey - see updatePowerSchedule()) gets a fresh
+      // idempotency key too. Without it, a same-day re-fire after an edit
+      // would collide with the pre-edit firing's key and createPowerCommand
+      // would silently return the OLD command (e.g. the earlier "on") as
+      // "reused" instead of creating a new one for the edited action.
+      // Multiple ticks against an *unedited* schedule on the same day still
+      // share one key, which is what actually prevents duplicate commands.
       const result = await createPowerCommand(this.prisma, schedule.node.name, {
         outletKey: schedule.outletKey,
         action: schedule.action,
-        idempotencyKey: `schedule:${schedule.id}:${todayKey}`,
+        idempotencyKey: `schedule:${schedule.id}:${todayKey}:${schedule.updatedAt.getTime()}`,
         requestedBy: `schedule:${schedule.id}`,
       });
 
       // One attempt per local day regardless of outcome - a persistent
       // failure (e.g. a disabled outlet) would otherwise retry and log on
       // every tick until midnight. The failure is still recorded and
-      // visible in the UI via lastRunStatus/lastRunError.
+      // visible in the UI via lastRunStatus/lastRunError. lastCommandId
+      // lets the UI show the command's real live lifecycle status instead
+      // of this static "queued"/"error" label - see serializeSchedule().
       await this.prisma.powerSchedule.update({
         where: { id: schedule.id },
         data: {
@@ -209,15 +251,18 @@ export class PowerScheduler {
           lastRunAt: checkedAt,
           lastRunStatus: result.ok ? "queued" : "error",
           lastRunError: result.ok ? null : result.error,
+          lastCommandId: result.ok ? result.command.id : null,
         },
       });
 
       if (result.ok) {
-        this.logger.info("Power schedule fired", {
+        this.logger.info("command created", {
           scheduleId: schedule.id,
+          commandId: result.command.id,
           node: schedule.node.name,
           outletKey: schedule.outletKey,
           action: schedule.action,
+          elapsedMs: Date.now() - dueAt,
         });
       } else {
         this.logger.warn("Power schedule failed to queue command", {
@@ -225,6 +270,7 @@ export class PowerScheduler {
           node: schedule.node.name,
           outletKey: schedule.outletKey,
           error: result.error,
+          elapsedMs: Date.now() - dueAt,
         });
       }
 
@@ -247,7 +293,37 @@ export class PowerScheduler {
   }
 }
 
-function serializeSchedule(schedule: PowerSchedule) {
+async function fetchLastCommands(prisma: PrismaClient, schedules: PowerSchedule[]): Promise<Map<string, PowerCommand>> {
+  const ids = Array.from(new Set(schedules.map((schedule) => schedule.lastCommandId).filter((id): id is string => Boolean(id))));
+  if (ids.length === 0) return new Map();
+  const commands = await prisma.powerCommand.findMany({ where: { id: { in: ids } } });
+  return new Map(commands.map((command) => [command.id, command]));
+}
+
+/**
+ * The command's own live status (pending/claimed/succeeded/failed/expired/
+ * cancelled) - not the static lastRunStatus "queued"/"error" snapshot from
+ * the moment the scheduler created it. Do not treat a schedule as
+ * successful just because it queued a command; only "succeeded" here means
+ * the coordinator actually observed the resulting outlet state.
+ */
+function serializeLastCommand(command: PowerCommand | null) {
+  if (!command) return null;
+  return {
+    id: command.id,
+    status: command.status,
+    requestedAt: command.requestedAt.toISOString(),
+    claimedAt: command.claimedAt?.toISOString() ?? null,
+    completedAt: command.completedAt?.toISOString() ?? null,
+    expiresAt: command.expiresAt.toISOString(),
+    actualState: command.actualState,
+    stateObservedAt: command.stateObservedAt?.toISOString() ?? null,
+    errorCode: command.errorCode,
+    errorMessage: command.errorMessage,
+  };
+}
+
+function serializeSchedule(schedule: PowerSchedule, lastCommand: PowerCommand | null) {
   const daysOfWeek = parseDaysOfWeek(schedule.daysOfWeek);
   const config: PowerScheduleConfig = {
     timeOfDay: schedule.timeOfDay,
@@ -267,6 +343,7 @@ function serializeSchedule(schedule: PowerSchedule) {
     lastRunAt: schedule.lastRunAt?.toISOString() ?? null,
     lastRunStatus: schedule.lastRunStatus,
     lastRunError: schedule.lastRunError,
+    lastCommand: serializeLastCommand(lastCommand),
     nextRunAt: nextScheduledRun(config, new Date())?.toISOString() ?? null,
   };
 }

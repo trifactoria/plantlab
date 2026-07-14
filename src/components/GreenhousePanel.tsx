@@ -27,6 +27,19 @@ type PowerOutlet = {
   lastErrorMessage: string | null;
 };
 
+type ScheduleCommand = {
+  id: string;
+  status: string;
+  requestedAt: string;
+  claimedAt: string | null;
+  completedAt: string | null;
+  expiresAt: string;
+  actualState: boolean | null;
+  stateObservedAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
 type ScheduleRow = {
   id: string;
   outletKey: string;
@@ -39,7 +52,26 @@ type ScheduleRow = {
   lastRunAt: string | null;
   lastRunStatus: string | null;
   lastRunError: string | null;
+  lastCommand: ScheduleCommand | null;
   nextRunAt: string | null;
+};
+
+const COMMAND_STATUS_LABEL: Record<string, string> = {
+  pending: "Pending",
+  claimed: "Claimed",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  expired: "Expired",
+  cancelled: "Cancelled",
+};
+
+const COMMAND_STATUS_TONE: Record<string, string> = {
+  pending: "bg-amber-100 text-amber-900 border-amber-200",
+  claimed: "bg-amber-100 text-amber-900 border-amber-200",
+  succeeded: "bg-emerald-100 text-emerald-900 border-emerald-200",
+  failed: "bg-red-100 text-red-900 border-red-200",
+  expired: "bg-red-100 text-red-900 border-red-200",
+  cancelled: "bg-stone-100 text-stone-700 border-stone-200",
 };
 
 const POLL_INTERVAL_MS = 60_000;
@@ -440,16 +472,32 @@ export function GreenhousePanel({ nodeName }: { nodeName: string }) {
                       {schedule.enabled ? (schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : "-") : "Disabled"}
                     </td>
                     <td className="px-3 py-2 text-stone-600">
-                      {schedule.lastRunAt ? (
-                        <>
-                          <span className={schedule.lastRunStatus === "error" ? "font-medium text-red-700" : ""}>
-                            {schedule.lastRunStatus === "queued" ? "Queued" : "Failed"}
-                          </span>{" "}
-                          {formatAge(schedule.lastRunAt)}
-                          {schedule.lastRunStatus === "error" && schedule.lastRunError ? (
-                            <p className="text-xs text-red-700">{schedule.lastRunError}</p>
+                      {schedule.lastCommand ? (
+                        <div className="grid gap-0.5">
+                          <span
+                            className={`inline-flex w-fit rounded-md border px-1.5 py-0.5 text-xs font-semibold ${
+                              COMMAND_STATUS_TONE[schedule.lastCommand.status] ?? "border-stone-200 bg-stone-100 text-stone-700"
+                            }`}
+                          >
+                            {COMMAND_STATUS_LABEL[schedule.lastCommand.status] ?? schedule.lastCommand.status}
+                          </span>
+                          <span className="text-xs">Queued {formatAge(schedule.lastCommand.requestedAt)}</span>
+                          {schedule.lastCommand.claimedAt ? <span className="text-xs">Claimed {formatAge(schedule.lastCommand.claimedAt)}</span> : null}
+                          {schedule.lastCommand.completedAt ? <span className="text-xs">Completed {formatAge(schedule.lastCommand.completedAt)}</span> : null}
+                          {schedule.lastCommand.status === "succeeded" && schedule.lastCommand.actualState !== null ? (
+                            <span className="text-xs">Observed: {schedule.lastCommand.actualState ? "ON" : "OFF"}</span>
                           ) : null}
-                        </>
+                          {(schedule.lastCommand.status === "failed" || schedule.lastCommand.status === "expired") && schedule.lastCommand.errorMessage ? (
+                            <span className="text-xs text-red-700">{schedule.lastCommand.errorMessage}</span>
+                          ) : null}
+                        </div>
+                      ) : schedule.lastRunStatus === "error" ? (
+                        <div className="grid gap-0.5">
+                          <span className="inline-flex w-fit rounded-md border border-red-200 bg-red-100 px-1.5 py-0.5 text-xs font-semibold text-red-900">
+                            Scheduling failed
+                          </span>
+                          {schedule.lastRunError ? <span className="text-xs text-red-700">{schedule.lastRunError}</span> : null}
+                        </div>
                       ) : (
                         "Never run"
                       )}

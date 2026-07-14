@@ -14,6 +14,25 @@ const STATE_BATCH_MAX = 20;
 const STRING_MAX = 200;
 const ERROR_MAX = 500;
 
+/**
+ * A command claimed longer than this without completing is treated as
+ * stuck (crashed edge process, lost completion upload, or a claim response
+ * the edge never actually received) and proactively recovered - see
+ * recoverStaleClaimedCommands(). Deliberately much tighter than the
+ * 5-minute hard expiresAt bound: normal end-to-end latency observed in
+ * production is ~3-5 seconds, so 45 seconds already represents a large
+ * margin above worst-case healthy execution (Kasa's own driver timeout is
+ * bounded at 8s x up to 2 connect attempts, plus a few bounded HTTP round
+ * trips) before assuming something went wrong.
+ */
+export const STALE_CLAIM_MS = 45_000;
+/** After this many claim attempts without a successful completion, stop retrying and fail explicitly rather than keep re-offering it - see recoverStaleClaimedCommands(). */
+export const MAX_CLAIM_ATTEMPTS = 3;
+
+function logPowerEvent(event: string, meta: Record<string, unknown>) {
+  console.log(JSON.stringify({ level: "info", message: event, ...meta, time: new Date().toISOString() }));
+}
+
 export type PowerOutletStateReport = {
   key: string;
   name: string;
@@ -163,6 +182,15 @@ export async function nextPowerCommand(prisma: PrismaClient, nodeId: string): Pr
     where: { nodeId, status: "pending", availableAt: { lte: new Date() }, expiresAt: { gt: new Date() } },
     orderBy: { requestedAt: "asc" },
   });
+  if (command) {
+    logPowerEvent("command offered", {
+      commandId: command.id,
+      nodeId,
+      outletKey: command.outletKey,
+      action: command.action,
+      elapsedMs: Date.now() - command.requestedAt.getTime(),
+    });
+  }
   return command ? serializePowerCommand(command) : null;
 }
 
@@ -177,7 +205,18 @@ export async function claimPowerCommand(prisma: PrismaClient, nodeId: string, co
     data: { status: "claimed", claimedAt: new Date(), attemptCount: { increment: 1 } },
   });
   if (updated.count === 0) return null;
-  return prisma.powerCommand.findUnique({ where: { id: commandId } });
+  const claimed = await prisma.powerCommand.findUnique({ where: { id: commandId } });
+  if (claimed) {
+    logPowerEvent("command claimed", {
+      commandId: claimed.id,
+      nodeId,
+      outletKey: claimed.outletKey,
+      action: claimed.action,
+      attemptCount: claimed.attemptCount,
+      elapsedMs: Date.now() - claimed.requestedAt.getTime(),
+    });
+  }
+  return claimed;
 }
 
 export async function completePowerCommand(prisma: PrismaClient, nodeId: string, commandId: string, result: PowerCommandResult) {
@@ -206,6 +245,14 @@ export async function completePowerCommand(prisma: PrismaClient, nodeId: string,
       lastErrorCode: null,
       lastErrorMessage: null,
     },
+  });
+  logPowerEvent("command completed", {
+    commandId: updated.id,
+    nodeId,
+    outletKey: updated.outletKey,
+    action: updated.action,
+    actualState: updated.actualState,
+    elapsedMs: updated.completedAt ? updated.completedAt.getTime() - updated.requestedAt.getTime() : null,
   });
   return updated;
 }
@@ -238,6 +285,14 @@ export async function failPowerCommand(prisma: PrismaClient, nodeId: string, com
       lastErrorCode: errorCode,
       lastErrorMessage: errorMessage,
     },
+  });
+  logPowerEvent("command failed", {
+    commandId: updated.id,
+    nodeId,
+    outletKey: updated.outletKey,
+    action: updated.action,
+    errorCode,
+    elapsedMs: updated.completedAt ? updated.completedAt.getTime() - updated.requestedAt.getTime() : null,
   });
   return updated;
 }
@@ -324,10 +379,93 @@ function serializePowerCommand(command: { id: string; outletKey: string; action:
 }
 
 async function expireOldPowerCommands(prisma: PrismaClient, nodeId: string) {
-  await prisma.powerCommand.updateMany({
-    where: { nodeId, status: { in: ["pending", "claimed"] }, expiresAt: { lte: new Date() } },
-    data: { status: "expired", completedAt: new Date(), errorCode: "power-command-expired", errorMessage: "Power command expired before completion." },
+  const now = new Date();
+
+  const toExpire = await prisma.powerCommand.findMany({
+    where: { nodeId, status: { in: ["pending", "claimed"] }, expiresAt: { lte: now } },
   });
+  if (toExpire.length > 0) {
+    await prisma.powerCommand.updateMany({
+      where: { id: { in: toExpire.map((command) => command.id) } },
+      data: { status: "expired", completedAt: now, errorCode: "power-command-expired", errorMessage: "Power command expired before completion." },
+    });
+    for (const command of toExpire) {
+      logPowerEvent("command expired", {
+        commandId: command.id,
+        nodeId,
+        outletKey: command.outletKey,
+        action: command.action,
+        elapsedMs: now.getTime() - command.requestedAt.getTime(),
+      });
+    }
+  }
+
+  await recoverStaleClaimedCommands(prisma, nodeId, now);
+}
+
+/**
+ * Recovers commands stuck in "claimed" - an edge process that claimed a
+ * command then crashed, restarted, or lost the completion upload before
+ * ever calling complete/fail. Runs on every next/claim poll (see call
+ * sites above), so recovery happens automatically as part of normal
+ * traffic - no separate cron/poller needed. Below MAX_CLAIM_ATTEMPTS the
+ * command is reopened as "pending" so the next poll (from this node or,
+ * after a restart, a fresh process) redelivers it; a Kasa on/off toggle is
+ * idempotent, so a rare double-delivery race with a slow-but-still-alive
+ * claimer is a harmless duplicate, not a correctness risk. At/after the
+ * limit it is explicitly failed instead - "failed" is not part of the
+ * active-conflict check in createPowerCommand(), so this also bounds how
+ * long one broken command can block later commands for the same outlet
+ * (at most STALE_CLAIM_MS * MAX_CLAIM_ATTEMPTS, well under the 5-minute
+ * hard expiry).
+ */
+async function recoverStaleClaimedCommands(prisma: PrismaClient, nodeId: string, now: Date) {
+  const staleClaimed = await prisma.powerCommand.findMany({
+    where: { nodeId, status: "claimed", claimedAt: { lte: new Date(now.getTime() - STALE_CLAIM_MS) }, expiresAt: { gt: now } },
+  });
+
+  for (const command of staleClaimed) {
+    if (command.attemptCount < MAX_CLAIM_ATTEMPTS) {
+      const updated = await prisma.powerCommand.updateMany({
+        where: { id: command.id, status: "claimed" },
+        data: { status: "pending", claimedAt: null },
+      });
+      if (updated.count > 0) {
+        logPowerEvent("command stale-claim recovered", {
+          commandId: command.id,
+          nodeId,
+          outletKey: command.outletKey,
+          action: command.action,
+          attemptCount: command.attemptCount,
+          claimedForMs: now.getTime() - (command.claimedAt?.getTime() ?? now.getTime()),
+        });
+      }
+    } else {
+      const updated = await prisma.powerCommand.updateMany({
+        where: { id: command.id, status: "claimed" },
+        data: {
+          status: "failed",
+          completedAt: now,
+          errorCode: "power-command-stale-claim",
+          errorMessage: "Command was claimed but never completed after multiple attempts.",
+        },
+      });
+      if (updated.count > 0) {
+        await prisma.nodeOutlet.updateMany({
+          where: { nodeId, key: command.outletKey },
+          data: { available: false, lastErrorCode: "power-command-stale-claim", lastErrorMessage: "Command was claimed but never completed after multiple attempts." },
+        });
+        logPowerEvent("command failed", {
+          commandId: command.id,
+          nodeId,
+          outletKey: command.outletKey,
+          action: command.action,
+          errorCode: "power-command-stale-claim",
+          attemptCount: command.attemptCount,
+        });
+      }
+    }
+  }
 }
 
 function parseCommandDuration(action: PowerAction, outletKey: string, raw: number | null | undefined) {
