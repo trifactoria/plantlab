@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { localCameraHardwareEnabled, productionLocalOnlyResponse } from "../../src/lib/localOnly";
+import { canDiscoverLocalCameraHardware, canManageFleetHardware, localCameraHardwareEnabled, productionLocalOnlyResponse } from "../../src/lib/localOnly";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -41,6 +41,16 @@ describe("localCameraHardwareEnabled", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("PLANTLAB_LOCAL_CAMERA_ENABLED", "true");
     expect(localCameraHardwareEnabled()).toBe(false);
+  });
+});
+
+describe("fleet management capability", () => {
+  it("is available even when local V4L discovery is disabled", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PLANTLAB_LOCAL_CAMERA_ENABLED", "");
+    vi.stubEnv("PLANTLAB_TEST_LOCAL_CAMERA_UI", "");
+    expect(canDiscoverLocalCameraHardware()).toBe(false);
+    expect(canManageFleetHardware()).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { activeSensorsForNode } from "./sensorConfig";
+import { activeSensorsForNode, sensorDisplayName } from "./sensorConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/environmentProtocol.ts is server-only operational code.");
@@ -90,6 +90,8 @@ export async function ingestEnvironmentTelemetry(
           nodeId,
           key: event.sensor.key,
           name: event.sensor.name,
+          displayName: null,
+          reportedName: event.sensor.name,
           type: event.sensor.type,
           gpio: event.sensor.gpio,
           placement: event.sensor.placement,
@@ -98,11 +100,8 @@ export async function ingestEnvironmentTelemetry(
           ...statusCreateForEvent(event),
         },
         update: {
-          name: event.sensor.name,
+          reportedName: event.sensor.name,
           type: event.sensor.type,
-          gpio: event.sensor.gpio,
-          placement: event.sensor.placement,
-          enabled: event.sensor.enabled,
           lastSeenAt: new Date(),
           ...statusUpdateForEvent(event),
         },
@@ -161,7 +160,9 @@ export async function getLatestEnvironmentStatus(prisma: PrismaClient, nodeName:
     node: { id: node.id, name: node.name, role: node.role },
     sensors: sensors.map((sensor) => ({
       key: sensor.key,
-      name: sensor.name,
+      name: sensorDisplayName(sensor),
+      displayName: sensor.displayName,
+      reportedName: sensor.reportedName,
       type: sensor.type,
       gpio: sensor.gpio,
       placement: sensor.placement,
@@ -243,7 +244,9 @@ export async function getSensorDetail(prisma: PrismaClient, nodeName: string, se
     node: { id: node.id, name: node.name, role: node.role },
     sensor: {
       key: sensor.key,
-      name: sensor.name,
+      name: sensorDisplayName(sensor),
+      displayName: sensor.displayName,
+      reportedName: sensor.reportedName,
       type: sensor.type,
       gpio: sensor.gpio,
       placement: sensor.placement,

@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { PROJECT_SENSOR_ROLES } from "../projectSensorRoles";
-import { activeSensorWhere } from "./sensorConfig";
+import { activeSensorWhere, sensorDisplayName } from "./sensorConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/projectSensors.ts is server-only operational code.");
@@ -39,7 +39,9 @@ export function serializeProjectSensorBinding(
     sensor: {
       id: binding.sensor.id,
       key: binding.sensor.key,
-      name: binding.sensor.name,
+      name: sensorDisplayName(binding.sensor),
+      displayName: binding.sensor.displayName,
+      reportedName: binding.sensor.reportedName,
       type: binding.sensor.type,
       placement: binding.sensor.placement,
       configuredActive: binding.sensor.configuredActive,
@@ -60,7 +62,9 @@ function serializeAvailableProjectSensor(sensor: Prisma.NodeSensorGetPayload<{ i
   return {
     id: sensor.id,
     key: sensor.key,
-    name: sensor.name,
+    name: sensorDisplayName(sensor),
+    displayName: sensor.displayName,
+    reportedName: sensor.reportedName,
     type: sensor.type,
     placement: sensor.placement,
     node: { id: sensor.node.id, name: sensor.node.name, role: sensor.node.role },

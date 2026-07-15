@@ -21,7 +21,7 @@ import {
   elapsedMs,
 } from "@/lib/experiment";
 import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
-import { localCameraHardwareEnabled } from "@/lib/localOnly";
+import { canDiscoverLocalCameraHardware } from "@/lib/localOnly";
 import { listProjectSensorBindings } from "@/lib/operations/projectSensors";
 import { prisma } from "@/lib/prisma";
 import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
@@ -74,7 +74,7 @@ export default async function ProjectPage({ params }: PageProps) {
   });
   const monthCards = groupPhotosByMonth(galleryPhotos, projectRecord.timeZone);
   const dayCards = monthCards.length === 1 ? groupPhotosByDay(galleryPhotos, projectRecord.timeZone) : [];
-  const canCaptureLocally = localCameraHardwareEnabled();
+  const canCaptureProject = Boolean(activeViewport) || canDiscoverLocalCameraHardware();
   const nextCaptureAt = nextPermittedCaptureTime({
     startAt: projectRecord.captureStartAt,
     intervalMinutes: projectRecord.photoIntervalMinutes,
@@ -171,7 +171,7 @@ export default async function ProjectPage({ params }: PageProps) {
               </Link>
             </div>
             <div className="grid gap-2 sm:justify-items-end">
-              {canCaptureLocally && !project.isTestProject ? (
+              {canCaptureProject && !project.isTestProject ? (
                 <CapturePhotoButton projectId={project.id} />
               ) : null}
               <ScanPhotosButton projectId={project.id} />

@@ -227,6 +227,10 @@ export async function activeSensorsForNode(prisma: PrismaClient, nodeId: string)
   return prisma.nodeSensor.findMany({ where, orderBy: [{ placement: "asc" }, { key: "asc" }] });
 }
 
+export function sensorDisplayName(sensor: Pick<NodeSensor, "displayName" | "reportedName" | "name" | "key">): string {
+  return sensor.displayName?.trim() || sensor.reportedName?.trim() || sensor.name.trim() || sensor.key;
+}
+
 async function compatibilityActiveSensorWhere(prisma: PrismaClient, nodeId: string): Promise<Prisma.NodeSensorWhereInput> {
   const sensors = await prisma.nodeSensor.findMany({ where: { nodeId, enabled: true }, select: { id: true, lastAttemptAt: true } });
   const mostRecentAttempt = Math.max(0, ...sensors.map((sensor) => sensor.lastAttemptAt?.getTime() ?? 0));
@@ -253,6 +257,8 @@ async function syncDesiredSensorRows(tx: Prisma.TransactionClient, nodeId: strin
         nodeId,
         key: entry.key,
         name: entry.name,
+        displayName: entry.name,
+        reportedName: entry.name,
         type: entry.type,
         gpio: entry.gpio,
         placement: entry.placement,
@@ -263,6 +269,7 @@ async function syncDesiredSensorRows(tx: Prisma.TransactionClient, nodeId: strin
       },
       update: {
         name: entry.name,
+        displayName: entry.name,
         type: entry.type,
         gpio: entry.gpio,
         placement: entry.placement,
@@ -284,6 +291,8 @@ async function syncAppliedSensorRows(tx: Prisma.TransactionClient, nodeId: strin
         nodeId,
         key: entry.key,
         name: entry.name,
+        displayName: entry.name,
+        reportedName: entry.name,
         type: entry.type,
         gpio: entry.gpio,
         placement: entry.placement,
@@ -295,6 +304,7 @@ async function syncAppliedSensorRows(tx: Prisma.TransactionClient, nodeId: strin
       },
       update: {
         name: entry.name,
+        displayName: entry.name,
         type: entry.type,
         gpio: entry.gpio,
         placement: entry.placement,
@@ -319,7 +329,7 @@ function sensorToEntry(sensor: NodeSensor): DesiredSensorEntry {
   return {
     id: sensor.id,
     key: sensor.key,
-    name: sensor.name,
+    name: sensorDisplayName(sensor),
     type: sensor.type,
     gpio: sensor.gpio ?? 0,
     placement: sensor.placement,

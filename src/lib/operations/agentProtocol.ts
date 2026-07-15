@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { computeCameraStatus } from "../hardware/cameraStatus";
 import { normalizeCameraFormats, type CameraFormat } from "../cameraModes";
 import { authenticateNodeCredential, type AuthenticatedNode } from "./nodeCredentials";
 import { serializeCapabilities } from "./capabilities";
@@ -109,11 +110,11 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
         : null);
     const existingFormats = migratedExisting ? normalizeCameraFormats(parseStoredFormats(migratedExisting.formatsJson)) : [];
     const formatsForWrite = shouldUseEmptyFormats || existingFormats.length === 0 ? nextFormats : existingFormats;
-    const data = {
+    const inventoryData = {
       stableId,
       legacyStableId,
       devicePath: camera.devicePath,
-      name: camera.name ?? null,
+      reportedName: camera.name ?? null,
       vendorId: camera.vendorId ?? null,
       productId: camera.productId ?? null,
       serial: camera.serial ?? null,
@@ -130,15 +131,17 @@ export async function updateCameraInventory(prisma: PrismaClient, nodeId: string
     const saved = migratedExisting
       ? await prisma.nodeCamera.update({
           where: { id: migratedExisting.id },
-          data,
+          data: inventoryData,
         })
       : await prisma.nodeCamera.upsert({
           where: { nodeId_stableId: { nodeId, stableId } },
           create: {
             nodeId,
-            ...data,
+            name: camera.name ?? null,
+            displayName: null,
+            ...inventoryData,
           },
-          update: data,
+          update: inventoryData,
         });
     if (migratedExisting) {
       migratedLegacyCameraIds.add(migratedExisting.id);
@@ -378,9 +381,20 @@ export async function nextServableJob(prisma: PrismaClient, nodeId: string) {
   for (const job of candidates) {
     const currentCamera = await prisma.nodeCamera.findUnique({
       where: { nodeId_stableId: { nodeId, stableId: job.assignment.nodeCamera.stableId } },
-      select: { available: true },
+      select: { available: true, enabled: true, retiredAt: true, endpoints: { where: { available: true }, select: { id: true }, take: 1 } },
     });
-    if (currentCamera?.available) {
+    const status = currentCamera
+      ? computeCameraStatus({
+          nodeOnline: true,
+          cameraAvailable: currentCamera.available,
+          cameraEnabled: currentCamera.enabled,
+          cameraRetired: Boolean(currentCamera.retiredAt),
+          assignmentActive: job.assignment.active,
+          captureSourceActive: job.assignment.captureSource.active,
+          currentEndpointAvailable: currentCamera.endpoints.length > 0,
+        })
+      : null;
+    if (status?.usableForCapture) {
       return job;
     }
 
@@ -389,7 +403,9 @@ export async function nextServableJob(prisma: PrismaClient, nodeId: string) {
       data: {
         status: "failed",
         completedAt: new Date(),
-        errorMessage: "Camera is no longer available - it may have been reconnected with a different USB path. Re-attach the camera and try again.",
+        errorMessage: status?.reason
+          ? `Camera is no longer available: ${status.reason}`
+          : "Camera is no longer available - it may have been reconnected with a different USB path. Re-attach the camera and try again.",
       },
     });
     if (failed.count > 0) {
@@ -510,9 +526,20 @@ export async function serializeJobForAgent(prisma: PrismaClient, job: Awaited<Re
   const assignmentStableId = job.assignment.nodeCamera.stableId;
   const currentCamera = await prisma.nodeCamera.findUnique({
     where: { nodeId_stableId: { nodeId: job.nodeId, stableId: assignmentStableId } },
-    select: { stableId: true, devicePath: true, name: true, available: true },
+    select: { stableId: true, devicePath: true, name: true, displayName: true, reportedName: true, available: true, enabled: true, retiredAt: true, endpoints: { where: { available: true }, select: { id: true }, take: 1 } },
   });
-  if (!currentCamera?.available) {
+  const status = currentCamera
+    ? computeCameraStatus({
+        nodeOnline: true,
+        cameraAvailable: currentCamera.available,
+        cameraEnabled: currentCamera.enabled,
+        cameraRetired: Boolean(currentCamera.retiredAt),
+        assignmentActive: job.assignment.active,
+        captureSourceActive: job.assignment.captureSource.active,
+        currentEndpointAvailable: currentCamera.endpoints.length > 0,
+      })
+    : null;
+  if (!currentCamera || !status?.usableForCapture) {
     return null;
   }
 
@@ -524,7 +551,7 @@ export async function serializeJobForAgent(prisma: PrismaClient, job: Awaited<Re
     camera: {
       stableId: currentCamera.stableId,
       devicePath: currentCamera.devicePath,
-      name: currentCamera.name,
+      name: currentCamera.displayName ?? currentCamera.reportedName ?? currentCamera.name,
     },
     settings: {
       width: job.assignment.width,

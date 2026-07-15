@@ -1,4 +1,6 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { computeCameraStatus } from "../hardware/cameraStatus";
+import { nodeCameraBaseDisplayName } from "./nodeCameras";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/projectCapture.ts is server-only operational code.");
@@ -62,10 +64,16 @@ export function serializeAvailableCaptureSource(source: CaptureSourceWithStatus)
   const recentJob = source.assignments.flatMap((assignment) => assignment.jobs).sort((a, b) => b.requestedAt.getTime() - a.requestedAt.getTime())[0] ?? null;
   const retired = Boolean(activeAssignment?.nodeCamera.retiredAt);
   const currentEndpointAvailable = activeAssignment ? activeAssignment.nodeCamera.available && activeAssignment.nodeCamera.endpoints.length > 0 : source.active;
-  const assignmentHealthy = activeAssignment
-    ? activeAssignment.active && activeAssignment.nodeCamera.enabled && !activeAssignment.nodeCamera.retiredAt && activeAssignment.nodeCamera.available
-    : true;
-  const available = source.active && assignmentHealthy && currentEndpointAvailable;
+  const status = computeCameraStatus({
+    nodeOnline: true,
+    cameraAvailable: activeAssignment?.nodeCamera.available ?? source.active,
+    cameraEnabled: activeAssignment?.nodeCamera.enabled ?? true,
+    cameraRetired: Boolean(activeAssignment?.nodeCamera.retiredAt),
+    assignmentActive: activeAssignment?.active ?? true,
+    captureSourceActive: source.active,
+    currentEndpointAvailable,
+  });
+  const available = status.usableForCapture;
   const inputFormat = activeAssignment?.inputFormat ?? null;
 
   return {
@@ -73,7 +81,7 @@ export function serializeAvailableCaptureSource(source: CaptureSourceWithStatus)
     name: source.name,
     mode: activeAssignment ? "remote-node" : "local",
     node: activeAssignment ? { id: activeAssignment.node.id, name: activeAssignment.node.name, role: activeAssignment.node.role } : null,
-    logicalCameraName: activeAssignment?.nodeCamera.name ?? source.cameraName,
+    logicalCameraName: activeAssignment?.nodeCamera ? nodeCameraBaseDisplayName(activeAssignment.nodeCamera) : source.cameraName,
     available,
     retired,
     assignmentActive: activeAssignment?.active ?? false,

@@ -1,6 +1,7 @@
 "use client";
 
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { calculateMetricDomain, domainDefaultsForUnit, type MetricDomainOptions } from "@/lib/chartDomain";
 import type { NormalizedSeries } from "@/lib/metricHistory";
 
 /** Deliberately generic - a color per series index, cycling if there are more series than colors. Not tied to any particular sensor set. */
@@ -62,6 +63,7 @@ export function MetricChart({
   height = 260,
   formatValue = defaultFormatValue,
   formatTimestamp = defaultFormatTimestamp,
+  domainOptions,
 }: {
   series: NormalizedSeries[];
   unit: string;
@@ -70,10 +72,16 @@ export function MetricChart({
   height?: number;
   formatValue?: (value: number) => string;
   formatTimestamp?: (at: number) => string;
+  domainOptions?: MetricDomainOptions | null;
 }) {
   const allPoints = series.flatMap((item) => item.points);
   const domain: [number, number] | undefined =
     allPoints.length > 0 ? [Math.min(...allPoints.map((point) => point.at)), Math.max(...allPoints.map((point) => point.at))] : undefined;
+  const yDomainOptions = domainOptions === undefined ? domainDefaultsForUnit(unit) : domainOptions;
+  const visibleValues = series
+    .filter((item) => !hiddenKeys?.has(item.key))
+    .flatMap((item) => item.points.map((point) => point.value));
+  const yDomain = yDomainOptions ? calculateMetricDomain(visibleValues, yDomainOptions) : null;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -87,7 +95,13 @@ export function MetricChart({
           tick={{ fontSize: 11, fill: "#57534e" }}
           allowDuplicatedCategory={false}
         />
-        <YAxis tick={{ fontSize: 11, fill: "#57534e" }} tickFormatter={(value: number) => formatValue(value)} width={44} />
+        <YAxis
+          tick={{ fontSize: 11, fill: "#57534e" }}
+          tickFormatter={(value: number) => formatValue(value)}
+          width={44}
+          domain={yDomain?.domain}
+          ticks={yDomain?.ticks}
+        />
         <Tooltip content={<ChartTooltip unit={unit} formatValue={formatValue} formatTimestamp={formatTimestamp} />} />
         {series.map((item, index) => {
           if (hiddenKeys?.has(item.key)) return null;

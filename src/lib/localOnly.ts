@@ -1,22 +1,11 @@
 import { NextResponse } from "next/server";
 
 /**
- * True when this process is allowed to touch local camera/V4L2 hardware.
- *
- * Always true outside production (next dev, vitest, playwright dev-mode
- * runs). In production this requires an explicit opt-in: PlantLab's
- * intended production deployment (see DEPLOYMENT.md) is a single local
- * machine with a physically attached camera, run as two long-running
- * processes (the web app and the camera/scheduler service) via systemd -
- * not a publicly hosted, multi-tenant server where exposing hardware
- * access by default would be unsafe. The systemd unit / environment file
- * for that machine is expected to set PLANTLAB_LOCAL_CAMERA_ENABLED=1.
- *
- * PLANTLAB_TEST_LOCAL_CAMERA_UI is kept as a recognized alias so existing
- * production-mode e2e/screenshot tooling (scripts/playwright-dev-server.mjs)
- * keeps working unchanged.
+ * True when this process is allowed to discover or execute against local
+ * camera/V4L2 hardware. This is an execution/discovery boundary only; it
+ * must not hide fleet management for attached-node cameras.
  */
-export function localCameraHardwareEnabled(): boolean {
+export function canDiscoverLocalCameraHardware(): boolean {
   if (process.env.NODE_ENV !== "production") {
     return true;
   }
@@ -24,8 +13,18 @@ export function localCameraHardwareEnabled(): boolean {
   return process.env.PLANTLAB_LOCAL_CAMERA_ENABLED === "1" || process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1";
 }
 
+/** Compatibility alias for existing local-execution callers. */
+export function localCameraHardwareEnabled(): boolean {
+  return canDiscoverLocalCameraHardware();
+}
+
+/** PlantLab is currently a trusted home-lab system, so fleet management is always visible. */
+export function canManageFleetHardware(): boolean {
+  return true;
+}
+
 export function productionLocalOnlyResponse() {
-  if (localCameraHardwareEnabled()) {
+  if (canDiscoverLocalCameraHardware()) {
     return null;
   }
 

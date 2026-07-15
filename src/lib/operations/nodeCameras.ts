@@ -45,8 +45,12 @@ export function parseNodeCameraAlternateDevices(camera: Pick<NodeCamera, "altern
   }
 }
 
-export function nodeCameraDisplayName(camera: Pick<NodeCamera, "name" | "usbPort" | "physicalPath" | "usbPath">): string {
-  const name = camera.name ?? "Unknown camera";
+export function nodeCameraBaseDisplayName(camera: Pick<NodeCamera, "displayName" | "reportedName" | "name" | "stableId">): string {
+  return camera.displayName?.trim() || camera.reportedName?.trim() || camera.name?.trim() || `Camera ${camera.stableId.slice(0, 8)}`;
+}
+
+export function nodeCameraDisplayName(camera: Pick<NodeCamera, "displayName" | "reportedName" | "name" | "stableId" | "usbPort" | "physicalPath" | "usbPath">): string {
+  const name = nodeCameraBaseDisplayName(camera);
   const suffix = camera.usbPort ?? usbPathSuffix(camera.physicalPath ?? camera.usbPath);
   if (!suffix || name.includes(`(${suffix})`) || name.includes(`USB path ${suffix}`)) return name;
   return `${name} - USB path ${suffix}`;
@@ -71,7 +75,7 @@ export async function listNodeCameras(prisma: PrismaClient, nodeName?: string | 
             take: 1,
           },
         },
-        orderBy: [{ retiredAt: "asc" }, { available: "desc" }, { name: "asc" }],
+        orderBy: [{ retiredAt: "asc" }, { available: "desc" }, { displayName: "asc" }, { reportedName: "asc" }, { name: "asc" }],
       },
     },
     orderBy: { name: "asc" },
@@ -128,15 +132,15 @@ export async function attachNodeCamera(
     // video0 reconciliation).
     captureSource = await prisma.captureSource.update({
       where: { id: input.captureSourceId },
-      data: { cameraDevice: camera.devicePath, cameraName: camera.name, cameraStableId: camera.stableId },
+      data: { cameraDevice: camera.devicePath, cameraName: nodeCameraBaseDisplayName(camera), cameraStableId: camera.stableId },
     });
   } else {
-    const name = (input.newCaptureSourceName ?? `${node.name} ${camera.name ?? "Camera"}`).trim();
+    const name = (input.newCaptureSourceName ?? `${node.name} ${nodeCameraBaseDisplayName(camera)}`).trim();
     captureSource = await prisma.captureSource.create({
       data: {
         name,
         cameraDevice: camera.devicePath,
-        cameraName: camera.name,
+        cameraName: nodeCameraBaseDisplayName(camera),
         cameraStableId: camera.stableId,
         width: input.width,
         height: input.height,
@@ -214,8 +218,19 @@ export function cameraSupportsMode(camera: NodeCameraWithFormats, mode: { inputF
 
 export async function renameNodeCamera(prisma: PrismaClient, input: { nodeName: string; cameraId: string; name: string; requestedBy?: string | null }) {
   const camera = await requireNodeCamera(prisma, input.nodeName, input.cameraId);
-  const updated = await prisma.nodeCamera.update({ where: { id: camera.id }, data: { name: input.name.trim() } });
-  await recordCameraAudit(prisma, camera.nodeId, camera.id, "rename", "applied", { name: camera.name }, { name: updated.name }, null, input.requestedBy);
+  const displayName = input.name.trim();
+  const updated = await prisma.nodeCamera.update({ where: { id: camera.id }, data: { displayName, name: displayName } });
+  await recordCameraAudit(
+    prisma,
+    camera.nodeId,
+    camera.id,
+    "rename",
+    "applied",
+    { displayName: camera.displayName, name: camera.name },
+    { displayName: updated.displayName, name: updated.name },
+    null,
+    input.requestedBy,
+  );
   return updated;
 }
 
@@ -377,7 +392,7 @@ export async function reattachNodeCamera(
       data: {
         stableId: endpoint.stableId,
         devicePath: endpoint.devicePath,
-        name: endpoint.name ?? camera.name,
+        reportedName: endpoint.name ?? camera.reportedName,
         vendorId: endpoint.vendorId,
         productId: endpoint.productId,
         serial: endpoint.serial,

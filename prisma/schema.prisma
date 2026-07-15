@@ -615,7 +615,12 @@ model NodeSensor {
   id                    String    @id @default(cuid())
   nodeId                String
   key                   String
+  /// Legacy compatibility mirror of the user-owned display name. New code should prefer displayName with reportedName fallback.
   name                  String
+  /// User-owned sensor display name. Telemetry must not overwrite it.
+  displayName           String?
+  /// Agent/hardware-reported sensor name from telemetry.
+  reportedName          String?
   type                  String
   gpio                  Int?
   placement             String?
@@ -775,7 +780,12 @@ model NodeCamera {
   stableId             String
   legacyStableId       String?
   devicePath           String
+  /// Legacy compatibility mirror of the user-owned display name. New code should prefer displayName with reportedName fallback.
   name                 String?
+  /// User-owned logical camera name. Inventory must not overwrite it.
+  displayName          String?
+  /// Agent/hardware-reported camera name from inventory.
+  reportedName         String?
   vendorId             String?
   productId            String?
   serial               String?

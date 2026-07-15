@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ShelfLayoutEditor } from "@/components/ShelfLayoutEditor";
-import { localCameraHardwareEnabled } from "@/lib/localOnly";
+import { canDiscoverLocalCameraHardware } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 
 type PageProps = {
@@ -31,8 +31,8 @@ export default async function CaptureSourcePage({ params }: PageProps) {
     select: { id: true, name: true, isTestProject: true },
   });
 
-  const production = !localCameraHardwareEnabled();
   const assignment = source.assignments[0] ?? null;
+  const localExecutionUnavailable = !assignment && !canDiscoverLocalCameraHardware();
 
   return (
     <main className="min-h-screen">
@@ -50,7 +50,7 @@ export default async function CaptureSourcePage({ params }: PageProps) {
 
       <section className="section">
         <div className="container">
-          {production ? (
+          {localExecutionUnavailable ? (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-5 text-amber-950">
               Local camera controls are unavailable in production. Run PlantLab locally to capture
               test frames and adjust the shelf layout.

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { computeCameraStatus } from "@/lib/hardware/cameraStatus";
 import { listNodeCameras, nodeCameraDisplayName } from "@/lib/operations/nodeCameras";
 import { prisma } from "@/lib/prisma";
 
@@ -16,6 +17,8 @@ export async function GET(_request: Request, context: { params: Promise<{ nodeNa
       stableId: camera.stableId,
       legacyStableId: camera.legacyStableId,
       name: nodeCameraDisplayName(camera),
+      displayName: camera.displayName,
+      reportedName: camera.reportedName,
       devicePath: camera.devicePath,
       available: camera.available,
       enabled: camera.enabled,
@@ -31,6 +34,7 @@ export async function GET(_request: Request, context: { params: Promise<{ nodeNa
       captureSourceId: camera.captureSourceId,
       formats: camera.formats,
       formatsCount: camera.formats.length,
+      ...cameraStatusPayload(camera),
       // Active capture assignment (resolution/input format/name) + its
       // capture source. Rotation lives on the capture source, never on the
       // assignment, so it is surfaced here read-through with the source id
@@ -78,6 +82,21 @@ export async function GET(_request: Request, context: { params: Promise<{ nodeNa
         : [],
     })),
   });
+}
+
+function cameraStatusPayload(camera: Awaited<ReturnType<typeof listNodeCameras>>[number]["cameras"][number]) {
+  const assignment = "assignments" in camera && Array.isArray(camera.assignments) ? camera.assignments[0] : null;
+  const endpointAvailable = "endpoints" in camera && Array.isArray(camera.endpoints) ? camera.endpoints.some((endpoint) => endpoint.available) : camera.available;
+  const status = computeCameraStatus({
+    nodeOnline: true,
+    cameraAvailable: camera.available,
+    cameraEnabled: camera.enabled,
+    cameraRetired: Boolean(camera.retiredAt),
+    assignmentActive: assignment?.active ?? true,
+    captureSourceActive: assignment?.captureSource?.active ?? true,
+    currentEndpointAvailable: endpointAvailable,
+  });
+  return { status: status.status, statusReason: status.reason, usableForCapture: status.usableForCapture };
 }
 
 function parseJson(value: string | null) {

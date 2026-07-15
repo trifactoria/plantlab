@@ -58,6 +58,8 @@ describe("camera management operations", () => {
     const updated = await renameNodeCamera(prisma, { nodeName: NODE, cameraId: camera.id, name: "Greenhouse Wide" });
     expect(updated.id).toBe(camera.id);
     expect(updated.name).toBe("Greenhouse Wide");
+    expect(updated.displayName).toBe("Greenhouse Wide");
+    expect(updated.reportedName).toBe("webcam 1080P");
     expect(updated.stableId).toBe(camera.stableId);
   });
 
@@ -133,6 +135,8 @@ describe("camera management operations", () => {
       expect(result.camera.id).toBe(camera.id); // same logical camera
       expect(result.camera.devicePath).toBe("/dev/video6");
       expect(result.camera.stableId).toBe(endpoint.stableId);
+      expect(result.camera.displayName).toBe(camera.displayName);
+      expect(result.camera.reportedName).toBe(endpoint.name);
       expect(result.camera.available).toBe(true);
       expect(result.camera.retiredAt).toBeNull();
     });

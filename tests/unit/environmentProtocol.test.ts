@@ -113,13 +113,17 @@ describe("environment telemetry protocol", () => {
     expect(await prisma.sensorReading.count({ where: { eventId: "env-retry-1" } })).toBe(1);
   });
 
-  it("upserts sensor inventory metadata from telemetry", async () => {
+  it("keeps configured sensor display fields user-owned while telemetry updates reported name and diagnostic state", async () => {
     const registered = await registerOrRotateNode(prisma, { name: "greenhouse-env-metadata", role: "greenhouse-node", rotateCredential: true });
     await ingestEnvironmentTelemetry(prisma, registered.node.id, parseEnvironmentBatch({ events: [event({ eventId: "env-meta-1", sensor: { key: "s1", name: "Old", type: "dht22", gpio: 4, placement: "Top", enabled: true } })] }, new Date("2026-07-13T15:31:00.000Z")));
+    await prisma.nodeSensor.update({
+      where: { nodeId_key: { nodeId: registered.node.id, key: "s1" } },
+      data: { name: "User Sensor", displayName: "User Sensor", gpio: 4, placement: "Top shelf", enabled: true },
+    });
     await ingestEnvironmentTelemetry(prisma, registered.node.id, parseEnvironmentBatch({ events: [event({ eventId: "env-meta-2", sensor: { key: "s1", name: "New", type: "dht22", gpio: 17, placement: "Bottom", enabled: false } })] }, new Date("2026-07-13T15:32:00.000Z")));
 
     const sensor = await prisma.nodeSensor.findUniqueOrThrow({ where: { nodeId_key: { nodeId: registered.node.id, key: "s1" } } });
-    expect(sensor).toMatchObject({ name: "New", gpio: 17, placement: "Bottom", enabled: false });
+    expect(sensor).toMatchObject({ name: "User Sensor", displayName: "User Sensor", reportedName: "New", gpio: 4, placement: "Top shelf", enabled: true });
   });
 
   it("keeps sensors isolated per node", async () => {

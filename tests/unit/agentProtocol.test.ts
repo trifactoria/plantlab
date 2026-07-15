@@ -64,7 +64,7 @@ describe("agent protocol", () => {
     expect(node.cameras[0].devicePath).toBe("/dev/video8");
   });
 
-  it("documents current defect: inventory overwrites a renamed camera display value", async () => {
+  it("keeps camera display names user-owned while inventory updates reported names", async () => {
     const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-name-regression", role: "greenhouse-node", rotateCredential: true });
     const [camera] = await updateCameraInventory(prisma, registered.node.id, [
       { stableId: "usb-name-regression", devicePath: "/dev/video0", name: "Reported Webcam" },
@@ -72,13 +72,27 @@ describe("agent protocol", () => {
 
     await renameNodeCamera(prisma, { nodeName: "greenhouse-zero-name-regression", cameraId: camera.id, name: "User Shelf Camera" });
     await updateCameraInventory(prisma, registered.node.id, [
-      { stableId: "usb-name-regression", devicePath: "/dev/video0", name: "Reported Webcam" },
+      { stableId: "usb-name-regression", devicePath: "/dev/video0", name: "Updated Hardware Webcam" },
     ]);
 
-    const current = await prisma.nodeCamera.findUniqueOrThrow({ where: { id: camera.id } });
-    // Current behavior is the audit finding: NodeCamera.name is both the user
-    // display value and the agent-reported hardware name, so inventory wins.
-    expect(current.name).toBe("Reported Webcam");
+    const current = await prisma.nodeCamera.findUniqueOrThrow({ where: { id: camera.id }, include: { endpoints: true } });
+    expect(current.displayName).toBe("User Shelf Camera");
+    expect(current.name).toBe("User Shelf Camera");
+    expect(current.reportedName).toBe("Updated Hardware Webcam");
+    expect(current.endpoints[0].name).toBe("Updated Hardware Webcam");
+  });
+
+  it("does not rename assignments or capture sources during inventory refresh", async () => {
+    const { registered, attached } = await makeNodeWithAssignment();
+    await prisma.captureSource.update({ where: { id: attached.captureSource.id }, data: { name: "User Source Name" } });
+    await prisma.nodeCameraAssignment.update({ where: { id: attached.assignment.id }, data: { name: "User Assignment Name" } });
+
+    await updateCameraInventory(prisma, registered.node.id, [
+      { stableId: "usb-logitech-1", devicePath: "/dev/video4", name: "New Reported Name" },
+    ]);
+
+    await expect(prisma.captureSource.findUniqueOrThrow({ where: { id: attached.captureSource.id } })).resolves.toMatchObject({ name: "User Source Name" });
+    await expect(prisma.nodeCameraAssignment.findUniqueOrThrow({ where: { id: attached.assignment.id } })).resolves.toMatchObject({ name: "User Assignment Name" });
   });
 
   it("stores normalized structured camera inventory without dropping MJPEG or YUYV families", async () => {

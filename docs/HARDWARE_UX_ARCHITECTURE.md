@@ -4,6 +4,26 @@ Audit date: 2026-07-15
 
 This document is an implementation-ready proposal. It does not authorize the refactor stages by itself; each stage should be approved before code changes.
 
+## Implemented Backend Baseline
+
+Implemented on 2026-07-15:
+
+- `NodeCamera.displayName` is the user-owned logical name.
+- `NodeCamera.reportedName` is the inventory-owned hardware name.
+- `NodeCamera.name` remains as a legacy compatibility mirror of the display name.
+- `NodeSensor.displayName` is the user-owned display name.
+- `NodeSensor.reportedName` is the telemetry-owned reported name.
+- `NodeSensor.name` remains as a legacy compatibility mirror of the display name.
+- `NodeSensor.gpio` and `NodeSensor.placement` are treated as coordinator configuration fields; telemetry records observed GPIO in diagnostics but no longer overwrites existing configured values.
+- `GET /api/hardware/cameras` returns the canonical fleet camera summaries.
+- `GET /api/hardware/sensors` returns the canonical fleet sensor summaries.
+- `PATCH /api/hardware/cameras/:cameraId/configuration` is the canonical backend boundary for common camera configuration fields.
+- `POST /api/hardware/cameras/test-capture` is the canonical backend boundary for local-or-remote camera test capture.
+- `computeCameraStatus()` in `src/lib/hardware/cameraStatus.ts` owns the shared camera status vocabulary.
+- `evaluateSensorHealth()` in `src/lib/hardware/sensorHealth.ts` owns canonical sensor health, with initial degraded and failed windows of three and five minutes.
+- `calculateMetricDomain()` in `src/lib/chartDomain.ts` owns reusable chart Y-domain calculation.
+- `canDiscoverLocalCameraHardware()` and `canManageFleetHardware()` split local V4L execution from trusted fleet management.
+
 ## Operating Principles
 
 - PlantLab is currently a trusted home-lab system.
