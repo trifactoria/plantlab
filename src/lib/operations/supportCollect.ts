@@ -282,9 +282,13 @@ export function buildFixtureScreenshotEnv(fixtureRoot: string, port: number): { 
       DATABASE_URL: `file:${fixtureDb}`,
       PLANTLAB_ROOT_DIR: fixtureRoot,
       PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1",
-      // The .next build is database-independent, so reuse the host's existing
-      // build and just start - a fresh build here overruns the probe timeout.
+      // Start `next dev` without a prior build (the slow step) ...
       PLANTLAB_SKIP_BUILD: "1",
+      // ... and give that dev server its OWN build directory under the
+      // isolated fixture root, so it never rewrites or clears the live
+      // deployment's .next (which would break `next start` on its next
+      // restart). Critical isolation boundary - see next.config.ts.
+      PLANTLAB_NEXT_DIST_DIR: path.join(fixtureRoot, ".next-fixture"),
       // A fixture run must never reuse an already-running (possibly live)
       // server, and must never claim to be a live-readonly run.
       PLANTLAB_SCREENSHOTS_LIVE_READONLY: "0",
