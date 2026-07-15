@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { notFound } from "@/lib/http";
-import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { requestCameraInventoryRefresh } from "@/lib/operations/agentProtocol";
 import { prisma } from "@/lib/prisma";
 
@@ -11,9 +10,6 @@ type Context = {
 };
 
 export async function POST(_request: Request, context: Context) {
-  const blocked = productionLocalOnlyResponse();
-  if (blocked) return blocked;
-
   const { sourceId } = await context.params;
   const source = await prisma.captureSource.findUnique({
     where: { id: sourceId },
