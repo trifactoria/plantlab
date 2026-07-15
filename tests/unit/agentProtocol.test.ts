@@ -11,7 +11,7 @@ import {
   serializeJobForAgent,
   updateCameraInventory,
 } from "../../src/lib/operations/agentProtocol";
-import { attachNodeCamera, listCameraReattachCandidates, parseNodeCameraFormats, reattachNodeCamera } from "../../src/lib/operations/nodeCameras";
+import { attachNodeCamera, listCameraReattachCandidates, parseNodeCameraFormats, reattachNodeCamera, renameNodeCamera } from "../../src/lib/operations/nodeCameras";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
 
@@ -62,6 +62,23 @@ describe("agent protocol", () => {
     expect(node.lastHeartbeatAt).toBeTruthy();
     expect(node.cameras).toHaveLength(1);
     expect(node.cameras[0].devicePath).toBe("/dev/video8");
+  });
+
+  it("documents current defect: inventory overwrites a renamed camera display value", async () => {
+    const registered = await registerOrRotateNode(prisma, { name: "greenhouse-zero-name-regression", role: "greenhouse-node", rotateCredential: true });
+    const [camera] = await updateCameraInventory(prisma, registered.node.id, [
+      { stableId: "usb-name-regression", devicePath: "/dev/video0", name: "Reported Webcam" },
+    ]);
+
+    await renameNodeCamera(prisma, { nodeName: "greenhouse-zero-name-regression", cameraId: camera.id, name: "User Shelf Camera" });
+    await updateCameraInventory(prisma, registered.node.id, [
+      { stableId: "usb-name-regression", devicePath: "/dev/video0", name: "Reported Webcam" },
+    ]);
+
+    const current = await prisma.nodeCamera.findUniqueOrThrow({ where: { id: camera.id } });
+    // Current behavior is the audit finding: NodeCamera.name is both the user
+    // display value and the agent-reported hardware name, so inventory wins.
+    expect(current.name).toBe("Reported Webcam");
   });
 
   it("stores normalized structured camera inventory without dropping MJPEG or YUYV families", async () => {
