@@ -34,6 +34,9 @@ test("fixture support screenshots (isolated synthetic data)", async ({ page }) =
   await capture(page, "fixture-home-with-node");
 
   await goto(page, `/nodes/${NODE_VISUAL_NAME}`);
-  await expect(page.getByText("Hardware configuration")).toBeVisible();
+  // The hardware-config strip is client-rendered after an async fetch that
+  // compiles the /api/nodes/[nodeName] route on first hit under next dev - a
+  // generous timeout keeps this reliable on the CPU-shared coordinator.
+  await expect(page.getByText("Hardware configuration")).toBeVisible({ timeout: 45_000 });
   await capture(page, "fixture-node-overview");
 });
