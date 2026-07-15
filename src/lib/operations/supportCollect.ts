@@ -248,16 +248,33 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
-      // Kill any next dev still bound to the fixture port (matched precisely by
-      // its --port argument) and wait for it to exit, so no lingering server
-      // re-dirties the tree after the checkout below.
-      await execFileResult("bash", ["-c", `pkill -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; fuser -k ${port}/tcp 2>/dev/null; sleep 1; true`], 10_000).catch(() => undefined);
+      // The fixture `next dev` spawns a `next-server` render worker that holds
+      // the fixture port and keeps rewriting next-env.d.ts. Killing only the
+      // `next dev` parent leaves that worker alive to re-dirty the tree after
+      // the checkout, so kill by the fixture port (fuser targets exactly the
+      // holder of that random free port — never the live server on 3000) and
+      // loop until the port is actually released before restoring. The parent
+      // is matched precisely by its --port argument so a gentle kill lands too.
+      await execFileResult(
+        "bash",
+        [
+          "-c",
+          `for i in $(seq 1 40); do ` +
+            `pkill -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; ` +
+            `fuser -k ${port}/tcp 2>/dev/null; ` +
+            `fuser ${port}/tcp 2>/dev/null || break; ` +
+            `sleep 0.5; ` +
+            `done; true`,
+        ],
+        30_000,
+      ).catch(() => undefined);
       await rm(fixtureRoot, { recursive: true, force: true });
-      // `next dev` rewrites next-env.d.ts (to the fixture types dir) and
-      // reformats tsconfig.json. Restore the committed versions with git so the
-      // working tree is left clean regardless of what state those files were
-      // found in — a plain content snapshot would perpetuate a pre-existing
-      // dirty state instead of correcting it.
+      // Restore the committed next-env.d.ts (which next dev repointed at the
+      // fixture types dir) and tsconfig.json (which it reformats) with git, so
+      // the working tree is left clean regardless of the state it was found in
+      // — a plain content snapshot would perpetuate a pre-existing dirty state
+      // instead of correcting it. Done only after the port is released above so
+      // no surviving worker rewrites the file after the checkout.
       await execFileResult("git", ["checkout", "--", "next-env.d.ts", "tsconfig.json"], 15_000).catch(() => undefined);
     }
     return;
