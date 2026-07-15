@@ -255,7 +255,7 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       // holder of that random free port — never the live server on 3000) and
       // loop until the port is actually released before restoring. The parent
       // is matched precisely by its --port argument so a gentle kill lands too.
-      await execFileResult(
+      const kill = await execFileResult(
         "bash",
         [
           "-c",
@@ -264,10 +264,10 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
             `fuser -k ${port}/tcp 2>/dev/null; ` +
             `fuser ${port}/tcp 2>/dev/null || break; ` +
             `sleep 0.5; ` +
-            `done; true`,
+            `done; echo "port-free-after=$i"`,
         ],
         30_000,
-      ).catch(() => undefined);
+      ).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
       await rm(fixtureRoot, { recursive: true, force: true });
       // Restore the committed next-env.d.ts (which next dev repointed at the
       // fixture types dir) and tsconfig.json (which it reformats) with git, so
@@ -275,7 +275,17 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       // — a plain content snapshot would perpetuate a pre-existing dirty state
       // instead of correcting it. Done only after the port is released above so
       // no surviving worker rewrites the file after the checkout.
-      await execFileResult("git", ["checkout", "--", "next-env.d.ts", "tsconfig.json"], 15_000).catch(() => undefined);
+      const checkout = await execFileResult("git", ["checkout", "--", "next-env.d.ts", "tsconfig.json"], 15_000).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
+      const after = await execFileResult("git", ["status", "--short"], 15_000).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
+      await writeFile(
+        path.join(dir, "fixture-cleanup.txt"),
+        redact(
+          `cwd=${process.cwd()} port=${port}\n` +
+            `kill status=${kill.status}\n${kill.stdout}\n${kill.stderr}\n` +
+            `checkout status=${checkout.status}\n${checkout.stdout}\n${checkout.stderr}\n` +
+            `git status --short after (status=${after.status}):\n${after.stdout}\n${after.stderr}\n`,
+        ),
+      ).catch(() => undefined);
     }
     return;
   }
