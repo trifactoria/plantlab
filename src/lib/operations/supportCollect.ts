@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -220,8 +220,6 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
     // project root on startup. When this runs inside the coordinator's repo
     // it would dirty those tracked files and block a future `git pull
     // --ff-only`. Snapshot their contents so they can be restored afterwards.
-    const guardedFiles = ["next-env.d.ts", "tsconfig.json"].map((name) => path.join(process.cwd(), name));
-    const originals = await Promise.all(guardedFiles.map((file) => readFile(file, "utf8").then((content) => ({ file, content })).catch(() => null)));
     const port = await findFreePort();
     try {
       const { fixtureDb, env } = buildFixtureScreenshotEnv(fixtureRoot, port);
@@ -250,15 +248,17 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
-      // playwright-dev-server.mjs kills the dev-server process group on
-      // teardown; this is a belt-and-suspenders kill of any next dev still
-      // bound to the fixture port (matched precisely by its --port argument),
-      // so no lingering server re-dirties the tree after the restore below.
-      await execFileResult("bash", ["-c", `pkill -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; fuser -k ${port}/tcp 2>/dev/null; true`], 10_000).catch(() => undefined);
+      // Kill any next dev still bound to the fixture port (matched precisely by
+      // its --port argument) and wait for it to exit, so no lingering server
+      // re-dirties the tree after the checkout below.
+      await execFileResult("bash", ["-c", `pkill -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; fuser -k ${port}/tcp 2>/dev/null; sleep 1; true`], 10_000).catch(() => undefined);
       await rm(fixtureRoot, { recursive: true, force: true });
-      // Restore any project-root files the fixture `next dev` rewrote, so the
-      // repository working tree is left exactly as it was found.
-      await Promise.all(originals.map((original) => (original ? writeFile(original.file, original.content) : Promise.resolve())));
+      // `next dev` rewrites next-env.d.ts (to the fixture types dir) and
+      // reformats tsconfig.json. Restore the committed versions with git so the
+      // working tree is left clean regardless of what state those files were
+      // found in — a plain content snapshot would perpetuate a pre-existing
+      // dirty state instead of correcting it.
+      await execFileResult("git", ["checkout", "--", "next-env.d.ts", "tsconfig.json"], 15_000).catch(() => undefined);
     }
     return;
   }
