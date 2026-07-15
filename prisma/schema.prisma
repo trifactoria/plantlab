@@ -47,6 +47,8 @@ model Project {
   cropPreset    ProjectCropPreset?
   cropVersions  PlantCropVersion[]
   viewports     ProjectViewport[]
+  projectSamples ProjectSourceSample[]
+  manualCaptureJobs AgentCaptureJob[] @relation("ManualCaptureProject")
 }
 
 // A physical camera/device shared by several projects, each of which claims
@@ -77,17 +79,23 @@ model CaptureSource {
   captureWindowEnabled      Boolean  @default(false)
   captureWindowStartMinutes Int?
   captureWindowEndMinutes   Int?
+  illuminationOutletId      String?
+  illuminationPolicy        String   @default("unrestricted")
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
 
   cameraProfile  CameraProfile?         @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
+  illuminationOutlet NodeOutlet?         @relation("CaptureSourceIlluminationOutlet", fields: [illuminationOutletId], references: [id], onDelete: SetNull)
   sourceCaptures SourceCapture[]
+  occurrences    CaptureSourceOccurrence[]
+  projectSamples ProjectSourceSample[]
   viewports      ProjectViewport[]
   nodeCameras    NodeCamera[]
   assignments    NodeCameraAssignment[]
   agentJobs      AgentCaptureJob[]
 
   @@index([cameraDevice])
+  @@index([illuminationOutletId])
 }
 
 // One full-resolution frame captured from a shared CaptureSource at one
@@ -135,6 +143,8 @@ model SourceCapture {
   ingestSource     String?
 
   captureSource CaptureSource     @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  occurrences   CaptureSourceOccurrence[]
+  projectSamples ProjectSourceSample[]
   viewports     ProjectViewport[] @relation("ViewportSourceCapture")
   photos        Photo[]
 
@@ -158,6 +168,10 @@ model ProjectViewport {
   effectiveFrom   DateTime
   active          Boolean  @default(true)
   sourceCaptureId String?
+  samplingEnabled Boolean  @default(true)
+  samplingIntervalMinutes Int?
+  samplingAnchorAt DateTime?
+  lastSampledSlotAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -165,9 +179,67 @@ model ProjectViewport {
   captureSource CaptureSource  @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
   sourceCapture SourceCapture? @relation("ViewportSourceCapture", fields: [sourceCaptureId], references: [id], onDelete: SetNull)
   photos        Photo[]
+  projectSamples ProjectSourceSample[]
 
   @@index([projectId, effectiveFrom])
   @@index([captureSourceId, effectiveFrom])
+  @@index([captureSourceId, samplingEnabled])
+}
+
+model CaptureSourceOccurrence {
+  id              String    @id @default(cuid())
+  captureSourceId String
+  scheduledFor    DateTime
+  decisionAt      DateTime  @default(now())
+  status          String
+  skipReason      String?
+  agentJobId      String?
+  sourceCaptureId String?
+  requestedWidth  Int?
+  requestedHeight Int?
+  requestedInputFormat String?
+  requestedFrameRate String?
+  effectiveWidth  Int?
+  effectiveHeight Int?
+  effectiveInputFormat String?
+  effectiveFrameRate String?
+  capturedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  captureSource CaptureSource @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  agentJob      AgentCaptureJob? @relation(fields: [agentJobId], references: [id], onDelete: SetNull)
+  sourceCapture SourceCapture? @relation(fields: [sourceCaptureId], references: [id], onDelete: SetNull)
+
+  @@unique([captureSourceId, scheduledFor])
+  @@index([captureSourceId, status, scheduledFor])
+  @@index([agentJobId])
+  @@index([sourceCaptureId])
+}
+
+model ProjectSourceSample {
+  id              String   @id @default(cuid())
+  projectId       String
+  viewportId      String
+  captureSourceId String
+  sampleSlotAt    DateTime
+  sourceCaptureId String?
+  photoId         String?
+  status          String
+  missingReason   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  viewport      ProjectViewport @relation(fields: [viewportId], references: [id], onDelete: Cascade)
+  captureSource CaptureSource  @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  sourceCapture SourceCapture? @relation(fields: [sourceCaptureId], references: [id], onDelete: SetNull)
+  photo          Photo?        @relation(fields: [photoId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, viewportId, sampleSlotAt])
+  @@index([captureSourceId, sampleSlotAt])
+  @@index([sourceCaptureId])
+  @@index([photoId])
 }
 
 // Sizing/shape suggestion only, applied when a plant has no crop history yet.
@@ -305,6 +377,7 @@ model Photo {
   cropVersionSources PlantCropVersion[]
   sourceCapture      SourceCapture?     @relation(fields: [sourceCaptureId], references: [id], onDelete: SetNull)
   viewport           ProjectViewport?   @relation(fields: [viewportId], references: [id], onDelete: SetNull)
+  projectSourceSamples ProjectSourceSample[]
 
   @@unique([projectId, path])
   @@index([projectId, timestamp])
@@ -574,6 +647,7 @@ model NodeOutlet {
   node     PlantLabNode  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   commands PowerCommand[]
   stateEvents PowerStateEvent[]
+  illuminationSources CaptureSource[] @relation("CaptureSourceIlluminationOutlet")
 
   @@unique([nodeId, key])
   @@index([nodeId])
@@ -943,6 +1017,7 @@ model AgentCaptureJob {
   completedAt     DateTime?
   captureId       String?   @unique
   sourceCaptureId String?
+  manualProjectId String?
   errorMessage    String?
   effectiveWidth   Int?
   effectiveHeight  Int?
@@ -967,11 +1042,14 @@ model AgentCaptureJob {
   node          PlantLabNode         @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   assignment    NodeCameraAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   captureSource CaptureSource        @relation(fields: [captureSourceId], references: [id], onDelete: Cascade)
+  manualProject Project?             @relation("ManualCaptureProject", fields: [manualProjectId], references: [id], onDelete: SetNull)
+  occurrences   CaptureSourceOccurrence[]
 
   @@index([nodeId, status, requestedAt])
   @@index([assignmentId])
   @@index([captureSourceId])
   @@index([captureSourceId, scheduledFor])
+  @@index([manualProjectId])
 }
 
 model NodeSensorConfigRevision {

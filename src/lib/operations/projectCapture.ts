@@ -114,9 +114,20 @@ export async function validateProjectCaptureSourceSelection(prisma: PrismaClient
 
 export async function setProjectCaptureSource(
   prisma: Prisma.TransactionClient,
-  input: { projectId: string; captureSourceId: string; effectiveFrom?: Date },
+  input: {
+    projectId: string;
+    captureSourceId: string;
+    effectiveFrom?: Date;
+    samplingIntervalMinutes?: number | null;
+    samplingEnabled?: boolean;
+  },
 ) {
   const now = input.effectiveFrom ?? new Date();
+  const project = await prisma.project.findUnique({
+    where: { id: input.projectId },
+    select: { photoIntervalMinutes: true, captureEnabled: true },
+  });
+  if (!project) throw new Error("Project not found.");
   await prisma.projectViewport.updateMany({
     where: { projectId: input.projectId, active: true },
     data: { active: false },
@@ -131,6 +142,23 @@ export async function setProjectCaptureSource(
       cropHeight: 1,
       effectiveFrom: now,
       active: true,
+      samplingEnabled: input.samplingEnabled ?? project.captureEnabled,
+      samplingIntervalMinutes: input.samplingIntervalMinutes ?? project.photoIntervalMinutes,
+      samplingAnchorAt: now,
+    },
+  });
+}
+
+export async function updateActiveProjectCaptureSampling(
+  prisma: Prisma.TransactionClient,
+  input: { projectId: string; samplingIntervalMinutes?: number; samplingEnabled?: boolean },
+) {
+  if (input.samplingIntervalMinutes === undefined && input.samplingEnabled === undefined) return;
+  await prisma.projectViewport.updateMany({
+    where: { projectId: input.projectId, active: true },
+    data: {
+      samplingIntervalMinutes: input.samplingIntervalMinutes,
+      samplingEnabled: input.samplingEnabled,
     },
   });
 }

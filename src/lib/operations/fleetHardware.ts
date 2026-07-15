@@ -12,6 +12,7 @@ import { computeNodeStatus } from "./nodeCredentials";
 import { nodeCameraBaseDisplayName, parseNodeCameraFormats, updateCameraAssignmentConfig } from "./nodeCameras";
 import { sensorDisplayName } from "./sensorConfig";
 import { captureSourcePhoto } from "../sourceCapture";
+import { captureSourceConfigUpdateData, serializeDailyWindow } from "./captureSourceConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/fleetHardware.ts is server-only operational code.");
@@ -34,7 +35,21 @@ export type FleetCameraSummary = {
   currentMode: { width: number; height: number; inputFormat: string; frameRate: string | null } | null;
   supportedModes: Array<{ width: number; height: number; inputFormat: string; frameRates: string[] }>;
   orientation: { rotation: 0 | 90 | 180 | 270; flipHorizontal: boolean; flipVertical: boolean };
-  schedule: { enabled: boolean; intervalMinutes: number | null; nextCaptureAt: string | null } | null;
+  schedule: {
+    enabled: boolean;
+    intervalMinutes: number | null;
+    timeZone: string | null;
+    dailyWindow: { enabled: boolean; start: string | null; end: string | null; crossesMidnight: boolean };
+    nextCaptureAt: string | null;
+  } | null;
+  illumination: {
+    policy: "unrestricted" | "only-while-on";
+    outletId: string | null;
+    outletKey: string | null;
+    outletLabel: string | null;
+    observedState: boolean | null;
+    observedAt: string | null;
+  } | null;
   reliability: {
     warmupFrames: number | null;
     warmupSeconds: number | null;
@@ -79,7 +94,12 @@ const CAMERA_INCLUDE = {
   assignments: {
     where: { active: true },
     include: {
-      captureSource: { include: { sourceCaptures: { orderBy: { timestamp: "desc" as const }, take: 1 } } },
+      captureSource: {
+        include: {
+          illuminationOutlet: true,
+          sourceCaptures: { orderBy: { timestamp: "desc" as const }, take: 1 },
+        },
+      },
       jobs: { orderBy: { requestedAt: "desc" as const }, take: 1 },
     },
     orderBy: { updatedAt: "desc" as const },
@@ -161,7 +181,19 @@ export function serializeFleetCamera(camera: CameraWithFleetRelations, options: 
       ? {
           enabled: source.active,
           intervalMinutes: source.photoIntervalMinutes,
+          timeZone: source.timeZone,
+          dailyWindow: serializeDailyWindow(source),
           nextCaptureAt: nextSourceCaptureAt(source, now),
+        }
+      : null,
+    illumination: source
+      ? {
+          policy: source.illuminationPolicy === "only-while-on" ? "only-while-on" : "unrestricted",
+          outletId: source.illuminationOutletId,
+          outletKey: source.illuminationOutlet?.key ?? null,
+          outletLabel: source.illuminationOutlet?.name ?? null,
+          observedState: source.illuminationOutlet?.actualState ?? null,
+          observedAt: source.illuminationOutlet?.stateObservedAt?.toISOString() ?? null,
         }
       : null,
     reliability: {
@@ -297,6 +329,11 @@ export type ConfigureFleetCameraInput = {
   fallbackMode?: { width: number; height: number; inputFormat?: string | null; frameRate?: string | null; attempts?: number } | null;
   serializeOnNode?: boolean;
   schedule?: { enabled?: boolean; intervalMinutes?: number; startAt?: Date };
+  timeZone?: string;
+  dailyWindowEnabled?: boolean;
+  dailyWindowStartMinutes?: number | null;
+  dailyWindowEndMinutes?: number | null;
+  illumination?: { outletId?: string | null; policy?: "unrestricted" | "only-while-on" };
 };
 
 export async function configureFleetCamera(prisma: PrismaClient, input: ConfigureFleetCameraInput) {
@@ -330,18 +367,39 @@ export async function configureFleetCamera(prisma: PrismaClient, input: Configur
       requestedBy: "fleet-camera-config",
     });
   }
-  if (input.captureSourceId || input.captureSourceName !== undefined || input.rotation !== undefined || input.flipHorizontal !== undefined || input.flipVertical !== undefined || input.schedule) {
+  if (
+    input.captureSourceId ||
+    input.captureSourceName !== undefined ||
+    input.rotation !== undefined ||
+    input.flipHorizontal !== undefined ||
+    input.flipVertical !== undefined ||
+    input.schedule ||
+    input.timeZone !== undefined ||
+    input.dailyWindowEnabled !== undefined ||
+    input.dailyWindowStartMinutes !== undefined ||
+    input.dailyWindowEndMinutes !== undefined ||
+    input.illumination
+  ) {
     const captureSourceId = input.captureSourceId ?? camera.assignments[0]?.captureSourceId ?? camera.captureSourceId;
     if (captureSourceId) {
+      const configData = await captureSourceConfigUpdateData(prisma, captureSourceId, {
+        name: input.captureSourceName,
+        active: input.schedule?.enabled,
+        intervalMinutes: input.schedule?.intervalMinutes,
+        timeZone: input.timeZone,
+        dailyWindowEnabled: input.dailyWindowEnabled,
+        dailyWindowStartMinutes: input.dailyWindowStartMinutes,
+        dailyWindowEndMinutes: input.dailyWindowEndMinutes,
+        illuminationOutletId: input.illumination?.outletId,
+        illuminationPolicy: input.illumination?.policy,
+      });
       await prisma.captureSource.update({
         where: { id: captureSourceId },
         data: {
-          name: input.captureSourceName?.trim(),
+          ...configData,
           rotation: input.rotation,
           flipHorizontal: input.flipHorizontal,
           flipVertical: input.flipVertical,
-          active: input.schedule?.enabled,
-          photoIntervalMinutes: input.schedule?.intervalMinutes,
           captureStartAt: input.schedule?.startAt,
         },
       });
@@ -476,6 +534,7 @@ function serializeLocalDiscoveryCamera(camera: LocalCamera, input: { nodeName: s
     supportedModes: flattenCameraModes(camera.formats ?? []),
     orientation: { rotation: 0, flipHorizontal: false, flipVertical: false },
     schedule: null,
+    illumination: null,
     reliability: { warmupFrames: null, warmupSeconds: null, captureAttempts: null, fallbackMode: null, persistentFallbackAllowed: false },
     lastCaptureAt: null,
     lastCaptureStatus: null,

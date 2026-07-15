@@ -12,7 +12,9 @@ import { defaultCaptureSourceDirectory, isDirectoryUsable } from "@/lib/projectP
 import { prisma } from "@/lib/prisma";
 import { normalizeCameraInputFormat } from "@/lib/cameraModes";
 import { isValidRotation } from "@/lib/orientation";
-import { requireValidTimeZone, systemTimeZone } from "@/lib/timezone";
+import { defaultCaptureSourceScheduleForNode } from "@/lib/captureSourceDefaults";
+import { validateCaptureWindowConfig } from "@/lib/schedule";
+import { requireValidTimeZone } from "@/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -57,6 +59,43 @@ export async function POST(request: Request) {
     const height = requiredPositiveInt(body?.height, "height");
     const explicitProfileId = optionalString(body?.cameraProfileId);
     const inputFormat = body?.inputFormat === undefined ? null : normalizeCameraInputFormat(String(body.inputFormat));
+    const scheduleDefaults = defaultCaptureSourceScheduleForNode(null);
+    const timeZone = body?.timeZone === undefined ? scheduleDefaults.timeZone : requireValidTimeZone(body.timeZone);
+    const captureWindowEnabled =
+      body?.dailyWindowEnabled !== undefined
+        ? body.dailyWindowEnabled === true
+        : body?.captureWindowEnabled === undefined
+          ? scheduleDefaults.captureWindowEnabled
+          : body.captureWindowEnabled === true;
+    const captureWindowStartMinutes =
+      body?.dailyWindowStartMinutes !== undefined
+        ? body.dailyWindowStartMinutes === null
+          ? null
+          : Number(body.dailyWindowStartMinutes)
+        : body?.captureWindowStartMinutes === undefined
+        ? scheduleDefaults.captureWindowStartMinutes
+        : body.captureWindowStartMinutes === null
+          ? null
+          : Number(body.captureWindowStartMinutes);
+    const captureWindowEndMinutes =
+      body?.dailyWindowEndMinutes !== undefined
+        ? body.dailyWindowEndMinutes === null
+          ? null
+          : Number(body.dailyWindowEndMinutes)
+        : body?.captureWindowEndMinutes === undefined
+        ? scheduleDefaults.captureWindowEndMinutes
+        : body.captureWindowEndMinutes === null
+          ? null
+          : Number(body.captureWindowEndMinutes);
+    const windowErrors = validateCaptureWindowConfig({
+      timeZone,
+      captureWindowEnabled,
+      captureWindowStartMinutes,
+      captureWindowEndMinutes,
+    });
+    if (windowErrors.length > 0) {
+      return badRequest(windowErrors.join(" "));
+    }
 
     const source = await prisma.$transaction(async (tx) => {
       const profile =
@@ -89,18 +128,17 @@ export async function POST(request: Request) {
           flipVertical: body?.flipVertical === true,
           captureDirectory,
           active: body?.active !== false,
-          photoIntervalMinutes: requiredPositiveInt(body?.photoIntervalMinutes, "photoIntervalMinutes"),
+          photoIntervalMinutes:
+            body?.intervalMinutes !== undefined
+              ? requiredPositiveInt(body.intervalMinutes, "intervalMinutes")
+              : body?.photoIntervalMinutes === undefined
+              ? scheduleDefaults.photoIntervalMinutes
+              : requiredPositiveInt(body.photoIntervalMinutes, "photoIntervalMinutes"),
           captureStartAt: optionalDate(body?.captureStartAt),
-          timeZone: body?.timeZone === undefined ? systemTimeZone() : requireValidTimeZone(body.timeZone),
-          captureWindowEnabled: body?.captureWindowEnabled === true,
-          captureWindowStartMinutes:
-            body?.captureWindowStartMinutes === undefined || body?.captureWindowStartMinutes === null
-              ? null
-              : Number(body.captureWindowStartMinutes),
-          captureWindowEndMinutes:
-            body?.captureWindowEndMinutes === undefined || body?.captureWindowEndMinutes === null
-              ? null
-              : Number(body.captureWindowEndMinutes),
+          timeZone,
+          captureWindowEnabled,
+          captureWindowStartMinutes,
+          captureWindowEndMinutes,
         },
       });
     });

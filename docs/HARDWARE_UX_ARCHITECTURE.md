@@ -28,6 +28,10 @@ Implemented on 2026-07-15:
 - `getEffectiveProjectCaptureSchedule()` owns the effective schedule for direct-local and CaptureSource projects.
 - `GET /api/projects/:projectId/capture-summary` exposes the effective schedule, selected camera/source, latest capture, next capture, and source degradation state.
 - `GET /api/nodes/summary` returns one node-like summary list with the current installation first and attached nodes after it.
+- Shared `CaptureSource` schedules now own physical cadence, timezone, active daily window, illumination policy, and scheduled occurrence history.
+- New greenhouse node CaptureSources default to 15-minute cadence and an `America/New_York` active window of `08:00` inclusive through `00:00` exclusive on the following local day.
+- `ProjectViewport` owns CaptureSource project sampling through `samplingEnabled`, `samplingIntervalMinutes`, `samplingAnchorAt`, and `lastSampledSlotAt`.
+- `GET /api/projects/:projectId/camera-summary` exposes the composed Camera-tab contract for source cadence, project sampling, illumination state, latest capture, and recent occurrence.
 
 ## Dashboard Data Contracts
 
@@ -89,6 +93,68 @@ Contract notes:
 - CaptureSource projects use CaptureSource-owned schedule fields.
 - Stale project interval/window values on a CaptureSource project are reported through `legacyProjectSchedulePresent`, not presented as the effective schedule.
 - Conflicts are structured instead of silently merging contradictory records.
+
+### Project Camera Summary
+
+`GET /api/projects/:projectId/camera-summary` exposes the backend composition Claude should use for the future project Camera tab:
+
+```ts
+type ProjectCameraSummary = {
+  mode: "none" | "direct-local" | "capture-source";
+  camera: {
+    id: string;
+    displayName: string;
+    reportedName: string | null;
+    nodeName: string;
+    available: boolean;
+    configurationUrl: string;
+    detailsUrl: string;
+  } | null;
+  source: {
+    id: string;
+    name: string;
+    enabled: boolean;
+    cadence: {
+      intervalMinutes: number;
+      timeZone: string;
+      dailyWindow: { enabled: boolean; start: string | null; end: string | null; crossesMidnight: boolean };
+      nextCaptureAt: string | null;
+    };
+    illumination: {
+      policy: "unrestricted" | "only-while-on";
+      outletId: string | null;
+      outletKey: string | null;
+      outletLabel: string | null;
+      observedState: boolean | null;
+      observedAt: string | null;
+    };
+    mode: { width: number; height: number; inputFormat: string; frameRate: string | null } | null;
+  } | null;
+  projectSampling: {
+    enabled: boolean;
+    intervalMinutes: number | null;
+    nextSampleAt: string | null;
+    lastSampleAt: string | null;
+    missingRecentSampleCount: number;
+  };
+  latestCapture: {
+    scheduledFor: string | null;
+    capturedAt: string | null;
+    validationStatus: string;
+    fallbackUsed: boolean;
+    projectPhotoId: string | null;
+  } | null;
+  recentOccurrence: { status: string; skipReason: string | null; scheduledFor: string } | null;
+  legacy: { directProjectSchedulePresent: boolean; conflict: string | null };
+};
+```
+
+Contract notes:
+
+- The source cadence is independent of project sampling.
+- The greenhouse default window is represented as start-inclusive and end-exclusive, so `00:00` is the boundary at the end of the operating day, not an empty same-day window.
+- Manual Capture Now bypasses scheduled illumination eligibility but reports `illuminationWarning` when the observed outlet is off.
+- Scheduled only-while-on skips are occurrence records, not failed camera captures.
 
 ### Unified Node Summary
 

@@ -167,10 +167,14 @@ export async function POST(request: Request) {
         uploadDurationMs: metadata.uploadStartedAt ? Math.max(0, ingestAt.getTime() - metadata.uploadStartedAt.getTime()) : undefined,
       },
     });
+    const relatedJob = await prisma.agentCaptureJob.findFirst({
+      where: { captureId: metadata.captureId },
+      select: { manualProjectId: true },
+    });
 
     if (runFanOut) {
       try {
-        await runViewportFanOut(sourceCapture.id);
+        await runViewportFanOut(sourceCapture.id, { projectId: relatedJob?.manualProjectId ?? null });
       } catch (error) {
         // The SourceCapture is already durably stored - a fan-out problem
         // must never turn a successfully accepted upload into a failure

@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { badRequest, notFound, optionalString, readJson, requiredPositiveInt } from "@/lib/http";
 import { isValidRotation } from "@/lib/orientation";
 import { prisma } from "@/lib/prisma";
-import { requireValidTimeZone } from "@/lib/timezone";
 import { normalizeCameraInputFormat } from "@/lib/cameraModes";
 import { cameraSupportsMode, parseNodeCameraFormats } from "@/lib/operations/nodeCameras";
+import { captureSourceConfigUpdateData } from "@/lib/operations/captureSourceConfig";
 
 export const runtime = "nodejs";
 
@@ -18,6 +19,7 @@ export async function GET(_request: Request, context: Context) {
     where: { id: sourceId },
     include: {
       cameraProfile: true,
+      illuminationOutlet: true,
       sourceCaptures: { orderBy: { timestamp: "desc" }, take: 1 },
       viewports: {
         where: { active: true },
@@ -45,13 +47,53 @@ export async function PATCH(request: Request, context: Context) {
   const body = await readJson(request);
 
   try {
-    const data: Record<string, unknown> = {};
+    const data: Prisma.CaptureSourceUpdateInput = await captureSourceConfigUpdateData(prisma, sourceId, {
+      name: body?.name,
+      active: body?.active === undefined ? undefined : body.active === true,
+      intervalMinutes:
+        body?.intervalMinutes !== undefined
+          ? Number(body.intervalMinutes)
+          : body?.photoIntervalMinutes !== undefined
+            ? Number(body.photoIntervalMinutes)
+            : undefined,
+      timeZone: body?.timeZone,
+      dailyWindowEnabled:
+        body?.dailyWindowEnabled !== undefined
+          ? body.dailyWindowEnabled === true
+          : body?.captureWindowEnabled !== undefined
+            ? body.captureWindowEnabled === true
+            : undefined,
+      dailyWindowStartMinutes:
+        body?.dailyWindowStartMinutes !== undefined
+          ? body.dailyWindowStartMinutes === null
+            ? null
+            : Number(body.dailyWindowStartMinutes)
+          : body?.captureWindowStartMinutes !== undefined
+            ? body.captureWindowStartMinutes === null
+              ? null
+              : Number(body.captureWindowStartMinutes)
+            : undefined,
+      dailyWindowEndMinutes:
+        body?.dailyWindowEndMinutes !== undefined
+          ? body.dailyWindowEndMinutes === null
+            ? null
+            : Number(body.dailyWindowEndMinutes)
+          : body?.captureWindowEndMinutes !== undefined
+            ? body.captureWindowEndMinutes === null
+              ? null
+              : Number(body.captureWindowEndMinutes)
+            : undefined,
+      illuminationOutletId: body?.illuminationOutletId,
+      illuminationPolicy: body?.illuminationPolicy,
+    });
 
-    if (body?.name !== undefined) data.name = String(body.name).trim();
     if (body?.cameraDevice !== undefined) data.cameraDevice = String(body.cameraDevice).trim();
     if (body?.cameraName !== undefined) data.cameraName = optionalString(body.cameraName);
     if (body?.cameraStableId !== undefined) data.cameraStableId = optionalString(body.cameraStableId);
-    if (body?.cameraProfileId !== undefined) data.cameraProfileId = optionalString(body.cameraProfileId);
+    if (body?.cameraProfileId !== undefined) {
+      const cameraProfileId = optionalString(body.cameraProfileId);
+      data.cameraProfile = cameraProfileId ? { connect: { id: cameraProfileId } } : { disconnect: true };
+    }
     if (body?.width !== undefined) data.width = requiredPositiveInt(body.width, "width");
     if (body?.height !== undefined) data.height = requiredPositiveInt(body.height, "height");
     if (body?.rotation !== undefined) {
@@ -63,21 +105,7 @@ export async function PATCH(request: Request, context: Context) {
     }
     if (body?.flipHorizontal !== undefined) data.flipHorizontal = body.flipHorizontal === true;
     if (body?.flipVertical !== undefined) data.flipVertical = body.flipVertical === true;
-    if (body?.active !== undefined) data.active = body.active === true;
-    if (body?.photoIntervalMinutes !== undefined) {
-      data.photoIntervalMinutes = requiredPositiveInt(body.photoIntervalMinutes, "photoIntervalMinutes");
-    }
     if (body?.captureStartAt !== undefined) data.captureStartAt = new Date(body.captureStartAt);
-    if (body?.timeZone !== undefined) data.timeZone = requireValidTimeZone(body.timeZone);
-    if (body?.captureWindowEnabled !== undefined) data.captureWindowEnabled = body.captureWindowEnabled === true;
-    if (body?.captureWindowStartMinutes !== undefined) {
-      data.captureWindowStartMinutes =
-        body.captureWindowStartMinutes === null ? null : Number(body.captureWindowStartMinutes);
-    }
-    if (body?.captureWindowEndMinutes !== undefined) {
-      data.captureWindowEndMinutes =
-        body.captureWindowEndMinutes === null ? null : Number(body.captureWindowEndMinutes);
-    }
 
     const source = await prisma.$transaction(async (tx) => {
       const updated = await tx.captureSource.update({ where: { id: sourceId }, data });

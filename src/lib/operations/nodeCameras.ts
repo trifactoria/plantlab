@@ -2,6 +2,7 @@ import path from "node:path";
 import type { CaptureSource, NodeCamera, NodeCameraAssignment, PlantLabNode, Prisma, PrismaClient } from "@prisma/client";
 import { usbPathSuffix } from "../cameraIdentity";
 import { findCameraMode, normalizeCameraFormats, normalizeCameraInputFormat, preferredCameraMode } from "../cameraModes";
+import { defaultCaptureSourceScheduleForNode } from "../captureSourceDefaults";
 import { resolveCaptureSourcesDataDir } from "../paths.server";
 import type { CameraFormat } from "../v4l2";
 
@@ -136,6 +137,7 @@ export async function attachNodeCamera(
     });
   } else {
     const name = (input.newCaptureSourceName ?? `${node.name} ${nodeCameraBaseDisplayName(camera)}`).trim();
+    const scheduleDefaults = defaultCaptureSourceScheduleForNode(node);
     captureSource = await prisma.captureSource.create({
       data: {
         name,
@@ -145,7 +147,11 @@ export async function attachNodeCamera(
         width: input.width,
         height: input.height,
         captureDirectory: path.join(resolveCaptureSourcesDataDir(), name.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase()),
-        photoIntervalMinutes: 60,
+        photoIntervalMinutes: scheduleDefaults.photoIntervalMinutes,
+        timeZone: scheduleDefaults.timeZone,
+        captureWindowEnabled: scheduleDefaults.captureWindowEnabled,
+        captureWindowStartMinutes: scheduleDefaults.captureWindowStartMinutes,
+        captureWindowEndMinutes: scheduleDefaults.captureWindowEndMinutes,
         active: true,
       },
     });

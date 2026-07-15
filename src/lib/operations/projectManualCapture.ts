@@ -9,8 +9,23 @@ if (typeof window !== "undefined") {
 
 export type ProjectManualCaptureResult =
   | { mode: "direct-local"; status: "completed"; photoId: string; savedPath: string }
-  | { mode: "local-capture-source"; status: "completed"; sourceCaptureId: string; fanOutPhotoIds: string[] }
-  | { mode: "remote-job"; status: "queued"; jobId: string; captureSourceId: string; reused: boolean };
+  | {
+      mode: "local-capture-source";
+      status: "completed";
+      sourceCaptureId: string;
+      fanOutPhotoIds: string[];
+      illuminationState: boolean | null;
+      illuminationWarning: boolean;
+    }
+  | {
+      mode: "remote-job";
+      status: "queued";
+      jobId: string;
+      captureSourceId: string;
+      reused: boolean;
+      illuminationState: boolean | null;
+      illuminationWarning: boolean;
+    };
 
 export async function captureProjectManually(
   prisma: PrismaClient,
@@ -33,6 +48,7 @@ export async function captureProjectManually(
                 orderBy: { updatedAt: "desc" },
                 take: 1,
               },
+              illuminationOutlet: true,
             },
           },
         },
@@ -47,6 +63,7 @@ export async function captureProjectManually(
   const viewport = project.viewports[0] ?? null;
   if (viewport) {
     const source = viewport.captureSource;
+    const illumination = manualIlluminationMetadata(source);
     if (!source.active) {
       throw new Error("The selected capture source is inactive.");
     }
@@ -54,12 +71,13 @@ export async function captureProjectManually(
     const assignment = source.assignments[0] ?? null;
     if (!assignment) {
       const captured = await captureSourcePhoto(source.id);
-      const fanOut = await runViewportFanOut(captured.sourceCapture.id);
+      const fanOut = await runViewportFanOut(captured.sourceCapture.id, { projectId });
       return {
         mode: "local-capture-source",
         status: "completed",
         sourceCaptureId: captured.sourceCapture.id,
         fanOutPhotoIds: fanOut.projectResults.flatMap((result) => (result.photoId ? [result.photoId] : [])),
+        ...illumination,
       };
     }
 
@@ -80,12 +98,13 @@ export async function captureProjectManually(
       where: {
         captureSourceId: source.id,
         scheduledFor: null,
+        manualProjectId: project.id,
         status: { in: ["queued", "claimed"] },
       },
       orderBy: { requestedAt: "asc" },
     });
     if (existing) {
-      return { mode: "remote-job", status: "queued", jobId: existing.id, captureSourceId: source.id, reused: true };
+      return { mode: "remote-job", status: "queued", jobId: existing.id, captureSourceId: source.id, reused: true, ...illumination };
     }
 
     const job = await prisma.agentCaptureJob.create({
@@ -93,10 +112,11 @@ export async function captureProjectManually(
         nodeId: assignment.nodeId,
         assignmentId: assignment.id,
         captureSourceId: source.id,
+        manualProjectId: project.id,
         status: "queued",
       },
     });
-    return { mode: "remote-job", status: "queued", jobId: job.id, captureSourceId: source.id, reused: false };
+    return { mode: "remote-job", status: "queued", jobId: job.id, captureSourceId: source.id, reused: false, ...illumination };
   }
 
   if (project.cameraDevice) {
@@ -108,6 +128,17 @@ export async function captureProjectManually(
   }
 
   throw new Error("This project has no configured camera or capture source.");
+}
+
+function manualIlluminationMetadata(source: {
+  illuminationPolicy: string;
+  illuminationOutlet: { actualState: boolean | null } | null;
+}) {
+  const illuminationState = source.illuminationOutlet?.actualState ?? null;
+  return {
+    illuminationState,
+    illuminationWarning: source.illuminationPolicy === "only-while-on" && illuminationState === false,
+  };
 }
 
 export async function getProjectCaptureJobStatus(prisma: PrismaClient, projectId: string, jobId: string) {

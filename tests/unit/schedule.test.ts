@@ -93,6 +93,34 @@ describe("timezone-aware capture windows", () => {
     expect(isInsideCaptureWindow(new Date("2026-07-10T16:00:00Z"), overnight)).toBe(false);
   });
 
+  it("treats the greenhouse 08:00-00:00 window as start-inclusive and midnight-exclusive", () => {
+    const greenhouse = {
+      timeZone: "America/New_York",
+      captureWindowEnabled: true,
+      captureWindowStartMinutes: 8 * 60,
+      captureWindowEndMinutes: 0,
+    };
+
+    expect(isInsideCaptureWindow(new Date("2026-07-15T11:45:00.000Z"), greenhouse)).toBe(false);
+    expect(isInsideCaptureWindow(new Date("2026-07-15T12:00:00.000Z"), greenhouse)).toBe(true);
+    expect(isInsideCaptureWindow(new Date("2026-07-16T03:45:00.000Z"), greenhouse)).toBe(true);
+    expect(isInsideCaptureWindow(new Date("2026-07-16T04:00:00.000Z"), greenhouse)).toBe(false);
+  });
+
+  it("does not create a duplicate or inverted midnight greenhouse slot", () => {
+    const next = nextPermittedCaptureTime({
+      timeZone: "America/New_York",
+      captureWindowEnabled: true,
+      captureWindowStartMinutes: 8 * 60,
+      captureWindowEndMinutes: 0,
+      startAt: new Date("2026-07-15T12:00:00.000Z"),
+      intervalMinutes: 15,
+      now: new Date("2026-07-16T03:50:00.000Z"),
+    });
+
+    expect(next?.toISOString()).toBe("2026-07-16T12:00:00.000Z");
+  });
+
   it("returns the next aligned occurrence inside the allowed window", () => {
     const next = nextPermittedCaptureTime({
       ...baseConfig,
@@ -142,7 +170,7 @@ describe("timezone-aware capture windows", () => {
       now: new Date("2026-11-01T05:31:00Z"),
     });
 
-    expect(next?.toISOString()).toBe("2026-11-01T07:00:00.000Z");
+    expect(next?.toISOString()).toBe("2026-11-02T06:00:00.000Z");
   });
 
   it("groups photos by project-local date", () => {

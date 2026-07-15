@@ -6,6 +6,7 @@ import { nextCapturePath } from "./camera";
 import { applyOrientation, parseRotation } from "./orientation";
 import { createPhotoRecord } from "./photoIngest";
 import { ensureDirectoryExists } from "./projectPaths.server";
+import { resolveDueSampleViewportsForSourceCapture } from "./projectSampling";
 import { prisma } from "./prisma";
 
 type TxClient = Prisma.TransactionClient;
@@ -102,7 +103,10 @@ export type ViewportFanOutResult = {
  * recorded in that project's result entry and never prevents, rolls back,
  * or gets misreported against any other project's result.
  */
-export async function runViewportFanOut(sourceCaptureId: string): Promise<ViewportFanOutResult> {
+export async function runViewportFanOut(
+  sourceCaptureId: string,
+  options: { projectId?: string | null } = {},
+): Promise<ViewportFanOutResult> {
   const sourceCapture = await prisma.sourceCapture.findUnique({
     where: { id: sourceCaptureId },
     include: { captureSource: true },
@@ -112,11 +116,19 @@ export async function runViewportFanOut(sourceCaptureId: string): Promise<Viewpo
     throw new Error(`Source capture not found: ${sourceCaptureId}`);
   }
 
-  const viewports = await resolveActiveViewportsForSource(prisma, sourceCapture.captureSourceId, sourceCapture.timestamp);
+  const resolved = await resolveDueSampleViewportsForSourceCapture(prisma, sourceCapture);
+  const viewports =
+    resolved.mode === "manual"
+      ? resolved.viewports.map((viewport) => ({ viewport, sampleSlotAt: null }))
+      : resolved.viewports;
+  const targetViewports = options.projectId
+    ? viewports.filter(({ viewport }) => viewport.projectId === options.projectId)
+    : viewports;
   const projectResults: ViewportFanOutProjectResult[] = [];
 
-  for (const viewport of viewports) {
+  for (const { viewport, sampleSlotAt } of targetViewports) {
     let projectName = viewport.projectId;
+    let sampleId: string | null = null;
 
     try {
       const project = await prisma.project.findUnique({ where: { id: viewport.projectId } });
@@ -125,6 +137,27 @@ export async function runViewportFanOut(sourceCaptureId: string): Promise<Viewpo
         continue;
       }
       projectName = project.name;
+
+      if (sampleSlotAt) {
+        try {
+          const sample = await prisma.projectSourceSample.create({
+            data: {
+              projectId: project.id,
+              viewportId: viewport.id,
+              captureSourceId: sourceCapture.captureSourceId,
+              sampleSlotAt,
+              sourceCaptureId: sourceCapture.id,
+              status: "pending",
+            },
+          });
+          sampleId = sample.id;
+        } catch {
+          // Unique constraints enforce "one project sample per slot" and
+          // "one source capture per project". Treat a duplicate as
+          // idempotent fan-out rather than a failure.
+          continue;
+        }
+      }
 
       const derived = await cropDerivedImage(sourceCapture, viewport);
       await ensureDirectoryExists(project.localPhotoDirectory);
@@ -152,12 +185,28 @@ export async function runViewportFanOut(sourceCaptureId: string): Promise<Viewpo
           derivedWidth: derived.width,
           derivedHeight: derived.height,
         });
+        if (sampleId) {
+          await prisma.projectSourceSample.update({
+            where: { id: sampleId },
+            data: { status: "linked", photoId: photo.id },
+          });
+          await prisma.projectViewport.update({
+            where: { id: viewport.id },
+            data: { lastSampledSlotAt: sampleSlotAt },
+          });
+        }
       } catch (error) {
         await unlink(savedPath).catch(() => undefined);
         throw error;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Fan-out failed for this project.";
+      if (sampleId) {
+        await prisma.projectSourceSample.update({
+          where: { id: sampleId },
+          data: { status: "failed", missingReason: message.slice(0, 500) },
+        }).catch(() => undefined);
+      }
       projectResults.push({
         projectId: viewport.projectId,
         projectName,

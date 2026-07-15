@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { checkCaptureEligibility } from "@/lib/captureEligibility";
-import { projectCaptureSummary, setProjectCaptureSource, validateProjectCaptureSourceSelection } from "@/lib/operations/projectCapture";
+import {
+  projectCaptureSummary,
+  setProjectCaptureSource,
+  updateActiveProjectCaptureSampling,
+  validateProjectCaptureSourceSelection,
+} from "@/lib/operations/projectCapture";
 import {
   badRequest,
   nullableDate,
@@ -228,10 +233,21 @@ export async function PATCH(request: Request, context: Context) {
 
       if (nextCaptureSourceId !== undefined) {
         if (nextCaptureSourceId) {
-          await setProjectCaptureSource(tx, { projectId, captureSourceId: nextCaptureSourceId });
+          await setProjectCaptureSource(tx, {
+            projectId,
+            captureSourceId: nextCaptureSourceId,
+            samplingIntervalMinutes: nextPhotoIntervalMinutes ?? updated.photoIntervalMinutes,
+            samplingEnabled: mergedCaptureEnabled,
+          });
         } else {
           await tx.projectViewport.updateMany({ where: { projectId, active: true }, data: { active: false } });
         }
+      } else if (mergedCaptureSourceId) {
+        await updateActiveProjectCaptureSampling(tx, {
+          projectId,
+          samplingIntervalMinutes: nextPhotoIntervalMinutes,
+          samplingEnabled: nextCaptureEnabled,
+        });
       }
 
       return updated;

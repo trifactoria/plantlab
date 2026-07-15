@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { computeCameraStatus } from "../hardware/cameraStatus";
+import { upsertCaptureSourceOccurrence } from "../captureSourceOccurrence";
 import { normalizeCameraFormats, type CameraFormat } from "../cameraModes";
 import { authenticateNodeCredential, type AuthenticatedNode } from "./nodeCredentials";
 import { serializeCapabilities } from "./capabilities";
@@ -469,6 +470,7 @@ export async function claimJob(prisma: PrismaClient, nodeId: string, jobId: stri
 }
 
 export async function failJob(prisma: PrismaClient, nodeId: string, jobId: string, errorMessage: string) {
+  const job = await prisma.agentCaptureJob.findFirst({ where: { id: jobId, nodeId } });
   const updated = await prisma.agentCaptureJob.updateMany({
     where: { id: jobId, nodeId, status: { in: ["queued", "claimed"] } },
     data: {
@@ -477,6 +479,15 @@ export async function failJob(prisma: PrismaClient, nodeId: string, jobId: strin
       errorMessage: errorMessage.slice(0, 2000),
     },
   });
+  if (updated.count > 0 && job?.scheduledFor) {
+    await upsertCaptureSourceOccurrence(prisma, {
+      captureSourceId: job.captureSourceId,
+      scheduledFor: job.scheduledFor,
+      status: "failed",
+      skipReason: errorMessage.slice(0, 500),
+      agentJobId: job.id,
+    });
+  }
   return updated.count > 0;
 }
 
@@ -513,6 +524,29 @@ export async function completeJob(prisma: PrismaClient, nodeId: string, jobId: s
     await prisma.sourceCapture.update({
       where: { id: sourceCapture.id },
       data: { scheduledFor: job.scheduledFor },
+    });
+  }
+
+  if (job?.scheduledFor) {
+    await upsertCaptureSourceOccurrence(prisma, {
+      captureSourceId: job.captureSourceId,
+      scheduledFor: job.scheduledFor,
+      status: "captured",
+      agentJobId: job.id,
+      sourceCaptureId: sourceCapture.id,
+      requestedMode: {
+        width: job.effectiveWidth ?? sourceCapture.originalWidth,
+        height: job.effectiveHeight ?? sourceCapture.originalHeight,
+        inputFormat: job.effectiveInputFormat ?? sourceCapture.pixelFormat,
+        frameRate: job.effectiveFrameRate,
+      },
+      effectiveMode: {
+        width: job.effectiveWidth ?? sourceCapture.originalWidth,
+        height: job.effectiveHeight ?? sourceCapture.originalHeight,
+        inputFormat: job.effectiveInputFormat ?? sourceCapture.pixelFormat,
+        frameRate: job.effectiveFrameRate,
+      },
+      capturedAt: sourceCapture.timestamp,
     });
   }
 

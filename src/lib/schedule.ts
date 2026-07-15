@@ -99,10 +99,10 @@ export function isInsideCaptureWindow(date: Date, config: CaptureWindowConfig) {
   const minutes = local.hour * 60 + local.minute;
 
   if (start < end) {
-    return minutes >= start && minutes <= end;
+    return minutes >= start && minutes < end;
   }
 
-  return minutes >= start || minutes <= end;
+  return minutes >= start || minutes < end;
 }
 
 function localWallMinuteKey(date: Date, timeZone: string) {

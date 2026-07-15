@@ -132,7 +132,13 @@ export async function POST(request: Request) {
         },
       });
       if (captureSourceId) {
-        await setProjectCaptureSource(tx, { projectId: created.id, captureSourceId, effectiveFrom: captureStartAt });
+        await setProjectCaptureSource(tx, {
+          projectId: created.id,
+          captureSourceId,
+          effectiveFrom: captureStartAt,
+          samplingIntervalMinutes: photoIntervalMinutes,
+          samplingEnabled: isTestProject ? false : captureEnabled,
+        });
       }
       return created;
     });

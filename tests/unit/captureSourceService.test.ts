@@ -141,10 +141,22 @@ describe("CaptureSourceScheduler", () => {
     const source = await makeSource({ captureStartAt: startAt, photoIntervalMinutes: 1 });
 
     let fanOutRuns = 0;
-    const existingCapture = { id: "already-captured-slot" };
+    const existingCapture = await prisma.sourceCapture.create({
+      data: {
+        captureSourceId: source.id,
+        timestamp: startAt,
+        scheduledFor: null,
+        originalPath: "/tmp/already-captured.jpg",
+        originalWidth: 100,
+        originalHeight: 100,
+        workingWidth: 100,
+        workingHeight: 100,
+        pixelFormat: "mjpeg",
+      },
+    });
 
     const captureSourcePhoto: CaptureSourceFn = async () => ({
-      sourceCapture: existingCapture as never,
+      sourceCapture: existingCapture,
       savedPath: "/tmp/already-captured.jpg",
       alreadyExisted: true,
     });

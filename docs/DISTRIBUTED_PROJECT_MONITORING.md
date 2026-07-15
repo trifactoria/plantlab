@@ -33,12 +33,21 @@ The initial canonical project binding is an active full-frame
 - `captureSourceId`
 - `cropX=0`, `cropY=0`, `cropWidth=1`, `cropHeight=1`
 - `active=true`
+- `samplingEnabled`
+- `samplingIntervalMinutes`
+- `samplingAnchorAt`
+- `lastSampledSlotAt`
 
 Switching a project source deactivates the previous active viewport and
 creates a new full-frame viewport. Existing photos and source captures are
 not deleted. Existing direct-local projects remain classified as
 `direct-local` when they have `Project.cameraDevice` and no active
 `ProjectViewport`.
+
+For CaptureSource projects, `ProjectViewport` owns the project sampling
+policy. `Project.photoIntervalMinutes` remains a compatibility fallback and
+is still authoritative for direct-local projects, but it is not the shared
+source's physical capture cadence.
 
 Project capture modes:
 
@@ -70,8 +79,8 @@ legacy direct-local fields to remain compatible.
 
 `CaptureSourceScheduler` is source-authoritative for shared source slots.
 One `CaptureSource` slot produces one full-resolution `SourceCapture`.
-Every active project viewport for that source consumes the uploaded source
-capture through viewport fan-out.
+Every active project viewport that is due under its project sampling policy
+consumes the uploaded source capture through viewport fan-out.
 
 Remote assigned sources queue one `AgentCaptureJob` per source and
 scheduled slot. The node captures and uploads through `agent-ingest`; ingest
@@ -81,6 +90,84 @@ the coordinator process.
 Project-specific schedules remain supported for legacy direct-local
 projects. The initial shared-source policy uses the `CaptureSource`
 schedule fields for deduplicated shared capture.
+
+CaptureSource schedule ownership:
+
+- base physical cadence is `CaptureSource.photoIntervalMinutes`;
+- default for newly configured greenhouse node sources is 15 minutes;
+- default greenhouse timezone is `America/New_York`;
+- default greenhouse active window is `08:00` inclusive through `00:00`
+  exclusive on the following local day;
+- existing explicit source schedules are preserved by migrations.
+
+Project sampling:
+
+- a project with 15-minute sampling may consume every eligible 15-minute source capture;
+- a project with 30-minute sampling consumes the nearest eligible source capture for each 30-minute project slot;
+- a project with 60-minute sampling consumes the nearest eligible source capture for each 60-minute project slot;
+- one `SourceCapture` may fan out to several projects;
+- project sampling never queues a second physical capture when a suitable shared source capture exists.
+
+The current matching algorithm uses the nearest project sample slot derived
+from `samplingAnchorAt` and `samplingIntervalMinutes`. The tolerance is half
+the source cadence. It is idempotent through the unique
+`projectId + viewportId + sampleSlotAt` sample key.
+
+## Illumination Policy
+
+A `CaptureSource` may optionally reference a `NodeOutlet` as illumination:
+
+- `illuminationPolicy="unrestricted"` captures according to source cadence
+  and active window regardless of outlet state.
+- `illuminationPolicy="only-while-on"` captures scheduled slots only when
+  the assigned outlet's observed `actualState` is `true`.
+
+The scheduler uses observed outlet state, not requested commands. If the
+light is off, it records a skipped occurrence with reason
+`illumination-off`. If state is unknown or unavailable, it records
+`illumination-state-unknown`. These skips are not camera hardware failures.
+
+Manual project capture bypasses source cadence, the active daily window, and
+only-while-on scheduled eligibility. It does not toggle the outlet. When the
+observed illumination outlet is off, the manual result includes
+`illuminationWarning: true` and `illuminationState: false`.
+
+## Source Occurrences
+
+Scheduled source slots are represented by `CaptureSourceOccurrence` when a
+logical due slot is queued, captured, skipped, or failed. The stable status
+vocabulary is:
+
+- `captured`
+- `queued`
+- `failed`
+- `expired`
+- `skipped-illumination-off`
+- `skipped-illumination-unknown`
+- `skipped-source-disabled`
+- `skipped-outside-window`
+
+The scheduler records logical due slots, not every polling interval.
+
+## Project Camera Summary
+
+`GET /api/projects/:projectId/camera-summary` returns the composed contract
+for Claude's future Camera tab:
+
+- `mode`: `none`, `direct-local`, or `capture-source`;
+- `camera`: selected camera display name, reported name, node, availability,
+  and backend-provided links;
+- `source.cadence`: source interval, timezone, daily window, and next source
+  capture;
+- `source.illumination`: policy, outlet identity, and observed state;
+- `source.mode`: currently configured physical mode;
+- `projectSampling`: enabled flag, interval, next sample, last sample, and
+  recent missing count;
+- `latestCapture`: latest shared source capture and project photo link when
+  available;
+- `recentOccurrence`: latest source slot decision;
+- `legacy`: compatibility schedule conflicts that should not be shown as
+  the physical source cadence.
 
 ## Project Sensor Bindings
 

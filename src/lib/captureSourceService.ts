@@ -4,6 +4,8 @@ import { nextPermittedCaptureTime } from "./schedule";
 import type { CaptureSourceResult } from "./sourceCapture";
 import type { ViewportFanOutResult } from "./viewportFanOut";
 import { consoleLogger, type CaptureLogger } from "./captureService";
+import { upsertCaptureSourceOccurrence } from "./captureSourceOccurrence";
+import { recordMissingProjectSamplesForSourceSlot } from "./projectSampling";
 
 export type CaptureSourceFn = (
   captureSourceId: string,
@@ -38,6 +40,7 @@ export type TickCaptureSourceResult = {
   sourceCaptureId?: string;
   agentCaptureJobId?: string;
   fanOut?: ViewportFanOutResult;
+  skipReason?: string;
   errorMessage?: string;
 };
 
@@ -84,6 +87,7 @@ export class CaptureSourceScheduler {
           orderBy: { updatedAt: "desc" },
           take: 1,
         },
+        illuminationOutlet: true,
       },
     });
     const seenIds = new Set<string>();
@@ -94,6 +98,8 @@ export class CaptureSourceScheduler {
       assignmentId: string | null;
       nodeId: string | null;
       remoteAssignmentAvailable: boolean;
+      illuminationPolicy: string;
+      illuminationOutlet: { id: string; key: string; name: string; actualState: boolean | null; stateObservedAt: Date | null; available: boolean } | null;
       captureStartAt: Date;
       photoIntervalMinutes: number;
       timeZone: string;
@@ -185,6 +191,8 @@ export class CaptureSourceScheduler {
           remoteAssignmentAvailable: assignment
             ? assignment.nodeCamera.available && assignment.nodeCamera.enabled && assignment.nodeCamera.retiredAt === null
             : false,
+          illuminationPolicy: source.illuminationPolicy,
+          illuminationOutlet: source.illuminationOutlet,
           captureStartAt: schedule.captureStartAt,
           photoIntervalMinutes: schedule.photoIntervalMinutes,
           timeZone: schedule.timeZone,
@@ -213,6 +221,8 @@ export class CaptureSourceScheduler {
     assignmentId: string | null;
     nodeId: string | null;
     remoteAssignmentAvailable: boolean;
+    illuminationPolicy: string;
+    illuminationOutlet: { id: string; key: string; name: string; actualState: boolean | null; stateObservedAt: Date | null; available: boolean } | null;
     captureStartAt: Date;
     photoIntervalMinutes: number;
     timeZone: string;
@@ -225,8 +235,51 @@ export class CaptureSourceScheduler {
     let result: TickCaptureSourceResult;
 
     try {
+      if (source.illuminationPolicy === "only-while-on") {
+        const outlet = source.illuminationOutlet;
+        if (!outlet || !outlet.available || typeof outlet.actualState !== "boolean") {
+          await upsertCaptureSourceOccurrence(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            status: "skipped-illumination-unknown",
+            skipReason: "illumination-state-unknown",
+          });
+          await recordMissingProjectSamplesForSourceSlot(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            reason: "illumination-state-unknown",
+          });
+          return { captureSourceId: source.id, status: "skipped", scheduledFor, skipReason: "illumination-state-unknown" };
+        }
+        if (!outlet.actualState) {
+          await upsertCaptureSourceOccurrence(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            status: "skipped-illumination-off",
+            skipReason: "illumination-off",
+          });
+          await recordMissingProjectSamplesForSourceSlot(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            reason: "illumination-off",
+          });
+          return { captureSourceId: source.id, status: "skipped", scheduledFor, skipReason: "illumination-off" };
+        }
+      }
+
       if (source.assignmentId && source.nodeId) {
         if (!source.remoteAssignmentAvailable) {
+          await upsertCaptureSourceOccurrence(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            status: "failed",
+            skipReason: "remote-assignment-unavailable",
+          });
+          await recordMissingProjectSamplesForSourceSlot(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            reason: "remote-assignment-unavailable",
+          });
           result = {
             captureSourceId: source.id,
             status: "failed",
@@ -241,6 +294,15 @@ export class CaptureSourceScheduler {
           orderBy: { requestedAt: "asc" },
         });
         if (existing) {
+          await upsertCaptureSourceOccurrence(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            status: existing.status === "completed" && existing.sourceCaptureId ? "captured" : existing.status === "failed" ? "failed" : "queued",
+            skipReason: existing.status === "failed" ? "remote-job-failed" : null,
+            agentJobId: existing.id,
+            sourceCaptureId: existing.sourceCaptureId,
+            capturedAt: existing.completedAt,
+          });
           result =
             existing.status === "failed"
               ? { captureSourceId: source.id, status: "failed", scheduledFor, agentCaptureJobId: existing.id, errorMessage: existing.errorMessage ?? "Remote capture job failed." }
@@ -259,6 +321,12 @@ export class CaptureSourceScheduler {
             captureSourceId: source.id,
             agentCaptureJobId: job.id,
             scheduledFor: scheduledFor.toISOString(),
+          });
+          await upsertCaptureSourceOccurrence(this.prisma, {
+            captureSourceId: source.id,
+            scheduledFor,
+            status: "queued",
+            agentJobId: job.id,
           });
           result = { captureSourceId: source.id, status: "queued", scheduledFor, agentCaptureJobId: job.id };
         }
@@ -279,6 +347,13 @@ export class CaptureSourceScheduler {
         this.logger.info("Source capture already existed for this slot, skipping fan-out", {
           captureSourceId: source.id,
           scheduledFor: scheduledFor.toISOString(),
+        });
+        await upsertCaptureSourceOccurrence(this.prisma, {
+          captureSourceId: source.id,
+          scheduledFor,
+          status: "captured",
+          sourceCaptureId: captured.sourceCapture.id,
+          capturedAt: captured.sourceCapture.timestamp,
         });
         result = {
           captureSourceId: source.id,
@@ -311,6 +386,25 @@ export class CaptureSourceScheduler {
           scheduledFor: scheduledFor.toISOString(),
           projectCount: fanOut.projectResults.length,
         });
+        await upsertCaptureSourceOccurrence(this.prisma, {
+          captureSourceId: source.id,
+          scheduledFor,
+          status: "captured",
+          sourceCaptureId: captured.sourceCapture.id,
+          requestedMode: {
+            width: captured.sourceCapture.originalWidth,
+            height: captured.sourceCapture.originalHeight,
+            inputFormat: captured.sourceCapture.pixelFormat,
+            frameRate: null,
+          },
+          effectiveMode: {
+            width: captured.sourceCapture.originalWidth,
+            height: captured.sourceCapture.originalHeight,
+            inputFormat: captured.sourceCapture.pixelFormat,
+            frameRate: null,
+          },
+          capturedAt: captured.sourceCapture.timestamp,
+        });
 
         result = {
           captureSourceId: source.id,
@@ -326,6 +420,17 @@ export class CaptureSourceScheduler {
         captureSourceId: source.id,
         scheduledFor: scheduledFor.toISOString(),
         error: message,
+      });
+      await upsertCaptureSourceOccurrence(this.prisma, {
+        captureSourceId: source.id,
+        scheduledFor,
+        status: "failed",
+        skipReason: message,
+      });
+      await recordMissingProjectSamplesForSourceSlot(this.prisma, {
+        captureSourceId: source.id,
+        scheduledFor,
+        reason: message.slice(0, 500),
       });
       result = { captureSourceId: source.id, status: "failed", scheduledFor, errorMessage: message };
     } finally {
