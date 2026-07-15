@@ -42,6 +42,7 @@ model Project {
   events        PlantEvent[]
   milestones    ProjectMilestone[]
   captureRuns   CaptureRun[]
+  sensorBindings ProjectSensorBinding[]
   cameraProfile CameraProfile?     @relation(fields: [cameraProfileId], references: [id], onDelete: SetNull)
   cropPreset    ProjectCropPreset?
   cropVersions  PlantCropVersion[]
@@ -198,6 +199,29 @@ model ProjectMilestone {
 
   @@unique([projectId, key])
   @@index([projectId, sortOrder])
+}
+
+model ProjectSensorBinding {
+  id         String    @id @default(cuid())
+  projectId  String
+  nodeId     String
+  sensorId   String
+  label      String?
+  role       String    @default("ambient")
+  enabled    Boolean   @default(true)
+  linkedAt   DateTime  @default(now())
+  unlinkedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  node    PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Restrict)
+  sensor  NodeSensor   @relation(fields: [sensorId], references: [id], onDelete: Restrict)
+
+  @@index([projectId, enabled])
+  @@index([sensorId])
+  @@index([nodeId])
+  @@index([projectId, sensorId, enabled])
 }
 
 model Plant {
@@ -476,6 +500,7 @@ model PlantLabNode {
   sensorReadings     SensorReading[]
   sensorDiagnostics  SensorDiagnostic[]
   sensorTestCommands SensorTestCommand[]
+  projectSensorBindings ProjectSensorBinding[]
   assignments        NodeCameraAssignment[]
   jobs               AgentCaptureJob[]
 
@@ -616,6 +641,7 @@ model NodeSensor {
   node        PlantLabNode       @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   readings    SensorReading[]
   diagnostics SensorDiagnostic[]
+  projectBindings ProjectSensorBinding[]
 
   @@unique([nodeId, key])
   @@index([nodeId])
@@ -863,6 +889,7 @@ model AgentCaptureJob {
   assignmentId    String
   captureSourceId String
   status          String    @default("queued")
+  scheduledFor    DateTime?
   requestedAt     DateTime  @default(now())
   claimedAt       DateTime?
   completedAt     DateTime?
@@ -879,6 +906,7 @@ model AgentCaptureJob {
   @@index([nodeId, status, requestedAt])
   @@index([assignmentId])
   @@index([captureSourceId])
+  @@index([captureSourceId, scheduledFor])
 }
 
 model NodeSensorConfigRevision {

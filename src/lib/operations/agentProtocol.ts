@@ -413,6 +413,7 @@ export type AgentCaptureJobPayload = {
   id: string;
   captureSourceId: string;
   assignmentId: string;
+  scheduledFor: string | null;
   camera: {
     stableId: string;
     devicePath: string;
@@ -457,6 +458,7 @@ export async function completeJob(prisma: PrismaClient, nodeId: string, jobId: s
     return { ok: false as const, status: 404, error: "The uploaded capture has not been ingested yet." };
   }
 
+  const job = await prisma.agentCaptureJob.findFirst({ where: { id: jobId, nodeId, status: "claimed", captureId } });
   const updated = await prisma.agentCaptureJob.updateMany({
     where: { id: jobId, nodeId, status: "claimed", captureId },
     data: {
@@ -467,6 +469,13 @@ export async function completeJob(prisma: PrismaClient, nodeId: string, jobId: s
   });
   if (updated.count === 0) {
     return { ok: false as const, status: 409, error: "The job was not in a claimable state for this node and captureId." };
+  }
+
+  if (job?.scheduledFor && !sourceCapture.scheduledFor) {
+    await prisma.sourceCapture.update({
+      where: { id: sourceCapture.id },
+      data: { scheduledFor: job.scheduledFor },
+    });
   }
 
   return { ok: true as const, sourceCapture };
@@ -489,6 +498,7 @@ export async function serializeJobForAgent(prisma: PrismaClient, job: Awaited<Re
     id: job.id,
     captureSourceId: job.captureSourceId,
     assignmentId: job.assignmentId,
+    scheduledFor: job.scheduledFor?.toISOString() ?? null,
     camera: {
       stableId: currentCamera.stableId,
       devicePath: currentCamera.devicePath,

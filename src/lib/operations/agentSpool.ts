@@ -16,6 +16,7 @@ export type SpoolRecord = {
   captureSourceId: string;
   localFilePath: string;
   capturedAt: string;
+  scheduledFor: string | null;
   sha256: string;
   byteSize: number;
   attemptCount: number;
@@ -48,6 +49,7 @@ export class AgentSpool {
         captureSourceId TEXT NOT NULL,
         localFilePath TEXT NOT NULL,
         capturedAt TEXT NOT NULL,
+        scheduledFor TEXT,
         sha256 TEXT NOT NULL,
         byteSize INTEGER NOT NULL,
         attemptCount INTEGER NOT NULL DEFAULT 0,
@@ -57,6 +59,10 @@ export class AgentSpool {
       );
       CREATE INDEX IF NOT EXISTS spool_records_state_nextRetryAt_idx ON spool_records(state, nextRetryAt);
     `);
+    const columns = this.db.prepare("PRAGMA table_info(spool_records)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "scheduledFor")) {
+      this.db.exec("ALTER TABLE spool_records ADD COLUMN scheduledFor TEXT;");
+    }
   }
 
   close() {
@@ -79,6 +85,7 @@ export class AgentSpool {
     captureSourceId: string;
     localFilePath: string;
     capturedAt: Date;
+    scheduledFor?: Date | null;
   }): Promise<SpoolRecord> {
     const checksum = await sha256File(input.localFilePath);
     const fileStat = await stat(input.localFilePath);
@@ -89,6 +96,7 @@ export class AgentSpool {
       captureSourceId: input.captureSourceId,
       localFilePath: input.localFilePath,
       capturedAt: input.capturedAt.toISOString(),
+      scheduledFor: input.scheduledFor?.toISOString() ?? null,
       sha256: checksum,
       byteSize: fileStat.size,
       attemptCount: 0,
@@ -100,8 +108,8 @@ export class AgentSpool {
     this.database()
       .prepare(
         `INSERT OR REPLACE INTO spool_records
-          (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.jobId,
@@ -110,6 +118,7 @@ export class AgentSpool {
         record.captureSourceId,
         record.localFilePath,
         record.capturedAt,
+        record.scheduledFor,
         record.sha256,
         record.byteSize,
         record.attemptCount,

@@ -114,6 +114,7 @@ class Job:
     device_path: str
     stable_id: str
     camera_name: Optional[str]
+    scheduled_for: Optional[str]
     width: int
     height: int
     input_format: str
@@ -129,6 +130,7 @@ class Job:
             device_path=camera["devicePath"],
             stable_id=camera["stableId"],
             camera_name=camera.get("name"),
+            scheduled_for=raw.get("scheduledFor"),
             width=settings["width"],
             height=settings["height"],
             input_format=settings.get("inputFormat", "mjpeg"),

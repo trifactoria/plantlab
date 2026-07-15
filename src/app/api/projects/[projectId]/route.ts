@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { checkCaptureEligibility } from "@/lib/captureEligibility";
+import { projectCaptureSummary, setProjectCaptureSource, validateProjectCaptureSourceSelection } from "@/lib/operations/projectCapture";
 import {
   badRequest,
   nullableDate,
@@ -34,7 +35,7 @@ export async function GET(_request: Request, context: Context) {
     return notFound("Project not found");
   }
 
-  return NextResponse.json(project);
+  return NextResponse.json({ ...project, capture: await projectCaptureSummary(prisma, project.id) });
 }
 
 export async function PATCH(request: Request, context: Context) {
@@ -44,6 +45,7 @@ export async function PATCH(request: Request, context: Context) {
   try {
     const existingProject = await prisma.project.findUnique({
       where: { id: projectId },
+      include: { viewports: { where: { active: true }, orderBy: { effectiveFrom: "desc" }, take: 1 } },
     });
 
     if (!existingProject) {
@@ -103,6 +105,8 @@ export async function PATCH(request: Request, context: Context) {
         : optionalDate(body.captureStartAt, existingProject.captureStartAt);
     const nextCameraDevice =
       body?.cameraDevice === undefined ? undefined : optionalString(body.cameraDevice);
+    const nextCaptureSourceId =
+      body?.captureSourceId === undefined ? undefined : optionalString(body.captureSourceId);
     const nextCaptureEnabled =
       body?.captureEnabled === undefined ? undefined : body.captureEnabled === true;
     const nextIsTestProject =
@@ -150,7 +154,14 @@ export async function PATCH(request: Request, context: Context) {
       return badRequest(windowErrors.join(" "));
     }
 
-    if (mergedCaptureEnabled) {
+    const mergedCaptureSourceId =
+      nextCaptureSourceId === undefined ? (existingProject.viewports[0]?.captureSourceId ?? null) : nextCaptureSourceId;
+
+    if (mergedCaptureSourceId && (nextCaptureSourceId !== undefined || nextCaptureEnabled === true)) {
+      await validateProjectCaptureSourceSelection(prisma, mergedCaptureSourceId);
+    }
+
+    if (mergedCaptureEnabled && !mergedCaptureSourceId) {
       const eligibility = await checkCaptureEligibility({
         captureEnabled: true,
         captureStartAt: nextCaptureStartAt ?? existingProject.captureStartAt,
@@ -176,45 +187,57 @@ export async function PATCH(request: Request, context: Context) {
           ? undefined
           : optionalString(body.cameraProfileId);
 
-    const project = await prisma.project.update({
-      where: { id: projectId },
-      data: {
-        name: body?.name === undefined ? undefined : requiredString(body.name, "name"),
-        description:
-          body?.description === undefined ? undefined : optionalString(body.description),
-        gridWidth: nextGridWidth,
-        gridHeight: nextGridHeight,
-        photoIntervalMinutes: nextPhotoIntervalMinutes,
-        captureStartAt: nextCaptureStartAt,
-        captureEnabled: nextIsTestProject === true ? false : nextCaptureEnabled,
-        timeZone: nextTimeZone,
-        captureWindowEnabled: nextCaptureWindowEnabled,
-        captureWindowStartMinutes: nextCaptureWindowStartMinutes,
-        captureWindowEndMinutes: nextCaptureWindowEndMinutes,
-        isTestProject: nextIsTestProject,
-        plantedAt:
-          body?.plantedAt === undefined
-            ? undefined
-            : nullableDate(body.plantedAt, "plantedAt"),
-        localPhotoDirectory: nextPhotoDirectory,
-        cameraDevice: nextIsTestProject === true ? null : nextCameraDevice,
-        cameraName:
-          nextIsTestProject === true
-            ? null
-            : body?.cameraName === undefined
+    const project = await prisma.$transaction(async (tx) => {
+      const updated = await tx.project.update({
+        where: { id: projectId },
+        data: {
+          name: body?.name === undefined ? undefined : requiredString(body.name, "name"),
+          description:
+            body?.description === undefined ? undefined : optionalString(body.description),
+          gridWidth: nextGridWidth,
+          gridHeight: nextGridHeight,
+          photoIntervalMinutes: nextPhotoIntervalMinutes,
+          captureStartAt: nextCaptureStartAt,
+          captureEnabled: nextIsTestProject === true ? false : nextCaptureEnabled,
+          timeZone: nextTimeZone,
+          captureWindowEnabled: nextCaptureWindowEnabled,
+          captureWindowStartMinutes: nextCaptureWindowStartMinutes,
+          captureWindowEndMinutes: nextCaptureWindowEndMinutes,
+          isTestProject: nextIsTestProject,
+          plantedAt:
+            body?.plantedAt === undefined
               ? undefined
-              : optionalString(body.cameraName),
-        cameraStableId:
-          nextIsTestProject === true
-            ? null
-            : body?.cameraStableId === undefined
-              ? undefined
-              : optionalString(body.cameraStableId),
-        cameraProfileId,
-      },
+              : nullableDate(body.plantedAt, "plantedAt"),
+          localPhotoDirectory: nextPhotoDirectory,
+          cameraDevice: nextIsTestProject === true || mergedCaptureSourceId ? null : nextCameraDevice,
+          cameraName:
+            nextIsTestProject === true || mergedCaptureSourceId
+              ? null
+              : body?.cameraName === undefined
+                ? undefined
+                : optionalString(body.cameraName),
+          cameraStableId:
+            nextIsTestProject === true || mergedCaptureSourceId
+              ? null
+              : body?.cameraStableId === undefined
+                ? undefined
+                : optionalString(body.cameraStableId),
+          cameraProfileId: nextIsTestProject === true || mergedCaptureSourceId ? null : cameraProfileId,
+        },
+      });
+
+      if (nextCaptureSourceId !== undefined) {
+        if (nextCaptureSourceId) {
+          await setProjectCaptureSource(tx, { projectId, captureSourceId: nextCaptureSourceId });
+        } else {
+          await tx.projectViewport.updateMany({ where: { projectId, active: true }, data: { active: false } });
+        }
+      }
+
+      return updated;
     });
 
-    return NextResponse.json(project);
+    return NextResponse.json({ ...project, capture: await projectCaptureSummary(prisma, project.id) });
   } catch (error) {
     if (error instanceof Error) {
       return badRequest(error.message);

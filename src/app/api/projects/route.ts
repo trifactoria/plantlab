@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { validateCaptureConfig } from "@/lib/captureEligibility";
 import { DEFAULT_PROJECT_MILESTONES } from "@/lib/experiment";
 import { validateCaptureWindowConfig } from "@/lib/schedule";
+import { projectCaptureSummary, setProjectCaptureSource, validateProjectCaptureSourceSelection } from "@/lib/operations/projectCapture";
 import { requireValidTimeZone, systemTimeZone } from "@/lib/timezone";
 import {
   badRequest,
@@ -51,6 +52,7 @@ export async function POST(request: Request) {
       "photoIntervalMinutes",
     );
     const cameraDevice = optionalString(body?.cameraDevice);
+    const captureSourceId = optionalString(body?.captureSourceId);
     const captureEnabled = body?.captureEnabled === true;
     const isTestProject = body?.isTestProject === true;
     const timeZone = body?.timeZone === undefined ? systemTimeZone() : requireValidTimeZone(body.timeZone);
@@ -77,7 +79,11 @@ export async function POST(request: Request) {
       return badRequest("Test projects cannot enable scheduled capture.");
     }
 
-    if (captureEnabled) {
+    if (captureSourceId) {
+      await validateProjectCaptureSourceSelection(prisma, captureSourceId);
+    }
+
+    if (captureEnabled && !captureSourceId) {
       const errors = validateCaptureConfig({
         captureStartAt,
         photoIntervalMinutes,
@@ -95,37 +101,43 @@ export async function POST(request: Request) {
       }
     }
 
-    const project = await prisma.project.create({
-      data: {
-        id: projectId,
-        name: requiredString(body?.name, "name"),
-        description: optionalString(body?.description),
-        gridWidth: requiredPositiveInt(body?.gridWidth, "gridWidth"),
-        gridHeight: requiredPositiveInt(body?.gridHeight, "gridHeight"),
-        photoIntervalMinutes,
-        captureStartAt,
-        captureEnabled: isTestProject ? false : captureEnabled,
-        timeZone,
-        captureWindowEnabled,
-        captureWindowStartMinutes,
-        captureWindowEndMinutes,
-        isTestProject,
-        plantedAt:
-          body?.plantedAt === undefined ? null : nullableDate(body.plantedAt, "plantedAt"),
-        localPhotoDirectory,
-        cameraDevice: isTestProject ? null : cameraDevice,
-        cameraName: isTestProject ? null : optionalString(body?.cameraName),
-        cameraProfileId: isTestProject ? null : optionalString(body?.cameraProfileId),
-        milestones: {
-          create: DEFAULT_PROJECT_MILESTONES.map((milestone) => ({
-            ...milestone,
-            enabled: true,
-          })),
+    const project = await prisma.$transaction(async (tx) => {
+      const created = await tx.project.create({
+        data: {
+          id: projectId,
+          name: requiredString(body?.name, "name"),
+          description: optionalString(body?.description),
+          gridWidth: requiredPositiveInt(body?.gridWidth, "gridWidth"),
+          gridHeight: requiredPositiveInt(body?.gridHeight, "gridHeight"),
+          photoIntervalMinutes,
+          captureStartAt,
+          captureEnabled: isTestProject ? false : captureEnabled,
+          timeZone,
+          captureWindowEnabled,
+          captureWindowStartMinutes,
+          captureWindowEndMinutes,
+          isTestProject,
+          plantedAt:
+            body?.plantedAt === undefined ? null : nullableDate(body.plantedAt, "plantedAt"),
+          localPhotoDirectory,
+          cameraDevice: isTestProject || captureSourceId ? null : cameraDevice,
+          cameraName: isTestProject || captureSourceId ? null : optionalString(body?.cameraName),
+          cameraProfileId: isTestProject || captureSourceId ? null : optionalString(body?.cameraProfileId),
+          milestones: {
+            create: DEFAULT_PROJECT_MILESTONES.map((milestone) => ({
+              ...milestone,
+              enabled: true,
+            })),
+          },
         },
-      },
+      });
+      if (captureSourceId) {
+        await setProjectCaptureSource(tx, { projectId: created.id, captureSourceId, effectiveFrom: captureStartAt });
+      }
+      return created;
     });
 
-    return NextResponse.json(project, { status: 201 });
+    return NextResponse.json({ ...project, capture: await projectCaptureSummary(prisma, project.id) }, { status: 201 });
   } catch (error) {
     if (error instanceof Error) {
       return badRequest(error.message);

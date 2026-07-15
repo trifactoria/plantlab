@@ -33,9 +33,10 @@ type TrackedSchedule = {
 
 export type TickCaptureSourceResult = {
   captureSourceId: string;
-  status: "success" | "skipped" | "failed";
+  status: "success" | "skipped" | "queued" | "failed";
   scheduledFor: Date;
   sourceCaptureId?: string;
+  agentCaptureJobId?: string;
   fanOut?: ViewportFanOutResult;
   errorMessage?: string;
 };
@@ -75,12 +76,23 @@ export class CaptureSourceScheduler {
 
   async tick(): Promise<TickResult> {
     const checkedAt = this.now();
-    const sources = await this.prisma.captureSource.findMany();
+    const sources = await this.prisma.captureSource.findMany({
+      include: {
+        assignments: {
+          where: { active: true, nodeCamera: { available: true, enabled: true, retiredAt: null } },
+          include: { nodeCamera: true },
+          orderBy: { updatedAt: "desc" },
+          take: 1,
+        },
+      },
+    });
     const seenIds = new Set<string>();
 
     const dueSources: Array<{
       id: string;
       cameraDevice: string;
+      assignmentId: string | null;
+      nodeId: string | null;
       captureStartAt: Date;
       photoIntervalMinutes: number;
       timeZone: string;
@@ -166,6 +178,8 @@ export class CaptureSourceScheduler {
         dueSources.push({
           id: source.id,
           cameraDevice: source.cameraDevice,
+          assignmentId: source.assignments[0]?.id ?? null,
+          nodeId: source.assignments[0]?.nodeId ?? null,
           captureStartAt: schedule.captureStartAt,
           photoIntervalMinutes: schedule.photoIntervalMinutes,
           timeZone: schedule.timeZone,
@@ -191,6 +205,8 @@ export class CaptureSourceScheduler {
   private async captureDueSource(source: {
     id: string;
     cameraDevice: string;
+    assignmentId: string | null;
+    nodeId: string | null;
     captureStartAt: Date;
     photoIntervalMinutes: number;
     timeZone: string;
@@ -203,6 +219,36 @@ export class CaptureSourceScheduler {
     let result: TickCaptureSourceResult;
 
     try {
+      if (source.assignmentId && source.nodeId) {
+        const existing = await this.prisma.agentCaptureJob.findFirst({
+          where: { captureSourceId: source.id, scheduledFor, status: { in: ["queued", "claimed", "completed", "failed"] } },
+          orderBy: { requestedAt: "asc" },
+        });
+        if (existing) {
+          result =
+            existing.status === "failed"
+              ? { captureSourceId: source.id, status: "failed", scheduledFor, agentCaptureJobId: existing.id, errorMessage: existing.errorMessage ?? "Remote capture job failed." }
+              : { captureSourceId: source.id, status: "queued", scheduledFor, agentCaptureJobId: existing.id, sourceCaptureId: existing.sourceCaptureId ?? undefined };
+        } else {
+          const job = await this.prisma.agentCaptureJob.create({
+            data: {
+              nodeId: source.nodeId,
+              assignmentId: source.assignmentId,
+              captureSourceId: source.id,
+              scheduledFor,
+              status: "queued",
+            },
+          });
+          this.logger.info("Queued scheduled remote source capture", {
+            captureSourceId: source.id,
+            agentCaptureJobId: job.id,
+            scheduledFor: scheduledFor.toISOString(),
+          });
+          result = { captureSourceId: source.id, status: "queued", scheduledFor, agentCaptureJobId: job.id };
+        }
+        return result;
+      }
+
       this.logger.info("Starting scheduled source capture", {
         captureSourceId: source.id,
         cameraDevice: source.cameraDevice,

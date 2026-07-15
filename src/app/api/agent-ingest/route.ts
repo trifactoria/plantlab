@@ -110,6 +110,7 @@ export async function POST(request: Request) {
         data: {
           captureSourceId: captureSource.id,
           timestamp: metadata.capturedAt,
+          scheduledFor: metadata.scheduledFor,
           originalPath: absolutePath,
           originalWidth: image.width,
           originalHeight: image.height,

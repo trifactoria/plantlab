@@ -46,6 +46,7 @@ const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/i;
 export type ParsedIngestMetadata = {
   captureId: string;
   capturedAt: Date;
+  scheduledFor: Date | null;
   /** Canonical CaptureSource.id, when the agent already knows it - preferred over cameraStableId when both are present. */
   captureSourceId: string | null;
   /** Fallback source identifier resolved by the route via a CaptureSource.cameraStableId lookup. At least one of captureSourceId/cameraStableId is required. */
@@ -250,6 +251,14 @@ export function parseIngestMetadata(raw: unknown): ParsedIngestMetadata {
     throw new IngestRequestError("metadata.capturedAt must be a valid ISO date string.", 400);
   }
 
+  const scheduledFor =
+    typeof value.scheduledFor === "string" && value.scheduledFor.trim().length > 0
+      ? new Date(value.scheduledFor)
+      : null;
+  if (scheduledFor && Number.isNaN(scheduledFor.getTime())) {
+    throw new IngestRequestError("metadata.scheduledFor must be a valid ISO date string when provided.", 400);
+  }
+
   const captureSourceId = typeof value.captureSourceId === "string" && value.captureSourceId.trim() ? value.captureSourceId.trim() : null;
   const cameraStableId = typeof value.cameraStableId === "string" && value.cameraStableId.trim() ? value.cameraStableId.trim() : null;
   if (!captureSourceId && !cameraStableId) {
@@ -279,7 +288,7 @@ export function parseIngestMetadata(raw: unknown): ParsedIngestMetadata {
     );
   }
 
-  return { captureId, capturedAt, captureSourceId, cameraStableId, originalFilename, expectedSha256, expectedByteSize, mimeType };
+  return { captureId, capturedAt, scheduledFor, captureSourceId, cameraStableId, originalFilename, expectedSha256, expectedByteSize, mimeType };
 }
 
 /**

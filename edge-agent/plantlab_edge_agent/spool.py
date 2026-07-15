@@ -38,6 +38,7 @@ class SpoolRecord:
     capture_source_id: str
     local_file_path: str
     captured_at: str
+    scheduled_for: Optional[str]
     sha256: str
     byte_size: int
     attempt_count: int
@@ -84,6 +85,7 @@ class Spool:
                 captureSourceId TEXT NOT NULL,
                 localFilePath TEXT NOT NULL,
                 capturedAt TEXT NOT NULL,
+                scheduledFor TEXT,
                 sha256 TEXT NOT NULL,
                 byteSize INTEGER NOT NULL,
                 attemptCount INTEGER NOT NULL DEFAULT 0,
@@ -93,6 +95,7 @@ class Spool:
             )
             """
         )
+        self._ensure_column("spool_records", "scheduledFor", "TEXT")
         self._db.execute("CREATE INDEX IF NOT EXISTS spool_records_state_nextRetryAt_idx ON spool_records(state, nextRetryAt)")
         self._db.execute(
             """
@@ -116,6 +119,13 @@ class Spool:
         if self._db is not None:
             self._db.close()
             self._db = None
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        assert self._db is not None
+        columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            self._db.commit()
 
     def dir(self, name: str) -> Path:
         return self.root / ("logs" if name == "logs" else "spool" / Path(name))
@@ -229,6 +239,7 @@ class Spool:
         capture_source_id: str,
         local_file_path: str,
         captured_at: str,
+        scheduled_for: Optional[str] = None,
     ) -> None:
         sha256 = _sha256_file(local_file_path)
         byte_size = os.path.getsize(local_file_path)
@@ -236,10 +247,10 @@ class Spool:
         self._db.execute(
             """
             INSERT INTO spool_records
-              (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 'pending')
+              (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 'pending')
             """,
-            (job_id, capture_id, assignment_id, capture_source_id, local_file_path, captured_at, sha256, byte_size),
+            (job_id, capture_id, assignment_id, capture_source_id, local_file_path, captured_at, scheduled_for, sha256, byte_size),
         )
         self._db.commit()
 
@@ -249,7 +260,7 @@ class Spool:
         now = _now_iso()
         rows = self._db.execute(
             """
-            SELECT jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, sha256, byteSize, attemptCount, nextRetryAt, lastError, state
+            SELECT jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state
             FROM spool_records
             WHERE state = 'pending' OR (state = 'failed' AND (nextRetryAt IS NULL OR nextRetryAt <= ?))
             ORDER BY capturedAt ASC

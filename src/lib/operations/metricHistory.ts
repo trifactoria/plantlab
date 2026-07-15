@@ -43,6 +43,18 @@ export type MetricHistoryResult =
   | { ok: true; status: 200; body: { node: { name: string }; range: { from: string; to: string; resolution: HistoryResolution; timeZone: string; bucketSemantics: "utc" }; series: MetricHistorySeries[] } }
   | { ok: false; status: 400 | 404 | 413; error: string };
 
+export type ProjectMetricHistorySeries = MetricHistorySeries & {
+  bindingId: string;
+  node: { id: string; name: string };
+  sensorId: string;
+  role: string;
+  degraded: boolean;
+};
+
+export type ProjectMetricHistoryResult =
+  | { ok: true; status: 200; body: { project: { id: string; name: string }; range: { from: string; to: string; resolution: HistoryResolution; timeZone: string; bucketSemantics: "utc" }; series: ProjectMetricHistorySeries[] } }
+  | { ok: false; status: 400 | 404 | 413; error: string };
+
 export async function getMetricHistory(prisma: PrismaClient, nodeName: string, params: URLSearchParams, now = new Date()): Promise<MetricHistoryResult> {
   const node = await prisma.plantLabNode.findUnique({
     where: { name: nodeName },
@@ -121,6 +133,91 @@ export async function getMetricHistory(prisma: PrismaClient, nodeName: string, p
   };
 }
 
+export async function getProjectMetricHistory(
+  prisma: PrismaClient,
+  projectId: string,
+  params: URLSearchParams,
+  now = new Date(),
+): Promise<ProjectMetricHistoryResult> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: {
+      sensorBindings: {
+        where: { enabled: true, unlinkedAt: null },
+        include: { node: true, sensor: true },
+        orderBy: [{ linkedAt: "asc" }, { id: "asc" }],
+      },
+    },
+  });
+  if (!project) return { ok: false, status: 404, error: "Project not found." };
+
+  const parsed = parseProjectHistoryParams(params, now);
+  if (!parsed.ok) return parsed;
+  const { bindingIds, metrics, from, to, resolution, timeZone } = parsed.value;
+
+  const bindings = bindingIds.length > 0 ? project.sensorBindings.filter((binding) => bindingIds.includes(binding.id)) : project.sensorBindings;
+  const missingBindings = bindingIds.filter((id) => !project.sensorBindings.some((binding) => binding.id === id));
+  if (missingBindings.length > 0) return { ok: false, status: 400, error: `Unknown sensor binding id(s): ${missingBindings.join(", ")}.` };
+
+  const series = buildEmptyProjectSeries(bindings, metrics);
+  const sensorIds = bindings.map((binding) => binding.sensorId);
+
+  if (resolution === "raw") {
+    const readings = await prisma.sensorReading.findMany({
+      where: { sensorId: { in: sensorIds }, capturedAt: { gte: from, lte: to } },
+      orderBy: [{ capturedAt: "asc" }, { id: "asc" }],
+      take: Math.floor(MAX_RAW_POINTS / metrics.length) + 1,
+    });
+    if (readings.length * metrics.length > MAX_RAW_POINTS) {
+      return { ok: false, status: 413, error: "Raw history response is too large. Narrow the range or request a bucketed resolution." };
+    }
+    const seriesByKey = new Map(series.map((item) => [item.key, item]));
+    for (const reading of readings) {
+      for (const binding of bindings.filter((candidate) => candidate.sensorId === reading.sensorId)) {
+        for (const metric of metrics) {
+          const value = reading[METRIC_DEFINITIONS[metric].column];
+          seriesByKey.get(`${binding.id}:${metric}`)?.points.push({ at: reading.capturedAt.toISOString(), value });
+        }
+      }
+    }
+  } else {
+    const bucketSeconds = RESOLUTION_SECONDS[resolution];
+    const bucketCount = Math.ceil((to.getTime() - from.getTime()) / (bucketSeconds * 1000));
+    if (bucketCount * bindings.length * metrics.length > MAX_BUCKET_POINTS) {
+      return { ok: false, status: 413, error: "Bucketed history response is too large. Narrow the range, request fewer series, or use a coarser resolution." };
+    }
+    const seriesByKey = new Map(series.map((item) => [item.key, item]));
+    for (const metric of metrics) {
+      const rows = await queryBuckets(prisma, null, sensorIds, from, to, metric, bucketSeconds);
+      for (const row of rows) {
+        for (const binding of bindings.filter((candidate) => candidate.sensorId === row.sensorId)) {
+          const mean = Number(row.mean);
+          seriesByKey.get(`${binding.id}:${metric}`)?.points.push({
+            at: new Date(Number(row.bucketEpoch) * 1000).toISOString(),
+            value: mean,
+            count: Number(row.count),
+            min: Number(row.min),
+            max: Number(row.max),
+            mean,
+            first: Number(row.first),
+            last: Number(row.last),
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      project: { id: project.id, name: project.name },
+      range: { from: from.toISOString(), to: to.toISOString(), resolution, timeZone, bucketSemantics: "utc" },
+      series,
+    },
+  };
+}
+
 type ParsedParams = {
   sensorKeys: string[];
   metrics: HistoryMetric[];
@@ -136,6 +233,26 @@ function parseHistoryParams(params: URLSearchParams, now: Date): { ok: true; val
   if (sensorKeys.length > MAX_SENSOR_KEYS) return { ok: false, status: 400, error: `sensorKeys may contain at most ${MAX_SENSOR_KEYS} entries.` };
   if (sensorKeys.some((key) => !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key))) return { ok: false, status: 400, error: "sensorKeys contains an invalid key." };
 
+  const parsed = parseHistoryParamsBase(params, now);
+  if (!parsed.ok) return parsed;
+
+  return { ok: true, value: { sensorKeys, ...parsed.value } };
+}
+
+type ParsedProjectParams = Omit<ParsedParams, "sensorKeys"> & { bindingIds: string[] };
+
+function parseProjectHistoryParams(params: URLSearchParams, now: Date): { ok: true; value: ParsedProjectParams } | { ok: false; status: 400; error: string } {
+  const bindingIds = splitList(params.get("bindingIds"));
+  if (bindingIds.length > MAX_SENSOR_KEYS) return { ok: false, status: 400, error: `bindingIds may contain at most ${MAX_SENSOR_KEYS} entries.` };
+  if (bindingIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id))) return { ok: false, status: 400, error: "bindingIds contains an invalid id." };
+
+  const parsed = parseHistoryParamsBase(params, now);
+  if (!parsed.ok) return parsed;
+
+  return { ok: true, value: { bindingIds, ...parsed.value } };
+}
+
+function parseHistoryParamsBase(params: URLSearchParams, now: Date): { ok: true; value: Omit<ParsedParams, "sensorKeys"> } | { ok: false; status: 400; error: string } {
   const metricValues = splitList(params.get("metrics"));
   if (metricValues.length === 0) return { ok: false, status: 400, error: "metrics is required." };
   const metrics: HistoryMetric[] = [];
@@ -158,7 +275,7 @@ function parseHistoryParams(params: URLSearchParams, now: Date): { ok: true; val
   const timeZone = params.get("timeZone") || DEFAULT_TIME_ZONE;
   if (!isValidTimeZone(timeZone)) return { ok: false, status: 400, error: "timeZone must be a valid IANA timezone identifier." };
 
-  return { ok: true, value: { sensorKeys, metrics, from, to, resolution, timeZone } };
+  return { ok: true, value: { metrics, from, to, resolution, timeZone } };
 }
 
 function splitList(value: string | null): string[] {
@@ -199,6 +316,37 @@ function buildEmptySeries(sensors: Array<{ key: string; name: string }>, metrics
   );
 }
 
+function buildEmptyProjectSeries(
+  bindings: Array<{
+    id: string;
+    role: string;
+    label: string | null;
+    node: { id: string; name: string };
+    sensor: { id: string; key: string; name: string; configuredActive: boolean; enabled: boolean; retiredAt: Date | null };
+  }>,
+  metrics: HistoryMetric[],
+): ProjectMetricHistorySeries[] {
+  return bindings.flatMap((binding) =>
+    metrics.map((metric) => {
+      const definition = METRIC_DEFINITIONS[metric];
+      const displayLabel = binding.label ?? binding.sensor.name;
+      return {
+        key: `${binding.id}:${metric}`,
+        subjectKey: binding.sensor.key,
+        bindingId: binding.id,
+        node: { id: binding.node.id, name: binding.node.name },
+        sensorId: binding.sensor.id,
+        role: binding.role,
+        degraded: !binding.sensor.enabled || !binding.sensor.configuredActive || Boolean(binding.sensor.retiredAt),
+        metric,
+        label: `${displayLabel} ${definition.label}`,
+        unit: definition.unit,
+        points: [],
+      };
+    }),
+  );
+}
+
 type BucketRow = {
   sensorId: string;
   bucketEpoch: bigint | number;
@@ -216,7 +364,7 @@ function metricColumn(metric: HistoryMetric) {
 
 async function queryBuckets(
   prisma: PrismaClient,
-  nodeId: string,
+  nodeId: string | null,
   sensorIds: string[],
   from: Date,
   to: Date,
@@ -234,7 +382,7 @@ async function queryBuckets(
         ${column} AS value,
         (CAST(("capturedAt" / 1000) AS INTEGER) / ${bucketSeconds}) * ${bucketSeconds} AS bucketEpoch
       FROM "SensorReading"
-      WHERE "nodeId" = ${nodeId}
+      WHERE (${nodeId} IS NULL OR "nodeId" = ${nodeId})
         AND "sensorId" IN (${Prisma.join(sensorIds)})
         AND "capturedAt" >= ${from}
         AND "capturedAt" <= ${to}

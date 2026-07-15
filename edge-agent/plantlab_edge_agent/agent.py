@@ -150,6 +150,7 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
             capture_source_id=job.capture_source_id,
             local_file_path=output_path,
             captured_at=_now_iso(),
+            scheduled_for=job.scheduled_for,
         )
         logger.info("Frame captured to durable spool: job=%s capture=%s", job.id, capture_id)
     except Exception as exc:  # capture/spool failure - report and move on, never crash the loop
@@ -206,6 +207,7 @@ def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sp
                 "captureId": active.capture_id,
                 "capturedAt": active.captured_at,
                 "captureSourceId": active.capture_source_id,
+                "scheduledFor": active.scheduled_for,
                 "originalFilename": active.local_file_path.split("/")[-1],
                 "expectedSha256": active.sha256,
                 "expectedByteSize": active.byte_size,
