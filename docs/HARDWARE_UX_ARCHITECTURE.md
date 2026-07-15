@@ -23,6 +23,114 @@ Implemented on 2026-07-15:
 - `evaluateSensorHealth()` in `src/lib/hardware/sensorHealth.ts` owns canonical sensor health, with initial degraded and failed windows of three and five minutes.
 - `calculateMetricDomain()` in `src/lib/chartDomain.ts` owns reusable chart Y-domain calculation.
 - `canDiscoverLocalCameraHardware()` and `canManageFleetHardware()` split local V4L execution from trusted fleet management.
+- `PowerStateEvent` stores observed outlet state transitions without duplicating unchanged telemetry.
+- `GET /api/nodes/:nodeName/power/history` returns gap-aware outlet state tracks for chart overlays.
+- `getEffectiveProjectCaptureSchedule()` owns the effective schedule for direct-local and CaptureSource projects.
+- `GET /api/projects/:projectId/capture-summary` exposes the effective schedule, selected camera/source, latest capture, next capture, and source degradation state.
+- `GET /api/nodes/summary` returns one node-like summary list with the current installation first and attached nodes after it.
+
+## Dashboard Data Contracts
+
+These contracts are intended for the later dashboard and project layout work. They are backend preparation only; they do not require a visible UI refactor.
+
+### Power Timeline
+
+`GET /api/nodes/:nodeName/power/history?from=<iso>&to=<iso>&outletKeys=fans,lights`
+
+Returns observed outlet state tracks aligned to a requested UTC range:
+
+```ts
+type PowerHistoryResponse = {
+  node: { id: string; name: string };
+  range: { from: string; to: string };
+  tracks: Array<{
+    outletId: string;
+    outletKey: "lights" | "fans" | "water";
+    label: string;
+    enabled: boolean;
+    available: boolean;
+    initialState: boolean | null;
+    gaps: Array<{ from: string; to: string }>;
+    segments: Array<{ from: string; to: string; state: boolean }>;
+    events: Array<{ at: string; state: boolean; source: string; commandId: string | null }>;
+  }>;
+};
+```
+
+Contract notes:
+
+- Events are observed state, not requested state.
+- Unknown pre-range state is represented as `initialState: null` plus an explicit gap.
+- Unchanged telemetry does not create duplicate events.
+- Current outlet state remains in existing power APIs; history is a separate range contract.
+
+### Effective Project Capture Schedule
+
+`getEffectiveProjectCaptureSchedule(projectId)` and `GET /api/projects/:projectId/capture-summary` expose one canonical answer for project capture behavior:
+
+```ts
+type EffectiveProjectCaptureSchedule = {
+  mode: "none" | "direct-local" | "capture-source";
+  enabled: boolean;
+  owner: "project" | "capture-source" | null;
+  intervalMinutes: number | null;
+  timeZone: string | null;
+  dailyWindow: { enabled: boolean; start: string | null; end: string | null } | null;
+  nextCaptureAt: string | null;
+  captureSource: { id: string; name: string; nodeName: string | null } | null;
+  legacyProjectSchedulePresent: boolean;
+  conflict: { exists: boolean; reason: string | null };
+};
+```
+
+Contract notes:
+
+- Direct-local projects use project-owned schedule fields.
+- CaptureSource projects use CaptureSource-owned schedule fields.
+- Stale project interval/window values on a CaptureSource project are reported through `legacyProjectSchedulePresent`, not presented as the effective schedule.
+- Conflicts are structured instead of silently merging contradictory records.
+
+### Unified Node Summary
+
+`GET /api/nodes/summary` returns the current installation as the first node-like row, followed by attached nodes:
+
+```ts
+type NodeSummary = {
+  id: string;
+  name: string;
+  displayName: string;
+  relationship: "self" | "attached";
+  mode: "coordinator" | "standalone" | "camera-node" | "greenhouse-node" | "mixed";
+  role: string;
+  online: boolean;
+  status: "active" | "degraded" | "pending" | "offline";
+  activity: { label: string; at: string | null; kind: "service" | "heartbeat" | "pending" };
+  resources: {
+    cameras: { count: number; active: number; unavailable: number; url: string };
+    sensors: { count: number; active: number; degraded: number; url: string };
+  };
+  detailsUrl: string;
+  activityUrl: string;
+  systemUrl: string | null;
+};
+```
+
+Contract notes:
+
+- The self row is always first and does not invent a fake heartbeat timestamp.
+- Attached nodes use heartbeat and credential state.
+- Camera counts come from the canonical fleet camera contract and do not count historical duplicate endpoints as active cameras.
+- Sensor counts come from the canonical fleet sensor contract and count configured-active, non-retired sensors as active.
+- Failed jobs are diagnostics, not a primary summary column.
+- Destination URLs are supplied by the backend so the UI does not reconstruct route strings.
+
+### Claude Dashboard Consumers
+
+- Environment tab: metric history plus `power/history` state tracks.
+- Projects tab: project summaries plus `capture-summary.effectiveSchedule`.
+- Power tab: existing current controls/schedules plus `power/history`.
+- Cameras tab: canonical `GET /api/hardware/cameras`.
+- System tab: `GET /api/nodes/summary` plus support/system routes.
 
 ## Operating Principles
 

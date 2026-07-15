@@ -496,6 +496,7 @@ model PlantLabNode {
   sensorConfigRevisions NodeSensorConfigRevision[]
   outlets           NodeOutlet[]
   powerCommands      PowerCommand[]
+  powerStateEvents   PowerStateEvent[]
   powerSchedules     PowerSchedule[]
   sensorReadings     SensorReading[]
   sensorDiagnostics  SensorDiagnostic[]
@@ -572,6 +573,7 @@ model NodeOutlet {
 
   node     PlantLabNode  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   commands PowerCommand[]
+  stateEvents PowerStateEvent[]
 
   @@unique([nodeId, key])
   @@index([nodeId])
@@ -604,11 +606,33 @@ model PowerCommand {
 
   node   PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
   outlet NodeOutlet?  @relation(fields: [outletId], references: [id], onDelete: SetNull)
+  stateEvents PowerStateEvent[]
 
   @@unique([nodeId, idempotencyKey])
   @@index([nodeId, status, availableAt])
   @@index([nodeId, outletKey, status])
   @@index([expiresAt])
+}
+
+model PowerStateEvent {
+  id            String   @id @default(cuid())
+  nodeId        String
+  outletId      String
+  outletKey     String
+  observedState Boolean
+  observedAt    DateTime
+  source        String
+  commandId     String?
+  createdAt     DateTime @default(now())
+
+  node    PlantLabNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  outlet  NodeOutlet   @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  command PowerCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+
+  @@index([nodeId, outletKey, observedAt])
+  @@index([outletId, observedAt])
+  @@index([commandId])
+  @@index([nodeId, observedAt])
 }
 
 model NodeSensor {

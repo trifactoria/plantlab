@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   canUsePermanentOff,
   canUsePermanentOn,
@@ -16,6 +16,7 @@ export const POWER_ACTIONS = ["on", "off", "pulse", "refresh"] as const;
 export type PowerAction = (typeof POWER_ACTIONS)[number];
 export const POWER_COMMAND_STATUSES = ["pending", "claimed", "succeeded", "failed", "expired", "cancelled"] as const;
 export const POWER_OUTLET_KEYS = ["fans", "water", "lights"] as const;
+export const POWER_STATE_EVENT_SOURCES = ["telemetry", "command-verification", "startup", "manual-refresh", "unknown"] as const;
 export const MAX_PULSE_SECONDS = 120;
 export const WATER_MAX_PULSE_SECONDS = MAX_PULSE_SECONDS;
 
@@ -72,6 +73,8 @@ export type PowerCommandResult = {
   errorMessage?: string | null;
 };
 
+export type PowerStateEventSource = (typeof POWER_STATE_EVENT_SOURCES)[number];
+
 export function parsePowerStateReport(raw: unknown, now = new Date()): PowerOutletStateReport[] {
   if (!isRecord(raw)) throw new Error("Request body must be a JSON object.");
   if (!Array.isArray(raw.outlets)) throw new Error("outlets must be an array.");
@@ -84,36 +87,47 @@ export async function ingestPowerState(prisma: PrismaClient, nodeId: string, out
   const upserted = [];
   for (const outlet of outlets) {
     upserted.push(
-      await prisma.nodeOutlet.upsert({
-        where: { nodeId_key: { nodeId, key: outlet.key } },
-        create: {
+      await prisma.$transaction(async (tx) => {
+        const updated = await tx.nodeOutlet.upsert({
+          where: { nodeId_key: { nodeId, key: outlet.key } },
+          create: {
+            nodeId,
+            key: outlet.key,
+            name: outlet.name,
+            provider: outlet.provider,
+            providerAlias: outlet.providerAlias,
+            enabled: outlet.enabled,
+            behavior: outlet.behavior,
+            safetyClass: outlet.safetyClass,
+            actualState: outlet.actualState,
+            stateObservedAt: outlet.stateObservedAt,
+            available: outlet.available,
+            lastErrorCode: outlet.lastErrorCode,
+            lastErrorMessage: outlet.lastErrorMessage,
+          },
+          update: {
+            name: outlet.name,
+            provider: outlet.provider,
+            providerAlias: outlet.providerAlias,
+            enabled: outlet.enabled,
+            behavior: outlet.behavior,
+            safetyClass: outlet.safetyClass,
+            actualState: outlet.actualState,
+            stateObservedAt: outlet.stateObservedAt,
+            available: outlet.available,
+            lastErrorCode: outlet.lastErrorCode,
+            lastErrorMessage: outlet.lastErrorMessage,
+          },
+        });
+        await recordObservedPowerStateEvent(tx, {
           nodeId,
-          key: outlet.key,
-          name: outlet.name,
-          provider: outlet.provider,
-          providerAlias: outlet.providerAlias,
-          enabled: outlet.enabled,
-          behavior: outlet.behavior,
-          safetyClass: outlet.safetyClass,
-          actualState: outlet.actualState,
-          stateObservedAt: outlet.stateObservedAt,
-          available: outlet.available,
-          lastErrorCode: outlet.lastErrorCode,
-          lastErrorMessage: outlet.lastErrorMessage,
-        },
-        update: {
-          name: outlet.name,
-          provider: outlet.provider,
-          providerAlias: outlet.providerAlias,
-          enabled: outlet.enabled,
-          behavior: outlet.behavior,
-          safetyClass: outlet.safetyClass,
-          actualState: outlet.actualState,
-          stateObservedAt: outlet.stateObservedAt,
-          available: outlet.available,
-          lastErrorCode: outlet.lastErrorCode,
-          lastErrorMessage: outlet.lastErrorMessage,
-        },
+          outletId: updated.id,
+          outletKey: updated.key,
+          observedState: outlet.actualState,
+          observedAt: outlet.stateObservedAt ?? now,
+          source: "telemetry",
+        });
+        return updated;
       }),
     );
   }
@@ -245,6 +259,7 @@ export async function completePowerCommand(prisma: PrismaClient, nodeId: string,
       errorMessage: null,
     },
   });
+  const outlet = await prisma.nodeOutlet.findUnique({ where: { nodeId_key: { nodeId, key: command.outletKey } } });
   await prisma.nodeOutlet.updateMany({
     where: { nodeId, key: command.outletKey },
     data: {
@@ -255,6 +270,17 @@ export async function completePowerCommand(prisma: PrismaClient, nodeId: string,
       lastErrorMessage: null,
     },
   });
+  if (outlet) {
+    await recordObservedPowerStateEvent(prisma, {
+      nodeId,
+      outletId: outlet.id,
+      outletKey: command.outletKey,
+      observedState: result.actualState ?? null,
+      observedAt: stateObservedAt,
+      source: "command-verification",
+      commandId,
+    });
+  }
   logPowerEvent("command completed", {
     commandId: updated.id,
     nodeId,
@@ -285,6 +311,7 @@ export async function failPowerCommand(prisma: PrismaClient, nodeId: string, com
       errorMessage,
     },
   });
+  const outlet = await prisma.nodeOutlet.findUnique({ where: { nodeId_key: { nodeId, key: command.outletKey } } });
   await prisma.nodeOutlet.updateMany({
     where: { nodeId, key: command.outletKey },
     data: {
@@ -295,6 +322,17 @@ export async function failPowerCommand(prisma: PrismaClient, nodeId: string, com
       lastErrorMessage: errorMessage,
     },
   });
+  if (outlet) {
+    await recordObservedPowerStateEvent(prisma, {
+      nodeId,
+      outletId: outlet.id,
+      outletKey: command.outletKey,
+      observedState: result.actualState ?? null,
+      observedAt: stateObservedAt,
+      source: "command-verification",
+      commandId,
+    });
+  }
   logPowerEvent("command failed", {
     commandId: updated.id,
     nodeId,
@@ -304,6 +342,40 @@ export async function failPowerCommand(prisma: PrismaClient, nodeId: string, com
     elapsedMs: updated.completedAt ? updated.completedAt.getTime() - updated.requestedAt.getTime() : null,
   });
   return updated;
+}
+
+async function recordObservedPowerStateEvent(
+  prisma: PrismaClient | Prisma.TransactionClient,
+  input: {
+    nodeId: string;
+    outletId: string;
+    outletKey: string;
+    observedState: boolean | null | undefined;
+    observedAt: Date;
+    source: PowerStateEventSource;
+    commandId?: string | null;
+  },
+) {
+  if (typeof input.observedState !== "boolean") return null;
+  const latest = await prisma.powerStateEvent.findFirst({
+    where: { outletId: input.outletId },
+    orderBy: { observedAt: "desc" },
+  });
+  if (latest) {
+    if (input.observedAt.getTime() <= latest.observedAt.getTime()) return null;
+    if (latest.observedState === input.observedState) return null;
+  }
+  return prisma.powerStateEvent.create({
+    data: {
+      nodeId: input.nodeId,
+      outletId: input.outletId,
+      outletKey: input.outletKey,
+      observedState: input.observedState,
+      observedAt: input.observedAt,
+      source: input.source,
+      commandId: input.commandId ?? null,
+    },
+  });
 }
 
 export async function getLatestPowerStatus(prisma: PrismaClient, nodeName: string) {

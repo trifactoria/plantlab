@@ -29,7 +29,7 @@ export type AvailableCaptureSource = {
   selectable: boolean;
 };
 
-const SOURCE_INCLUDE = {
+export const SOURCE_INCLUDE = {
   assignments: {
     include: {
       node: true,
