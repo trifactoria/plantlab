@@ -225,9 +225,22 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       manifest.probes.push({ host: "local", role: "screenshots", command: "fixture prisma migrate deploy", ok: migrate.status === 0, status: migrate.status, path: path.join(dir, "fixture-migrate.txt") });
       if (migrate.status !== 0) return;
 
-      const result = await execFileResult("pnpm", ["exec", "playwright", "test", "tests/screenshots.spec.ts"], 120_000, process.cwd(), env);
+      // Clear any prior (possibly live-readonly) screenshots so only this
+      // fixture run's images get bundled, then capture just the node/
+      // operational surfaces (the "mobile" node-only scope) - fast and
+      // deterministic, and it exercises the isolated fixture homepage node
+      // link this bundle exists to verify. Running the full desktop+laptop
+      // project suite here reliably overruns the probe timeout.
+      await rm(path.join(process.cwd(), "artifacts", "screenshots"), { recursive: true, force: true }).catch(() => undefined);
+      const result = await execFileResult(
+        "pnpm",
+        ["exec", "playwright", "test", "tests/screenshots.spec.ts", "-g", "mobile"],
+        300_000,
+        process.cwd(),
+        env,
+      );
       await writeFile(path.join(dir, "fixture-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
-      manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
+      manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
@@ -269,6 +282,9 @@ export function buildFixtureScreenshotEnv(fixtureRoot: string, port: number): { 
       DATABASE_URL: `file:${fixtureDb}`,
       PLANTLAB_ROOT_DIR: fixtureRoot,
       PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1",
+      // The .next build is database-independent, so reuse the host's existing
+      // build and just start - a fresh build here overruns the probe timeout.
+      PLANTLAB_SKIP_BUILD: "1",
       // A fixture run must never reuse an already-running (possibly live)
       // server, and must never claim to be a live-readonly run.
       PLANTLAB_SCREENSHOTS_LIVE_READONLY: "0",

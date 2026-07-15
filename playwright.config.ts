@@ -18,7 +18,9 @@ export default defineConfig({
     command: "node scripts/playwright-dev-server.mjs",
     url: baseURL,
     reuseExistingServer,
-    timeout: 120_000,
+    // The fixture/live-readonly support-bundle runs build a fresh server
+    // before the suite, which can exceed the default two minutes.
+    timeout: 300_000,
   },
   projects: [
     {

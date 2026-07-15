@@ -26,20 +26,31 @@ function run(command, args, env = process.env) {
   });
 }
 
-await run("pnpm", ["exec", "next", "build"], {
-  ...process.env,
-  PLANTLAB_TEST_LOCAL_CAMERA_UI: "1",
-});
+// The support-bundle fixture screenshot run sets PLANTLAB_SKIP_BUILD=1 and
+// starts a `next dev` server instead of build+start: it needs no prior build
+// (the slow step) and `next dev` starts reliably, whereas `next start` with a
+// NODE_ENV=development override against a production .next can fail to become
+// ready in some environments. The default (CI/local) path keeps build+start.
+const skipBuild = process.env.PLANTLAB_SKIP_BUILD === "1";
 
-const child = spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", port], {
-  stdio: "inherit",
-  shell: false,
-  env: {
+if (!skipBuild) {
+  await run("pnpm", ["exec", "next", "build"], {
     ...process.env,
-    NODE_ENV: "development",
     PLANTLAB_TEST_LOCAL_CAMERA_UI: "1",
-  },
-});
+  });
+}
+
+const child = skipBuild
+  ? spawn("pnpm", ["exec", "next", "dev", "--hostname", "127.0.0.1", "--port", port], {
+      stdio: "inherit",
+      shell: false,
+      env: { ...process.env, PLANTLAB_TEST_LOCAL_CAMERA_UI: "1" },
+    })
+  : spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", port], {
+      stdio: "inherit",
+      shell: false,
+      env: { ...process.env, NODE_ENV: "development", PLANTLAB_TEST_LOCAL_CAMERA_UI: "1" },
+    });
 
 child.on("exit", (code, signal) => {
   if (signal) {
