@@ -22,6 +22,7 @@ export function ProjectCaptureModeSection({
   onCameraDeviceChange,
   captureSourceId,
   onCaptureSourceIdChange,
+  localControlsEnabled = true,
 }: {
   mode: ProjectCaptureMode;
   onModeChange: (mode: ProjectCaptureMode) => void;
@@ -30,7 +31,10 @@ export function ProjectCaptureModeSection({
   onCameraDeviceChange: (device: string) => void;
   captureSourceId: string;
   onCaptureSourceIdChange: (captureSourceId: string) => void;
+  localControlsEnabled?: boolean;
 }) {
+  const showDirectLocalMode = localControlsEnabled || mode === "direct-local";
+
   return (
     <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">
       <p className="text-sm font-semibold text-stone-800">Capture mode</p>
@@ -39,18 +43,34 @@ export function ProjectCaptureModeSection({
           <input type="radio" name="projectCaptureMode" checked={mode === "none"} onChange={() => onModeChange("none")} />
           No Camera
         </label>
-        <label className="flex items-center gap-2">
-          <input type="radio" name="projectCaptureMode" checked={mode === "direct-local"} onChange={() => onModeChange("direct-local")} />
-          Direct Local
-        </label>
+        {showDirectLocalMode ? (
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="projectCaptureMode"
+              checked={mode === "direct-local"}
+              disabled={!localControlsEnabled && mode !== "direct-local"}
+              onChange={() => onModeChange("direct-local")}
+            />
+            Direct Local
+          </label>
+        ) : null}
         <label className="flex items-center gap-2">
           <input type="radio" name="projectCaptureMode" checked={mode === "capture-source"} onChange={() => onModeChange("capture-source")} />
           Capture Source
         </label>
       </div>
 
-      {mode === "direct-local" ? (
+      {mode === "direct-local" && localControlsEnabled ? (
         <CameraSelect defaultDevice={cameraDevice} defaultName={cameraName} onDeviceChange={onCameraDeviceChange} />
+      ) : null}
+
+      {mode === "direct-local" && !localControlsEnabled ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          This project has a legacy direct-local camera saved
+          {cameraDevice ? ` (${cameraName ?? "Camera"} - ${cameraDevice})` : ""}, but this coordinator does not expose local camera hardware.
+          Switch to Capture Source to use cameras configured on attached nodes.
+        </p>
       ) : null}
 
       {mode === "capture-source" ? (

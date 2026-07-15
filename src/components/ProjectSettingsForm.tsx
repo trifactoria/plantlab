@@ -35,7 +35,7 @@ type ProjectSettings = {
   capture: { mode: ProjectCaptureMode; captureSourceId: string | null };
 };
 
-export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
+export function ProjectSettingsForm({ project, localControlsEnabled = true }: { project: ProjectSettings; localControlsEnabled?: boolean }) {
   const router = useRouter();
   const [photoDirectory, setPhotoDirectory] = useState(project.localPhotoDirectory);
   const [useCustomFolder, setUseCustomFolder] = useState(false);
@@ -207,6 +207,7 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           onCameraDeviceChange={setCameraDevice}
           captureSourceId={captureSourceId}
           onCaptureSourceIdChange={setCaptureSourceId}
+          localControlsEnabled={localControlsEnabled}
         />
 
         <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">

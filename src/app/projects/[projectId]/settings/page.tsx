@@ -6,6 +6,7 @@ import { projectCaptureSummary } from "@/lib/operations/projectCapture";
 import { listProjectSensorBindings } from "@/lib/operations/projectSensors";
 import { ProjectSensorBindingsPanel } from "@/components/ProjectSensorBindingsPanel";
 import { ProjectSettingsForm } from "@/components/ProjectSettingsForm";
+import { localCameraHardwareEnabled } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 
 type PageProps = {
@@ -46,6 +47,7 @@ export default async function ProjectSettingsPage({ params }: PageProps) {
       <section className="section">
         <div className="container max-w-3xl">
           <ProjectSettingsForm
+            localControlsEnabled={localCameraHardwareEnabled()}
             project={{
               id: project.id,
               name: project.name,

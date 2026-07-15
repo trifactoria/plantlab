@@ -24,7 +24,9 @@ if (typeof window !== "undefined") {
 
 export type PlantLabUnitName = "plantlab-web.service" | "plantlab-camera.service" | "plantlab-agent.service";
 
-export function buildWebServiceUnit(input: { repoPath: string; runBin: string }): string {
+export function buildWebServiceUnit(input: { repoPath: string; runBin: string; localCameraEnabled?: boolean }): string {
+  const localCameraEnvironment = input.localCameraEnabled ? "Environment=PLANTLAB_LOCAL_CAMERA_ENABLED=1\n" : "";
+
   return `[Unit]
 Description=PlantLab web application (Next.js production server)
 After=network-online.target
@@ -35,8 +37,7 @@ Type=simple
 WorkingDirectory=${input.repoPath}
 Environment=NODE_ENV=production
 Environment=PLANTLAB_ROOT_DIR=${input.repoPath}
-Environment=PLANTLAB_LOCAL_CAMERA_ENABLED=1
-ExecStart=${input.runBin} run start
+${localCameraEnvironment}ExecStart=${input.runBin} run start
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=-${input.repoPath}/.env.local
@@ -90,7 +91,7 @@ WantedBy=default.target
 `;
 }
 
-export function buildUnitContent(unitName: PlantLabUnitName, input: { repoPath: string; runBin: string; envPath?: string }): string {
+export function buildUnitContent(unitName: PlantLabUnitName, input: { repoPath: string; runBin: string; envPath?: string; localCameraEnabled?: boolean }): string {
   if (unitName === "plantlab-web.service") return buildWebServiceUnit(input);
   if (unitName === "plantlab-camera.service") return buildCameraServiceUnit(input);
   return buildAgentServiceUnit({ repoPath: input.repoPath, runBin: input.runBin, envPath: input.envPath ?? "%h/.config/plantlab/agent.env" });

@@ -737,13 +737,21 @@ export function CameraSetupPanel({
   }
 
   useEffect(() => {
+    if (!localControlsEnabled) {
+      return;
+    }
+
     void loadControls();
     void loadFormats();
     void loadProfiles();
     void checkForMovedCamera();
-  }, [projectId]);
+  }, [localControlsEnabled, projectId]);
 
   useEffect(() => {
+    if (!localControlsEnabled) {
+      return;
+    }
+
     if (!previewing) {
       return;
     }
@@ -783,9 +791,28 @@ export function CameraSetupPanel({
         <div className="mt-4">
           <CaptureSourceSelect defaultCaptureSourceId={captureSourceId} onChange={setSelectedCaptureSourceId} />
         </div>
+        {!localControlsEnabled ? (
+          <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-950">Attached-node capture</p>
+                <p className="mt-1 text-sm text-emerald-900">
+                  Camera setup on the coordinator uses configured Capture Sources from attached nodes.
+                  Local device paths from the coordinator are not required for this project.
+                </p>
+              </div>
+              <button type="button" className="button" onClick={captureTestPhoto} disabled={capturing || !selectedCaptureSourceId}>
+                {capturing ? "Capturing..." : "Capture Test Photo"}
+              </button>
+            </div>
+            {captureMessage ? <p className="mt-3 text-sm font-medium text-emerald-950">{captureMessage}</p> : null}
+          </div>
+        ) : null}
         {captureSourceMessage ? <p className="mt-3 text-sm font-medium text-stone-700">{captureSourceMessage}</p> : null}
       </div>
 
+      {localControlsEnabled ? (
+        <>
       {/* 1. Camera and Profile */}
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Camera and Profile</h2>
@@ -1184,6 +1211,8 @@ export function CameraSetupPanel({
           </div>
         ) : null}
       </div>
+        </>
+      ) : null}
 
       {/* 4. Capture Schedule */}
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">

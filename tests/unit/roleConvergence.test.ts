@@ -118,6 +118,17 @@ describe("convergeNodeRole (local target, mocked systemd)", () => {
     expect(await fake.isActive("plantlab-agent.service")).toBe(true);
   });
 
+  it("enables local camera hardware for standalone web units but not coordinator web units", async () => {
+    await setUp();
+    const unitPath = path.join(process.env.HOME!, ".config", "systemd", "user", "plantlab-web.service");
+
+    await convergeNodeRole({ target: { kind: "local" }, role: "standalone", startServices: true });
+    await expect(readFile(unitPath, "utf8")).resolves.toContain("PLANTLAB_LOCAL_CAMERA_ENABLED=1");
+
+    await convergeNodeRole({ target: { kind: "local" }, role: "coordinator", startServices: true });
+    await expect(readFile(unitPath, "utf8")).resolves.not.toContain("PLANTLAB_LOCAL_CAMERA_ENABLED=1");
+  });
+
   it("is idempotent - converging the same role twice succeeds both times with no leftover mask/failure", async () => {
     await setUp();
     const first = await convergeNodeRole({

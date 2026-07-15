@@ -13,10 +13,14 @@ import {
 
 describe("systemdUnits", () => {
   describe("unit templates", () => {
-    it("web unit runs `run start` and enables local camera hardware", () => {
-      const unit = buildWebServiceUnit({ repoPath: "/repo", runBin: "/usr/bin/pnpm" });
+    it("web unit runs `run start` and only enables local camera hardware when requested", () => {
+      const unit = buildWebServiceUnit({ repoPath: "/repo", runBin: "/usr/bin/pnpm", localCameraEnabled: true });
       expect(unit).toContain("ExecStart=/usr/bin/pnpm run start");
       expect(unit).toContain("PLANTLAB_LOCAL_CAMERA_ENABLED=1");
+
+      const coordinatorUnit = buildWebServiceUnit({ repoPath: "/repo", runBin: "/usr/bin/pnpm", localCameraEnabled: false });
+      expect(coordinatorUnit).toContain("ExecStart=/usr/bin/pnpm run start");
+      expect(coordinatorUnit).not.toContain("PLANTLAB_LOCAL_CAMERA_ENABLED=1");
     });
 
     it("camera unit runs `run camera:service`", () => {

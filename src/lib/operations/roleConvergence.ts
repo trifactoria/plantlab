@@ -251,7 +251,7 @@ export async function convergeNodeRole(input: ConvergeNodeRoleInput): Promise<Co
 
   const install = expected.map((unitName) => ({
     unitName,
-    content: buildUnitContent(unitName, { repoPath, runBin, envPath: agentEnvPath }),
+    content: buildUnitContent(unitName, { repoPath, runBin, envPath: agentEnvPath, localCameraEnabled: input.role === "standalone" }),
   }));
 
   const credentialEnv = isAgentRole && input.credential ? { path: agentEnvPath, content: `PLANTLAB_NODE_CREDENTIAL=${input.credential}\n` } : null;
