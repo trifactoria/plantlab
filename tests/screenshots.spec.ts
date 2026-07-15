@@ -54,6 +54,7 @@ async function capture(page: Page, name: string) {
  * databases - see seedNodeVisualData() in tests/helpers/devData.ts.
  */
 const nodeSurfaces = [
+  "/ (unified dashboard: Nodes table + Environment/Power/Cameras/System tabs, power overlay on charts)",
   `/nodes/${NODE_VISUAL_NAME}`,
   `/nodes/${NODE_VISUAL_NAME}/sensors`, // sensor management: desired/applied/observed + pending revision
   `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-outside`,
@@ -92,8 +93,29 @@ async function captureNodeSurfaces(page: Page, prefix: string) {
   await seedNodeVisualData();
 
   await goto(page, "/");
-  await expect(page.getByRole("link", { name: NODE_VISUAL_NAME, exact: true })).toBeVisible();
+  // The node appears both as a row in the unified Nodes table and as an
+  // Environment panel header, so scope to the first match.
+  await expect(page.getByRole("link", { name: NODE_VISUAL_NAME, exact: true }).first()).toBeVisible();
+  // Default (Environment) tab: sensor cards + temp/humidity charts with the
+  // node's power state overlaid on the same timeline.
+  await expect(page.locator('[data-testid="power-overlay"]').first()).toBeVisible({ timeout: 30_000 });
   await capture(page, `${prefix}-home-with-node`);
+
+  // The remaining dashboard tabs (identical bar in every mode).
+  await page.getByTestId("dashboard-tab-power").click();
+  await expect(page.getByRole("button", { name: "Turn Fans on" })).toBeVisible();
+  await capture(page, `${prefix}-dashboard-power`);
+
+  await page.getByTestId("dashboard-tab-cameras").click();
+  await expect(page.locator('[data-testid^="fleet-camera-"]').first()).toBeVisible({ timeout: 30_000 });
+  await capture(page, `${prefix}-dashboard-cameras`);
+
+  await page.getByTestId("dashboard-tab-system").click();
+  await expect(page.getByRole("heading", { name: "System information" })).toBeVisible();
+  await capture(page, `${prefix}-dashboard-system`);
+
+  await page.getByTestId("dashboard-tab-projects").click();
+  await capture(page, `${prefix}-dashboard-projects`);
 
   // Node overview: three normal outlet cards (fans/lights/water), temperature
   // and humidity charts across sensors at the default 24h range, and the
@@ -200,19 +222,32 @@ for (const viewport of viewports) {
     await seedNodeVisualData();
 
     await goto(page, "/");
+    // Default (Environment) tab loads its cards/charts asynchronously; wait
+    // for real content before capturing the home dashboard.
+    await expect(page.getByText("Environmental summary")).toBeVisible({ timeout: 30_000 });
     await capture(page, `${prefix}-home`);
+
+    // Project creation now lives in the New Project drawer under the Projects
+    // tab, not permanently on the homepage.
+    await page.getByTestId("dashboard-tab-projects").click();
+    await page.getByTestId("new-project-button").click();
+    const newProjectDrawer = page.getByRole("dialog", { name: "New Project" });
+    await expect(newProjectDrawer.getByText(/Photos will be taken every 30 minutes/)).toBeVisible();
     await capture(page, `${prefix}-project-create-schedule-timezone`);
 
     // Distributed CaptureSource picker (grouped by node, remote cameras
     // visible with resolution/availability badges) and the applied/active
-    // sensor checklist, both on the project-creation form.
+    // sensor checklist, both inside the creation drawer. The sensor list is a
+    // separate async fetch whose route compiles on first hit under next dev,
+    // so allow extra time.
     await expect(page.getByTestId("capture-source-option-none")).toBeVisible();
     // Scoped to the radio itself (not getByText) so it can't collide with
     // the "Greenhouse Wide Shelf Study" project card title also on this page.
-    await expect(page.getByRole("radio", { name: /Greenhouse Wide/ })).toBeVisible();
-    await expect(page.getByText("Environmental Sensors", { exact: true })).toBeVisible();
-    await expect(page.getByText("Outside", { exact: true })).toBeVisible();
+    await expect(page.getByRole("radio", { name: /Greenhouse Wide/ })).toBeVisible({ timeout: 15_000 });
+    await expect(newProjectDrawer.getByText("Environmental Sensors", { exact: true })).toBeVisible();
+    await expect(newProjectDrawer.getByRole("checkbox", { name: /Outside/ })).toBeVisible({ timeout: 15_000 });
     await capture(page, `${prefix}-project-create-capture-source-picker`);
+    await page.keyboard.press("Escape");
 
     await goto(page, `/projects/${ids.projectId}`);
     await capture(page, `${prefix}-project-dashboard`);

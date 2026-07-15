@@ -1,143 +1,80 @@
-import Link from "next/link";
-import { CoordinatorStatusPanel } from "@/components/CoordinatorStatusPanel";
-import { GreenhousePanel } from "@/components/GreenhousePanel";
-import { ProjectForm } from "@/components/ProjectForm";
-import { ServiceStatusPanel } from "@/components/ServiceStatusPanel";
-import { formatDateTime } from "@/lib/format";
-import { localCameraHardwareEnabled } from "@/lib/localOnly";
+import { AppHeader } from "@/components/shell/AppHeader";
+import { HomeDashboard } from "@/components/dashboard/HomeDashboard";
+import { getNodeSummaries } from "@/lib/operations/nodeSummary";
 import { readNodeConfig } from "@/lib/operations/config";
-import { getCoordinatorDashboardData } from "@/lib/operations/coordinatorDashboard";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage() {
-  const projects = await prisma.project.findMany({
-    orderBy: { createdAt: "desc" },
-    include: {
-      _count: {
-        select: { plants: true, photos: true, events: true },
-      },
-    },
-  });
-  const canManageLocally = localCameraHardwareEnabled();
-  const nodeConfig = await readNodeConfig();
-  const isCoordinator = nodeConfig?.role === "coordinator";
-  const coordinatorData = isCoordinator ? await getCoordinatorDashboardData(prisma) : null;
-  // Nodes with at least one configured Kasa outlet (e.g. greenhouse-zero) get
-  // a live sensor/power/timer panel here - see src/components/GreenhousePanel.tsx.
-  const greenhouseNodeNames = isCoordinator
-    ? (await prisma.plantLabNode.findMany({ where: { outlets: { some: {} } }, select: { name: true }, orderBy: { name: "asc" } })).map(
-        (node) => node.name,
-      )
-    : [];
+const MODE_LABELS: Record<string, string> = {
+  coordinator: "Coordinator",
+  standalone: "Standalone",
+  "camera-node": "Camera node",
+  "greenhouse-node": "Greenhouse node",
+};
+
+type PageProps = {
+  searchParams?: Promise<{ tab?: string | string[] }>;
+};
+
+export default async function HomePage({ searchParams }: PageProps) {
+  const resolvedSearch = (await searchParams) ?? {};
+  const initialTab = Array.isArray(resolvedSearch.tab) ? resolvedSearch.tab[0] : resolvedSearch.tab;
+
+  const [nodeSummary, projectRecords, nodeConfig, outletNodes, allNodes] = await Promise.all([
+    getNodeSummaries(prisma),
+    prisma.project.findMany({
+      orderBy: { createdAt: "desc" },
+      include: { _count: { select: { plants: true, photos: true, events: true } } },
+    }),
+    readNodeConfig(),
+    prisma.plantLabNode.findMany({ where: { outlets: { some: {} } }, select: { name: true }, orderBy: { name: "asc" } }),
+    prisma.plantLabNode.findMany({ select: { name: true }, orderBy: { name: "asc" } }),
+  ]);
+
+  const powerNodeNames = outletNodes.map((node) => node.name);
+  const powerNodeSet = new Set(powerNodeNames);
+
+  // Nodes with at least one active sensor get an Environment panel; those that
+  // also have outlets additionally get a power-state overlay on their charts.
+  const environmentNodes = nodeSummary.nodes
+    .filter((node) => node.resources.sensors.count > 0)
+    .map((node) => ({ name: node.name, hasOutlets: powerNodeSet.has(node.name) }));
+
+  const projects = projectRecords.map((project) => ({
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    gridWidth: project.gridWidth,
+    gridHeight: project.gridHeight,
+    isTestProject: project.isTestProject,
+    createdAt: project.createdAt.toISOString(),
+    counts: { photos: project._count.photos, plants: project._count.plants, events: project._count.events },
+  }));
+
+  const selfRow = nodeSummary.nodes.find((node) => node.relationship === "self");
+  const systemInfo = {
+    installationName: selfRow?.displayName ?? nodeConfig?.hostname ?? "This installation",
+    mode: MODE_LABELS[nodeConfig?.role ?? "standalone"] ?? "Standalone",
+    hostname: nodeConfig?.hostname ?? selfRow?.name ?? "unknown",
+    attachedNodeCount: nodeSummary.nodes.filter((node) => node.relationship === "attached").length,
+    coordinator: nodeConfig?.role === "coordinator",
+  };
 
   return (
-    <main className="min-h-screen">
-      <header className="border-b border-stone-200 bg-white">
-        <div className="container py-6">
-          <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">
-            PlantLab v0.1
-          </p>
-          <h1 className="mt-2 text-3xl font-semibold text-stone-950">
-            Local plant experiment tracker
-          </h1>
-          <div className="mt-3 flex flex-wrap gap-4">
-            <Link href="/capture-sources" className="text-sm font-semibold text-emerald-700">
-              Shelf Cameras &rarr;
-            </Link>
-            {isCoordinator ? (
-              <Link href="/support" className="text-sm font-semibold text-emerald-700">
-                Support bundles &rarr;
-              </Link>
-            ) : null}
-          </div>
-        </div>
-      </header>
-
-      {isCoordinator && coordinatorData ? (
-        <section className="section pb-0">
-          <div className="container grid gap-6">
-            <CoordinatorStatusPanel data={coordinatorData} localCameraServiceEnabled={canManageLocally} />
-            {greenhouseNodeNames.map((nodeName) => (
-              <GreenhousePanel key={nodeName} nodeName={nodeName} />
-            ))}
-          </div>
-        </section>
-      ) : canManageLocally ? (
-        <section className="section pb-0">
-          <div className="container">
-            <ServiceStatusPanel />
-          </div>
-        </section>
-      ) : null}
-
+    <main className="min-h-screen bg-stone-50">
+      <AppHeader />
       <section className="section">
-        <div className="container grid gap-6 lg:grid-cols-[1fr_420px]">
-          <div>
-            <h2 className="text-xl font-semibold text-stone-950">Projects</h2>
-            <div className="mt-4 grid gap-3">
-              {projects.length === 0 ? (
-                <p className="rounded-lg border border-dashed border-stone-300 bg-white p-5 text-stone-600">
-                  No projects yet. Create one to start tracking photos and plant events.
-                </p>
-              ) : (
-                projects.map((project) => (
-                  <Link
-                    key={project.id}
-                    href={`/projects/${project.id}`}
-                    className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm transition hover:border-emerald-300"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="text-lg font-semibold text-stone-950">
-                          {project.name}
-                        </h3>
-                        {project.isTestProject ? (
-                          <span className="mt-1 inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900">
-                            Test project
-                          </span>
-                        ) : null}
-                        {project.description ? (
-                          <p className="mt-1 text-sm text-stone-600">
-                            {project.description}
-                          </p>
-                        ) : null}
-                      </div>
-                      <span className="rounded-md bg-stone-100 px-2.5 py-1 text-xs font-semibold text-stone-700">
-                        {project.gridWidth} x {project.gridHeight}
-                      </span>
-                    </div>
-                    <dl className="mt-4 grid gap-3 text-sm text-stone-600 sm:grid-cols-4">
-                      <div>
-                        <dt className="font-medium text-stone-950">Photos</dt>
-                        <dd>{project._count.photos}</dd>
-                      </div>
-                      <div>
-                        <dt className="font-medium text-stone-950">Plants</dt>
-                        <dd>{project._count.plants}</dd>
-                      </div>
-                      <div>
-                        <dt className="font-medium text-stone-950">Events</dt>
-                        <dd>{project._count.events}</dd>
-                      </div>
-                      <div>
-                        <dt className="font-medium text-stone-950">Created</dt>
-                        <dd>{formatDateTime(project.createdAt)}</dd>
-                      </div>
-                    </dl>
-                  </Link>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div>
-            <h2 className="text-xl font-semibold text-stone-950">New Project</h2>
-            <div className="mt-4">
-              <ProjectForm />
-            </div>
-          </div>
+        <div className="container">
+          <HomeDashboard
+            nodeSummary={nodeSummary}
+            projects={projects}
+            environmentNodes={environmentNodes}
+            powerNodeNames={powerNodeNames}
+            systemInfo={systemInfo}
+            allNodeNames={allNodes.map((node) => node.name)}
+            initialTab={initialTab}
+          />
         </div>
       </section>
     </main>

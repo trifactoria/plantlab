@@ -16,22 +16,28 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   const ids = await seedVisualData();
 
   await goto(page, "/");
-  await expect(page.getByRole("heading", { name: "Local plant experiment tracker" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /PlantLab/ }).first()).toBeVisible();
+  // The Projects tab is the default when no sensors are configured; the
+  // existing project is listed there.
   await expect(page.getByRole("link", { name: "Playwright Radish Study" })).toBeVisible();
 
-  await page.getByLabel("Name").fill("Playwright Auto Folder Project");
-  // Project creation now selects a distributed CaptureSource, not a raw
+  // Project creation now happens in the New Project drawer rather than a
+  // permanently-displayed form on the homepage.
+  await page.getByTestId("new-project-button").click();
+  const newProjectDrawer = page.getByRole("dialog", { name: "New Project" });
+  await newProjectDrawer.getByLabel("Name").fill("Playwright Auto Folder Project");
+  // Project creation selects a distributed CaptureSource, not a raw
   // /dev/video* path - no CaptureSource is configured in this fixture, so
   // "No camera" is the only real option and stays selected.
   await expect(page.getByTestId("capture-source-option-none")).toBeVisible();
   await expect(page.getByTestId("capture-source-option-none").locator('input[type="radio"]')).toBeChecked();
-  await expect(page.getByText("Create and use a PlantLab photo folder")).toBeVisible();
-  await expect(page.getByLabel("Planting date and time")).toBeVisible();
-  await expect(page.getByText("Planting date/time unknown")).toBeVisible();
-  await expect(page.getByLabel("Timezone")).toBeVisible();
-  await expect(page.getByLabel("Schedule anchor")).toBeVisible();
-  await expect(page.getByText(/Photos will be taken every 30 minutes/)).toBeVisible();
-  await page.getByRole("button", { name: "Create Project" }).click();
+  await expect(newProjectDrawer.getByText("Create and use a PlantLab photo folder")).toBeVisible();
+  await expect(newProjectDrawer.getByLabel("Planting date and time")).toBeVisible();
+  await expect(newProjectDrawer.getByText("Planting date/time unknown")).toBeVisible();
+  await expect(newProjectDrawer.getByLabel("Timezone")).toBeVisible();
+  await expect(newProjectDrawer.getByLabel("Schedule anchor")).toBeVisible();
+  await expect(newProjectDrawer.getByText(/Photos will be taken every 30 minutes/)).toBeVisible();
+  await newProjectDrawer.getByRole("button", { name: "Create Project" }).click();
   await expect(page.getByRole("heading", { name: "Playwright Auto Folder Project" })).toBeVisible();
   const createdProjectId = page.url().split("/").filter(Boolean).at(-1);
   if (createdProjectId) {
@@ -546,29 +552,38 @@ test("guided project crop setup, legacy adoption, and visual-history sync", asyn
   await expect(page.getByText("0 failures")).toBeVisible();
 });
 
-test.describe("role-aware dashboard", () => {
-  test("a standalone/non-coordinator node shows the local Capture Service panel", async ({ page }) => {
+test.describe("unified dashboard", () => {
+  // The dashboard is intentionally identical in both modes: one Nodes table
+  // with the current install as the first ("This install") row, then the same
+  // tab bar. The coordinator differs only by having more node rows.
+  test("standalone shows the self row in the unified Nodes table with Standalone mode", async ({ page }) => {
     const original = await readNodeConfig();
     await writeNodeConfig("standalone");
     try {
       await goto(page, "/");
-      await expect(page.getByRole("heading", { name: "Capture Service" })).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Coordinator" })).not.toBeVisible();
-      await expect(page.getByRole("heading", { name: "Nodes" })).not.toBeVisible();
+      await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+      const selfRow = page.locator("tr", { hasText: "This install" });
+      await expect(selfRow).toBeVisible();
+      await expect(selfRow).toContainText("Standalone");
+      // Same tab bar as coordinator mode.
+      await expect(page.getByTestId("dashboard-tab-environment")).toBeVisible();
+      await expect(page.getByTestId("dashboard-tab-system")).toBeVisible();
     } finally {
       if (original) await writeNodeConfigRaw(original);
     }
   });
 
-  test("a coordinator node shows Coordinator/Nodes sections instead of the local capture-service card", async ({ page }) => {
+  test("coordinator shows the same table and tabs with a Coordinator self row", async ({ page }) => {
     const original = await readNodeConfig();
     await writeNodeConfig("coordinator");
     try {
       await goto(page, "/");
-      await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Capture Service" })).not.toBeVisible();
-      await expect(page.getByText("Local camera service:")).toBeVisible();
+      const selfRow = page.locator("tr", { hasText: "This install" });
+      await expect(selfRow).toContainText("Coordinator");
+      await expect(page.getByTestId("dashboard-tab-projects")).toBeVisible();
+      await expect(page.getByTestId("dashboard-tab-power")).toBeVisible();
+      await expect(page.getByTestId("dashboard-tab-cameras")).toBeVisible();
     } finally {
       if (original) await writeNodeConfigRaw(original);
     }

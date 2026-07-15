@@ -7,6 +7,15 @@ import type { NormalizedSeries } from "@/lib/metricHistory";
 /** Deliberately generic - a color per series index, cycling if there are more series than colors. Not tied to any particular sensor set. */
 export const DEFAULT_SERIES_COLORS = ["#059669", "#2563eb", "#d97706", "#db2777", "#7c3aed", "#0891b2"];
 
+/**
+ * Plot-area gutters (in px) implied by the chart margins plus the Y-axis
+ * width below. Exported so overlays rendered outside the chart (e.g. power
+ * state lanes) can align their horizontal axis pixel-for-pixel with the line
+ * chart's plotted time range. Keep in sync with the LineChart margins/YAxis.
+ */
+export const CHART_LEFT_GUTTER_PX = 48;
+export const CHART_RIGHT_GUTTER_PX = 12;
+
 function defaultFormatTimestamp(at: number): string {
   const date = new Date(at);
   return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -64,6 +73,7 @@ export function MetricChart({
   formatValue = defaultFormatValue,
   formatTimestamp = defaultFormatTimestamp,
   domainOptions,
+  xDomain,
 }: {
   series: NormalizedSeries[];
   unit: string;
@@ -73,10 +83,12 @@ export function MetricChart({
   formatValue?: (value: number) => string;
   formatTimestamp?: (at: number) => string;
   domainOptions?: MetricDomainOptions | null;
+  /** Force the X time domain (e.g. to align with a power-state overlay on the same range). Defaults to the data extent. */
+  xDomain?: [number, number];
 }) {
   const allPoints = series.flatMap((item) => item.points);
   const domain: [number, number] | undefined =
-    allPoints.length > 0 ? [Math.min(...allPoints.map((point) => point.at)), Math.max(...allPoints.map((point) => point.at))] : undefined;
+    xDomain ?? (allPoints.length > 0 ? [Math.min(...allPoints.map((point) => point.at)), Math.max(...allPoints.map((point) => point.at))] : undefined);
   const yDomainOptions = domainOptions === undefined ? domainDefaultsForUnit(unit) : domainOptions;
   const visibleValues = series
     .filter((item) => !hiddenKeys?.has(item.key))
