@@ -10,12 +10,26 @@ if (typeof window !== "undefined") {
 
 export type ScreenshotMode = "fixture" | "live-readonly" | "none";
 
+export type SupportTargetStatus = "queued" | "collecting" | "succeeded" | "partial" | "failed";
+
+export type SupportProgressEvent =
+  | { type: "target-start"; host: string; role: string }
+  | { type: "target-done"; host: string; role: string; status: SupportTargetStatus }
+  | { type: "screenshots-start"; mode: ScreenshotMode }
+  | { type: "screenshots-done"; ok: boolean };
+
 export type SupportCollectOptions = {
   node?: string | null;
+  /** One or more explicit node hosts to include (structured, never a shelled string). */
+  nodes?: string[];
   coordinator?: string | null;
   all?: boolean;
   screenshots?: ScreenshotMode;
+  includeLogs?: boolean;
+  /** Intrusive per-sensor hardware probes on the edge node. Off by default. */
+  includeHardwareTests?: boolean;
   outputDir?: string;
+  onProgress?: (event: SupportProgressEvent) => void;
 };
 
 type ProbeResult = {
@@ -62,20 +76,48 @@ export async function collectSupportBundle(options: SupportCollectOptions = {}) 
     await collectLocal(root, manifest);
     for (const host of hosts) {
       if (host.host === os.hostname()) continue;
-      await collectHost(root, manifest, host.host, host.role);
+      options.onProgress?.({ type: "target-start", host: host.host, role: host.role });
+      const before = manifest.probes.length;
+      await collectHost(root, manifest, host.host, host.role, options);
+      const hostProbes = manifest.probes.slice(before);
+      options.onProgress?.({ type: "target-done", host: host.host, role: host.role, status: summarizeHostStatus(hostProbes) });
     }
+    if ((options.screenshots ?? "none") !== "none") options.onProgress?.({ type: "screenshots-start", mode: options.screenshots ?? "none" });
+    const screenshotsBefore = manifest.probes.length;
     await collectScreenshots(root, manifest, options.screenshots ?? "none", options.coordinator ?? "plantlab");
+    if ((options.screenshots ?? "none") !== "none") {
+      options.onProgress?.({ type: "screenshots-done", ok: manifest.probes.slice(screenshotsBefore).every((probe) => probe.ok) });
+    }
     await writeFile(path.join(root, "manifest.json"), JSON.stringify({ ...manifest, failures: manifest.probes.filter((probe) => !probe.ok) }, null, 2));
     const zipPath = path.join(outputDir, `plantlab-support-${timestamp}.zip`);
     await createZip(root, zipPath);
-    return { zipPath, manifestPath: path.join(root, "manifest.json"), manifest };
+    const { size } = await stat(zipPath);
+    return { zipPath, filename: path.basename(zipPath), size, manifestPath: path.join(root, "manifest.json"), manifest };
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
 }
 
-function selectedHosts(options: SupportCollectOptions) {
-  if (options.all) return DEFAULT_HOSTS;
+/** Succeeded when every probe passed, failed when none did, partial otherwise - one offline host never aborts the whole bundle. */
+export function summarizeHostStatus(probes: ProbeResult[]): SupportTargetStatus {
+  if (probes.length === 0) return "succeeded";
+  const okCount = probes.filter((probe) => probe.ok).length;
+  if (okCount === probes.length) return "succeeded";
+  if (okCount === 0) return "failed";
+  return "partial";
+}
+
+export function selectedHosts(options: SupportCollectOptions): Array<{ host: string; role: string }> {
+  if (options.all) return [...DEFAULT_HOSTS];
+  const nodes = options.nodes?.filter(Boolean) ?? [];
+  if (nodes.length > 0) {
+    const coordinator = options.coordinator ? [{ host: options.coordinator, role: "coordinator" }] : [];
+    const mapped = nodes.map((node) => DEFAULT_HOSTS.find((host) => host.host === node) ?? { host: node, role: "node" });
+    // De-duplicate by host in case the coordinator was also listed as a node.
+    const byHost = new Map<string, { host: string; role: string }>();
+    for (const entry of [...coordinator, ...mapped]) byHost.set(entry.host, entry);
+    return [...byHost.values()];
+  }
   if (options.node) {
     const known = DEFAULT_HOSTS.find((host) => host.host === options.node);
     return [known ?? { host: options.node, role: "node" }];
@@ -98,17 +140,17 @@ async function collectLocal(root: string, manifest: { probes: ProbeResult[] }) {
   }
 }
 
-async function collectHost(root: string, manifest: { probes: ProbeResult[] }, host: string, role: string) {
+async function collectHost(root: string, manifest: { probes: ProbeResult[] }, host: string, role: string, options: SupportCollectOptions) {
   const dir = path.join(root, host);
   await mkdir(dir, { recursive: true });
-  const commands = hostCommands(host, role);
+  const commands = hostCommands(host, role, { includeLogs: options.includeLogs !== false, includeHardwareTests: options.includeHardwareTests === true });
   for (const item of commands) {
     await runProbe(manifest, host, role, "ssh", [host, item.remote], path.join(dir, item.path), item.timeoutMs);
   }
 }
 
-function hostCommands(host: string, role: string): HostCommand[] {
-  const common = [
+function hostCommands(host: string, role: string, opts: { includeLogs: boolean; includeHardwareTests: boolean }): HostCommand[] {
+  const common: HostCommand[] = [
     { path: "system/hostname.txt", remote: "hostname; date -Is; timedatectl 2>/dev/null | sed -n '1,8p'; df -h ." },
     { path: "system/git.txt", remote: "cd ~/projects/plantlab 2>/dev/null || cd ~/plantlab 2>/dev/null || cd /home/andy/projects/plantlab 2>/dev/null || exit 0; git status --short --branch; git rev-parse HEAD" },
   ];
@@ -120,8 +162,12 @@ function hostCommands(host: string, role: string): HostCommand[] {
       { path: "api/node-info.json", remote: "curl -fsS http://127.0.0.1:3000/api/node-info 2>&1" },
       { path: "api/nodes-greenhouse-zero.json", remote: "curl -fsS http://127.0.0.1:3000/api/nodes/greenhouse-zero 2>&1" },
       { path: "database/migrate-status.txt", remote: "cd /home/andy/projects/plantlab && pnpm prisma migrate status 2>&1" },
-      { path: "logs/web.txt", remote: "journalctl --user -u plantlab-web.service -n 200 --no-pager 2>&1" },
-      { path: "logs/camera.txt", remote: "journalctl --user -u plantlab-camera.service -n 200 --no-pager 2>&1" },
+      ...(opts.includeLogs
+        ? ([
+            { path: "logs/web.txt", remote: "journalctl --user -u plantlab-web.service -n 200 --no-pager 2>&1" },
+            { path: "logs/camera.txt", remote: "journalctl --user -u plantlab-camera.service -n 200 --no-pager 2>&1" },
+          ] as HostCommand[])
+        : []),
     ];
   }
   if (host === "greenhouse-zero") {
@@ -129,18 +175,19 @@ function hostCommands(host: string, role: string): HostCommand[] {
       ...common,
       { path: "doctor/edge-doctor.txt", remote: "bash -lc 'plantlab-edge doctor' 2>&1" },
       { path: "config/effective.json", remote: "bash -lc 'plantlab-edge config show --json' 2>&1" },
-      { path: "sensors/hardware.txt", remote: "bash -lc 'plantlab-edge doctor --hardware --attempts 1 --interval 0.1' 2>&1" },
       { path: "cameras/inventory.json", remote: "bash -lc 'cat ~/.local/state/plantlab-edge-agent/camera-inventory-cache.json' 2>&1" },
       { path: "power/status.txt", remote: "bash -lc 'plantlab-edge power status' 2>&1", timeoutMs: 45_000 },
       { path: "services/edge-agent.txt", remote: "systemctl --user status plantlab-edge-agent.service --no-pager -l 2>&1 | tail -160" },
-      { path: "logs/edge-agent.txt", remote: "journalctl --user -u plantlab-edge-agent.service -n 200 --no-pager 2>&1" },
+      // Intrusive per-sensor hardware read - only when explicitly opted in.
+      ...(opts.includeHardwareTests ? ([{ path: "sensors/hardware.txt", remote: "bash -lc 'plantlab-edge doctor --hardware --attempts 1 --interval 0.1' 2>&1" }] as HostCommand[]) : []),
+      ...(opts.includeLogs ? ([{ path: "logs/edge-agent.txt", remote: "journalctl --user -u plantlab-edge-agent.service -n 200 --no-pager 2>&1" }] as HostCommand[]) : []),
     ];
   }
   return [
     ...common,
     { path: "doctor/agent-service.txt", remote: "systemctl --user status plantlab-agent.service --no-pager -l 2>&1 | tail -160" },
     { path: "cameras/v4l2.txt", remote: "ls -l /dev/video* /dev/v4l/by-id /dev/v4l/by-path 2>&1; v4l2-ctl --list-devices 2>&1" },
-    { path: "logs/agent.txt", remote: "journalctl --user -u plantlab-agent.service -n 200 --no-pager 2>&1" },
+    ...(opts.includeLogs ? ([{ path: "logs/agent.txt", remote: "journalctl --user -u plantlab-agent.service -n 200 --no-pager 2>&1" }] as HostCommand[]) : []),
   ];
 }
 
@@ -170,18 +217,9 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
   if (mode === "fixture") {
     const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "plantlab-screenshots-fixture-"));
     try {
-      const fixtureDb = path.join(fixtureRoot, "prisma", "plantlab-test-playwright.db");
-      await mkdir(path.dirname(fixtureDb), { recursive: true });
       const port = await findFreePort();
-      const env = {
-        ...process.env,
-        DATABASE_URL: `file:${fixtureDb}`,
-        PLANTLAB_ROOT_DIR: fixtureRoot,
-        PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1",
-        PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${port}`,
-        PLAYWRIGHT_REUSE_EXISTING_SERVER: "0",
-        PORT: String(port),
-      };
+      const { fixtureDb, env } = buildFixtureScreenshotEnv(fixtureRoot, port);
+      await mkdir(path.dirname(fixtureDb), { recursive: true });
       const migrate = await execFileResult("pnpm", ["prisma", "migrate", "deploy"], 120_000, process.cwd(), env);
       await writeFile(path.join(dir, "fixture-migrate.txt"), redact(`${migrate.stdout}\n${migrate.stderr}`));
       manifest.probes.push({ host: "local", role: "screenshots", command: "fixture prisma migrate deploy", ok: migrate.status === 0, status: migrate.status, path: path.join(dir, "fixture-migrate.txt") });
@@ -209,6 +247,36 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
   const copyResult = await execFileResult("scp", ["-r", `${coordinatorHost}:/home/andy/projects/plantlab/artifacts/screenshots`, path.join(dir, "artifacts")], 120_000);
   await writeFile(path.join(dir, "live-readonly-copy.txt"), redact(`${copyResult.stdout}\n${copyResult.stderr}`));
   manifest.probes.push({ host: coordinatorHost, role: "screenshots", command: "copy live-readonly screenshots", ok: copyResult.status === 0, status: copyResult.status, path: path.join(dir, "live-readonly-copy.txt") });
+}
+
+/**
+ * Builds the isolated environment for a fixture-mode screenshot run: a
+ * temporary, absolute SQLite database under the OS temp directory (never a
+ * relative or repo-local path, and never the live coordinator DB), plus the
+ * PLANTLAB_SCREENSHOTS_FIXTURE_ONLY flag the mutating fixture helpers
+ * require (see assertFixtureDatabase in tests/helpers/devData.ts). Extracted
+ * as a pure function so the isolation contract is directly unit-tested.
+ */
+export function buildFixtureScreenshotEnv(fixtureRoot: string, port: number): { fixtureDb: string; env: NodeJS.ProcessEnv } {
+  if (!path.isAbsolute(fixtureRoot)) {
+    throw new Error("Fixture screenshot root must be an absolute path.");
+  }
+  const fixtureDb = path.join(fixtureRoot, "prisma", "plantlab-test-playwright.db");
+  return {
+    fixtureDb,
+    env: {
+      ...process.env,
+      DATABASE_URL: `file:${fixtureDb}`,
+      PLANTLAB_ROOT_DIR: fixtureRoot,
+      PLANTLAB_SCREENSHOTS_FIXTURE_ONLY: "1",
+      // A fixture run must never reuse an already-running (possibly live)
+      // server, and must never claim to be a live-readonly run.
+      PLANTLAB_SCREENSHOTS_LIVE_READONLY: "0",
+      PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${port}`,
+      PLAYWRIGHT_REUSE_EXISTING_SERVER: "0",
+      PORT: String(port),
+    },
+  };
 }
 
 function findFreePort(): Promise<number> {

@@ -2,8 +2,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import sharp from "sharp";
+import { resolveNodeConfigPath, writeNodeConfig } from "../../src/lib/operations/config";
 import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { ingestPowerState, parsePowerStateReport } from "../../src/lib/operations/powerProtocol";
+import { createDesiredSensorConfigRevision, reportAppliedSensorConfig, type DesiredSensorEntry } from "../../src/lib/operations/sensorConfig";
 import { prisma } from "../../src/lib/prisma";
 
 export const DEV_IDS = {
@@ -33,7 +35,16 @@ export const DEV_IDS = {
 const TINY_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/Aaf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/Aaf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 
-function assertFixtureDatabase() {
+/**
+ * Critical safety boundary (see AGENTS.md / CLAUDE.md and the restored
+ * incident where fixture cleanup deleted the live greenhouse-zero node):
+ * every mutating fixture helper below calls this first and refuses to run
+ * unless it can positively prove it is pointed at an isolated fixture
+ * database - never the live coordinator (plantlab) or standalone (xps) one.
+ * Exported so the isolation guard itself is directly unit-tested
+ * (tests/unit/screenshotIsolation.test.ts).
+ */
+export function assertFixtureDatabase() {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   const rootDir = process.env.PLANTLAB_ROOT_DIR ?? "";
   const isVitestIsolated = process.env.VITEST === "true" && /plantlab-test/i.test(databaseUrl);
@@ -413,6 +424,14 @@ function deterministicJitter(seed: number): number {
  */
 export async function seedNodeVisualData(now: Date = new Date()) {
   assertFixtureDatabase();
+  // The coordinator dashboard on the homepage (and its exact node-name link)
+  // only renders when the node-local config reports role "coordinator" - see
+  // readNodeConfig() in src/app/page.tsx. Without this, the isolated fixture
+  // homepage has no greenhouse-zero link and the fixture support-bundle
+  // screenshot probe fails (Part 5). resolveNodeConfigPath() writes under
+  // PLANTLAB_ROOT_DIR, which assertFixtureDatabase() has already proven is an
+  // isolated fixture directory - never the live coordinator's root.
+  await writeNodeConfig("coordinator", { nodeName: "fixture-coordinator" });
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
   const registered = await registerOrRotateNode(prisma, { name: NODE_VISUAL_NAME, role: "greenhouse-node", rotateCredential: true });
   const nodeId = registered.node.id;
@@ -509,6 +528,58 @@ export async function seedNodeVisualData(now: Date = new Date()) {
       });
     }
   }
+
+  // A retired/historical sensor (greenhouse-ambient) with real readings, so
+  // the "Retired / historical" section and "history still reachable" state
+  // are exercised - it must stay out of active charts.
+  const ambient = await prisma.nodeSensor.create({
+    data: {
+      nodeId,
+      key: "greenhouse-ambient",
+      name: "Ambient (retired)",
+      type: "dht22",
+      gpio: 5,
+      placement: "old ambient probe",
+      enabled: false,
+      configuredActive: false,
+      retiredAt: new Date(now.getTime() - 5 * 24 * 60 * 60_000),
+      firstSeenAt: new Date(now.getTime() - 20 * 24 * 60 * 60_000),
+      lastSeenAt: new Date(now.getTime() - 5 * 24 * 60 * 60_000),
+      lastAttemptAt: new Date(now.getTime() - 5 * 24 * 60 * 60_000),
+      lastAcceptedAt: new Date(now.getTime() - 5 * 24 * 60 * 60_000),
+      latestClassification: "accepted",
+      latestTemperatureC: 20.4,
+      latestHumidityPct: 51,
+    },
+  });
+  await prisma.sensorReading.createMany({
+    data: Array.from({ length: 12 }, (_, i) => ({
+      sensorId: ambient.id,
+      nodeId,
+      eventId: `greenhouse-ambient-${i}`,
+      capturedAt: new Date(now.getTime() - (6 * 24 + i) * 60 * 60_000),
+      temperatureC: 20 + deterministicJitter(4000 + i),
+      humidityPct: 50 + deterministicJitter(5000 + i) * 2,
+    })),
+  });
+
+  // Establish an applied desired/applied sensor config revision (1/1) so the
+  // desired/applied/observed UI shows a real "Applied revision #1" state
+  // rather than the legacy compatibility heuristic. The four shelf sensors
+  // are active; ambient is retired.
+  const configEntries: DesiredSensorEntry[] = [
+    ...SENSOR_DEFS.map((def) => ({ key: def.key, name: def.name, type: "dht22", gpio: def.gpio, placement: def.placement, enabled: true, retired: false })),
+    { key: "greenhouse-ambient", name: "Ambient (retired)", type: "dht22", gpio: 5, placement: "old ambient probe", enabled: false, retired: true },
+  ];
+  await createDesiredSensorConfigRevision(prisma, NODE_VISUAL_NAME, configEntries, { requestedBy: "fixture" });
+  await reportAppliedSensorConfig(prisma, nodeId, { revision: 1, status: "applied", entries: configEntries });
+  // Re-assert the seeded observed status the config sync doesn't touch, so
+  // "observed failure does not imply configuration rejection" is visible on
+  // greenhouse-top (applied #1, but observed failing).
+  await prisma.nodeSensor.update({
+    where: { nodeId_key: { nodeId, key: "greenhouse-top" } },
+    data: { latestClassification: "failed", latestTemperatureC: null, latestHumidityPct: null, lastDiagnosticCode: "sensor-no-response", lastDiagnosticMessage: "No DHT22 response pulses were received." },
+  });
 
   // Fans, lights, and water are all ordinary "normal" outlets - Water has no
   // special safety casing (see src/lib/outletBehavior.ts).
@@ -659,23 +730,98 @@ export async function seedNodeVisualData(now: Date = new Date()) {
     },
   });
 
-  // Three cameras, one unavailable.
-  await prisma.nodeCamera.createMany({
-    data: [
-      { nodeId, stableId: "usb:1a2b:3c4d:CAM1", devicePath: "/dev/video0", name: "Greenhouse Wide", vendorId: "1a2b", productId: "3c4d", serial: "CAM1", available: true, lastSeenAt: now },
-      { nodeId, stableId: "usb:1a2b:3c4d:CAM2", devicePath: "/dev/video1", name: "Greenhouse Top Shelf", vendorId: "1a2b", productId: "3c4d", serial: "CAM2", available: true, lastSeenAt: now },
-      {
+  // Cameras: three physically-identical USB webcams (same vendor/product/
+  // serial, matching the live greenhouse-zero situation) distinguished only
+  // by physical/USB path. Two are active and assigned; one went unavailable
+  // after a USB reconnect and has reattach candidates (one ambiguous).
+  const SHARED = { vendorId: "32e6", productId: "9221", serial: "202601081445001" };
+  const CAM_FORMATS = JSON.stringify([{ pixelFormat: "mjpeg", description: "Motion-JPEG", resolutions: [{ width: 1920, height: 1080, frameRates: ["30 fps"] }, { width: 1280, height: 720, frameRates: ["30 fps"] }] }]);
+  const evidence = (physicalPath: string) => JSON.stringify({ serial: SHARED.serial, vendorId: SHARED.vendorId, productId: SHARED.productId, physicalPath });
+
+  async function makeAssignedCamera(opts: { stableId: string; name: string; devicePath: string; physicalPath: string; usbPort: string; rotation: number }) {
+    const camera = await prisma.nodeCamera.create({
+      data: {
         nodeId,
-        stableId: "usb:1a2b:3c4d:CAM3",
-        devicePath: "/dev/video2",
-        name: "Greenhouse Door",
-        vendorId: "1a2b",
-        productId: "3c4d",
-        serial: "CAM3",
-        available: false,
-        lastSeenAt: new Date(now.getTime() - 3 * 24 * 60 * 60_000),
+        stableId: opts.stableId,
+        devicePath: opts.devicePath,
+        name: opts.name,
+        ...SHARED,
+        physicalPath: opts.physicalPath,
+        usbPath: opts.physicalPath,
+        usbPort: opts.usbPort,
+        formatsJson: CAM_FORMATS,
+        identityEvidenceJson: evidence(opts.physicalPath),
+        available: true,
+        enabled: true,
+        lastSeenAt: now,
       },
-    ],
+    });
+    const source = await prisma.captureSource.create({
+      data: {
+        name: `${opts.name} source`,
+        cameraDevice: opts.devicePath,
+        cameraName: opts.name,
+        cameraStableId: opts.stableId,
+        width: 1920,
+        height: 1080,
+        rotation: opts.rotation,
+        captureDirectory: path.join(process.cwd(), "data", "playwright", `cam-${opts.usbPort}`),
+        photoIntervalMinutes: 60,
+        active: true,
+      },
+    });
+    await prisma.nodeCamera.update({ where: { id: camera.id }, data: { captureSourceId: source.id } });
+    await prisma.nodeCameraAssignment.create({
+      data: { nodeId, nodeCameraId: camera.id, captureSourceId: source.id, name: `${opts.name} 1080p`, width: 1920, height: 1080, inputFormat: "mjpeg", active: true },
+    });
+    await prisma.nodeCameraEndpoint.create({
+      data: { nodeId, nodeCameraId: camera.id, stableId: opts.stableId, devicePath: opts.devicePath, name: opts.name, ...SHARED, physicalPath: opts.physicalPath, usbPath: opts.physicalPath, usbPort: opts.usbPort, formatsJson: CAM_FORMATS, available: true, confidence: "reported-stable-id", evidenceJson: evidence(opts.physicalPath) },
+    });
+    return camera;
+  }
+
+  await makeAssignedCamera({ stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.1", name: "Greenhouse Wide", devicePath: "/dev/video0", physicalPath: "platform-fd500000.pcie-usb-0:1.1", usbPort: "1.1", rotation: 0 });
+  await makeAssignedCamera({ stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.2", name: "Greenhouse Top Shelf", devicePath: "/dev/video2", physicalPath: "platform-fd500000.pcie-usb-0:1.2", usbPort: "1.2", rotation: 90 });
+
+  // The unavailable camera - it was at usb port 1.3 and went missing after a
+  // reconnect. Keep its active assignment so reattach has something to fix.
+  const doorPhysical = "platform-fd500000.pcie-usb-0:1.3";
+  const door = await prisma.nodeCamera.create({
+    data: {
+      nodeId,
+      stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.3",
+      devicePath: "/dev/video4",
+      name: "Greenhouse Door",
+      ...SHARED,
+      physicalPath: doorPhysical,
+      usbPath: doorPhysical,
+      usbPort: "1.3",
+      formatsJson: CAM_FORMATS,
+      identityEvidenceJson: evidence(doorPhysical),
+      available: false,
+      enabled: true,
+      lastSeenAt: new Date(now.getTime() - 6 * 60 * 60_000),
+    },
+  });
+  const doorSource = await prisma.captureSource.create({
+    data: { name: "Greenhouse Door source", cameraDevice: "/dev/video4", cameraName: "Greenhouse Door", cameraStableId: door.stableId, width: 1920, height: 1080, rotation: 0, captureDirectory: path.join(process.cwd(), "data", "playwright", "cam-door"), photoIntervalMinutes: 60, active: true },
+  });
+  await prisma.nodeCamera.update({ where: { id: door.id }, data: { captureSourceId: doorSource.id } });
+  await prisma.nodeCameraAssignment.create({
+    data: { nodeId, nodeCameraId: door.id, captureSourceId: doorSource.id, name: "Greenhouse Door 1080p", width: 1920, height: 1080, inputFormat: "mjpeg", active: true },
+  });
+  // Its old (now unavailable) endpoint...
+  await prisma.nodeCameraEndpoint.create({
+    data: { nodeId, nodeCameraId: door.id, stableId: door.stableId, devicePath: "/dev/video4", name: "Greenhouse Door", ...SHARED, physicalPath: doorPhysical, usbPath: doorPhysical, usbPort: "1.3", formatsJson: CAM_FORMATS, available: false, unavailableAt: new Date(now.getTime() - 6 * 60 * 60_000), confidence: "reported-stable-id", evidenceJson: evidence(doorPhysical) },
+  });
+  // ...and two available discovered endpoints it could reattach to. The first
+  // shares the serial AND is on the moved-but-plausible 1.3.3 path; the second
+  // shares only the serial - so the pair is intentionally ambiguous.
+  await prisma.nodeCameraEndpoint.create({
+    data: { nodeId, nodeCameraId: null, stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.3.3", devicePath: "/dev/video6", name: "webcam 1080P", ...SHARED, physicalPath: "platform-fd500000.pcie-usb-0:1.3.3", usbPath: "platform-fd500000.pcie-usb-0:1.3.3", usbPort: "1.3.3", formatsJson: CAM_FORMATS, available: true, confidence: "serial-vendor-product", evidenceJson: evidence("platform-fd500000.pcie-usb-0:1.3.3") },
+  });
+  await prisma.nodeCameraEndpoint.create({
+    data: { nodeId, nodeCameraId: null, stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.4", devicePath: "/dev/video8", name: "webcam 1080P", ...SHARED, physicalPath: "platform-fd500000.pcie-usb-0:1.4", usbPath: "platform-fd500000.pcie-usb-0:1.4", usbPort: "1.4", formatsJson: CAM_FORMATS, available: true, confidence: "serial-vendor-product", evidenceJson: evidence("platform-fd500000.pcie-usb-0:1.4") },
   });
 
   return { nodeName: NODE_VISUAL_NAME, nodeId };
@@ -685,6 +831,9 @@ export async function seedNodeVisualData(now: Date = new Date()) {
 export async function cleanupNodeVisualData() {
   assertFixtureDatabase();
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
+  // Remove the isolated coordinator config written by seedNodeVisualData so a
+  // reused fixture directory doesn't leak coordinator role into later runs.
+  await rm(resolveNodeConfigPath(), { force: true }).catch(() => undefined);
 }
 
 export async function mockCameraApis(page: Page) {

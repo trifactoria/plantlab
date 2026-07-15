@@ -11,12 +11,13 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
   const node = await prisma.plantLabNode.findUnique({
     where: { name: nodeName },
     include: {
-      cameras: { select: { id: true, available: true } },
+      cameras: { select: { id: true, available: true, retiredAt: true, assignments: { where: { active: true }, select: { id: true } } } },
       outlets: { select: { id: true, actualState: true, available: true } },
     },
   });
   if (!node) return null;
   const activeSensors = await activeSensorsForNode(prisma, node.id);
+  const retiredSensorCount = await prisma.nodeSensor.count({ where: { nodeId: node.id, retiredAt: { not: null } } });
 
   const [activeCredential, captureQueued, captureClaimed, powerPending, powerClaimed, testsPending, testsClaimed, testsRunning] = await Promise.all([
     hasActiveCredential(prisma, node.id),
@@ -52,9 +53,14 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
       capabilities: parseCapabilities(node.capabilitiesJson),
     },
     cameras: {
-      total: node.cameras.length,
-      available: node.cameras.filter((camera) => camera.available).length,
-      unavailable: node.cameras.filter((camera) => !camera.available).length,
+      total: node.cameras.filter((camera) => !camera.retiredAt).length,
+      available: node.cameras.filter((camera) => camera.available && !camera.retiredAt).length,
+      unavailable: node.cameras.filter((camera) => !camera.available && !camera.retiredAt).length,
+      // Unavailable cameras that still have an active capture assignment are
+      // the actionable problem (a scheduled capture is pointed at a camera
+      // that isn't there) - the reattach workflow targets exactly these.
+      unavailableAssigned: node.cameras.filter((camera) => !camera.available && !camera.retiredAt && camera.assignments.length > 0).length,
+      retired: node.cameras.filter((camera) => camera.retiredAt).length,
     },
     sensors: {
       total: activeSensors.length,
@@ -62,6 +68,18 @@ export async function getNodeSummary(prisma: PrismaClient, nodeName: string) {
       failed: failedSensors,
       stale: staleSensors,
       rejected: rejectedSensors,
+      retired: retiredSensorCount,
+      desiredRevision: node.desiredSensorConfigRevision,
+      appliedRevision: node.appliedSensorConfigRevision,
+      appliedStatus: node.appliedSensorConfigStatus,
+      // Desired/applied drift: the coordinator wants a newer revision than
+      // the node has acknowledged applying.
+      drift:
+        node.desiredSensorConfigRevision !== null &&
+        node.appliedSensorConfigRevision !== null &&
+        node.desiredSensorConfigRevision !== node.appliedSensorConfigRevision,
+      configPending: node.appliedSensorConfigStatus === "pending",
+      configRejected: node.appliedSensorConfigStatus === "rejected",
     },
     power: {
       total: node.outlets.length,

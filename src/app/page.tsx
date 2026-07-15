@@ -42,9 +42,16 @@ export default async function HomePage() {
           <h1 className="mt-2 text-3xl font-semibold text-stone-950">
             Local plant experiment tracker
           </h1>
-          <Link href="/capture-sources" className="mt-3 inline-block text-sm font-semibold text-emerald-700">
-            Shelf Cameras &rarr;
-          </Link>
+          <div className="mt-3 flex flex-wrap gap-4">
+            <Link href="/capture-sources" className="text-sm font-semibold text-emerald-700">
+              Shelf Cameras &rarr;
+            </Link>
+            {isCoordinator ? (
+              <Link href="/support" className="text-sm font-semibold text-emerald-700">
+                Support bundles &rarr;
+              </Link>
+            ) : null}
+          </div>
         </div>
       </header>
 

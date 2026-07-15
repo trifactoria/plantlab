@@ -57,7 +57,20 @@ export async function listNodeCameras(prisma: PrismaClient, nodeName?: string | 
     where: nodeName ? { name: nodeName } : undefined,
     include: {
       cameras: {
-        include: { endpoints: { orderBy: [{ available: "desc" }, { observedAt: "desc" }], take: 10 } },
+        include: {
+          endpoints: { orderBy: [{ available: "desc" }, { observedAt: "desc" }], take: 10 },
+          // The active capture assignment (resolution/input format/name), its
+          // capture source (where rotation actually lives - never on the
+          // assignment), and the most recent capture job (recent success/
+          // error) drive the camera-management "current assignment", rotation/
+          // config editing, and recent-capture surfaces.
+          assignments: {
+            where: { active: true },
+            include: { captureSource: true, jobs: { orderBy: { requestedAt: "desc" }, take: 1 } },
+            orderBy: { updatedAt: "desc" },
+            take: 1,
+          },
+        },
         orderBy: [{ retiredAt: "asc" }, { available: "desc" }, { name: "asc" }],
       },
     },
@@ -247,6 +260,24 @@ export async function updateCameraAssignmentConfig(
   const updated = await prisma.nodeCameraAssignment.update({ where: { id: assignment.id }, data });
   await recordCameraAudit(prisma, node.id, assignment.nodeCameraId, "update-assignment", "applied", assignment, updated, null, input.requestedBy);
   return updated;
+}
+
+/**
+ * Queues a single AgentCaptureJob for a camera's active assignment - the
+ * same durable coordinator-to-edge capture queue the scheduler uses (see
+ * nextServableJob/claimJob/completeJob in agentProtocol.ts). Structured
+ * action, never a shelled command: the edge polls, captures with ffmpeg,
+ * and uploads. The UI polls the camera list to watch the job's status.
+ */
+export async function queueCameraTestCapture(prisma: PrismaClient, input: { nodeName: string; assignmentId: string }) {
+  const node = await prisma.plantLabNode.findUniqueOrThrow({ where: { name: input.nodeName } });
+  const assignment = await prisma.nodeCameraAssignment.findFirstOrThrow({ where: { id: input.assignmentId, nodeId: node.id } });
+  const active = await prisma.agentCaptureJob.findFirst({ where: { nodeId: node.id, assignmentId: assignment.id, status: { in: ["queued", "claimed"] } } });
+  if (active) return { jobId: active.id, reused: true };
+  const job = await prisma.agentCaptureJob.create({
+    data: { nodeId: node.id, assignmentId: assignment.id, captureSourceId: assignment.captureSourceId },
+  });
+  return { jobId: job.id, reused: false };
 }
 
 export async function listCameraReattachCandidates(prisma: PrismaClient, input: { nodeName: string; cameraId: string }) {

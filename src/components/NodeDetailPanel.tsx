@@ -23,8 +23,21 @@ type NodeSummary = {
     statusLabel: "pending" | "active" | "repair-required" | "revoked" | "offline";
     capabilities: string[];
   };
-  cameras: { total: number; available: number; unavailable: number };
-  sensors: { total: number; healthy: number; failed: number; stale: number; rejected: number };
+  cameras: { total: number; available: number; unavailable: number; unavailableAssigned: number; retired: number };
+  sensors: {
+    total: number;
+    healthy: number;
+    failed: number;
+    stale: number;
+    rejected: number;
+    retired: number;
+    desiredRevision: number | null;
+    appliedRevision: number | null;
+    appliedStatus: string | null;
+    drift: boolean;
+    configPending: boolean;
+    configRejected: boolean;
+  };
   power: { total: number; on: number; off: number; unknown: number };
   queue: {
     capture: { queued: number; claimed: number };
@@ -143,6 +156,8 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
         />
       </div>
 
+      <HardwareConfigStrip nodeName={nodeName} cameras={cameras} sensors={sensors} />
+
       <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Actions</h2>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -205,6 +220,70 @@ export function NodeDetailPanel({ nodeName }: { nodeName: string }) {
         <div className="mt-3">
           <NodeTimelinePanel nodeName={nodeName} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function HardwareConfigStrip({
+  nodeName,
+  cameras,
+  sensors,
+}: {
+  nodeName: string;
+  cameras: NodeSummary["cameras"];
+  sensors: NodeSummary["sensors"];
+}) {
+  const cameraIssues = cameras.unavailable;
+  const items: Array<{ label: string; tone: "ok" | "warn" | "error"; href: string }> = [];
+
+  if (cameras.unavailableAssigned > 0) {
+    items.push({ label: `${cameras.unavailableAssigned} assigned camera${cameras.unavailableAssigned === 1 ? "" : "s"} unavailable - reattach needed`, tone: "error", href: `/nodes/${nodeName}/cameras` });
+  } else if (cameraIssues > 0) {
+    items.push({ label: `${cameraIssues} camera${cameraIssues === 1 ? "" : "s"} unavailable`, tone: "warn", href: `/nodes/${nodeName}/cameras` });
+  }
+  if (cameras.retired > 0) {
+    items.push({ label: `${cameras.retired} retired camera${cameras.retired === 1 ? "" : "s"}`, tone: "ok", href: `/nodes/${nodeName}/cameras` });
+  }
+  if (sensors.configRejected) {
+    items.push({ label: "Sensor config rejected by node", tone: "error", href: `/nodes/${nodeName}/sensors` });
+  } else if (sensors.configPending) {
+    items.push({ label: "Sensor config pending on node", tone: "warn", href: `/nodes/${nodeName}/sensors` });
+  } else if (sensors.drift) {
+    items.push({ label: "Sensor desired/applied drift", tone: "warn", href: `/nodes/${nodeName}/sensors` });
+  }
+  if (sensors.retired > 0) {
+    items.push({ label: `${sensors.retired} retired sensor${sensors.retired === 1 ? "" : "s"}`, tone: "ok", href: `/nodes/${nodeName}/sensors` });
+  }
+
+  const toneClass = { ok: "border-stone-200 bg-stone-100 text-stone-700", warn: "border-amber-200 bg-amber-100 text-amber-900", error: "border-red-200 bg-red-100 text-red-900" };
+
+  return (
+    <div className="rounded-lg border border-stone-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold text-stone-950">Hardware configuration</h2>
+        <span className="text-xs text-stone-500">
+          Sensors: desired #{sensors.desiredRevision ?? "-"} / applied #{sensors.appliedRevision ?? "-"}
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <p className="mt-2 text-sm text-emerald-700">No camera or sensor configuration issues.</p>
+      ) : (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {items.map((item) => (
+            <Link key={item.label} href={item.href} className={`rounded-md border px-2.5 py-1 text-xs font-semibold hover:underline ${toneClass[item.tone]}`}>
+              {item.label}
+            </Link>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Link href={`/nodes/${nodeName}/cameras`} className="text-xs font-semibold text-emerald-700 hover:underline">
+          Manage cameras &rarr;
+        </Link>
+        <Link href={`/nodes/${nodeName}/sensors`} className="text-xs font-semibold text-emerald-700 hover:underline">
+          Manage sensors &rarr;
+        </Link>
       </div>
     </div>
   );

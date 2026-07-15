@@ -185,7 +185,7 @@ test.describe("node subsystem navigation", () => {
 
       await page.getByRole("link", { name: /^Sensors/ }).click();
       await expect(page).toHaveURL(new RegExp(`/nodes/${NODE_NAME}/sensors$`));
-      await expect(page.getByRole("heading", { name: "Sensors", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Sensor management", exact: true })).toBeVisible();
 
       await goto(page, `/nodes/${NODE_NAME}`);
       await page.getByRole("link", { name: /^Power outlets/ }).click();
@@ -196,7 +196,7 @@ test.describe("node subsystem navigation", () => {
       await goto(page, `/nodes/${NODE_NAME}`);
       await page.getByRole("link", { name: /^Cameras/ }).click();
       await expect(page).toHaveURL(new RegExp(`/nodes/${NODE_NAME}/cameras$`));
-      await expect(page.getByRole("heading", { name: "Cameras", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Camera management", exact: true })).toBeVisible();
 
       await goto(page, `/nodes/${NODE_NAME}`);
       await page.getByRole("link", { name: "View full activity →" }).click();

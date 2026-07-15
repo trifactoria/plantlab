@@ -46,12 +46,13 @@ async function capture(page: Page, name: string) {
  */
 const nodeSurfaces = [
   `/nodes/${NODE_VISUAL_NAME}`,
-  `/nodes/${NODE_VISUAL_NAME}/sensors`,
+  `/nodes/${NODE_VISUAL_NAME}/sensors`, // sensor management: desired/applied/observed + pending revision
   `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-outside`,
   `/nodes/${NODE_VISUAL_NAME}/sensors/greenhouse-top`,
-  `/nodes/${NODE_VISUAL_NAME}/cameras`,
+  `/nodes/${NODE_VISUAL_NAME}/cameras`, // camera management: groups, identity evidence, reattach drawer
   `/nodes/${NODE_VISUAL_NAME}/power`,
   `/nodes/${NODE_VISUAL_NAME}/activity`,
+  "/support", // support bundle collection form
 ] as const;
 
 const projectSurfaces = [
@@ -96,10 +97,23 @@ async function captureNodeSurfaces(page: Page, prefix: string) {
   await page.waitForTimeout(300);
   await capture(page, `${prefix}-node-overview-7d`);
 
-  // Sensors subsystem list.
+  // Sensor management: desired/applied/observed status header, active
+  // sensors (Top shelf observed-failing but still applied), and the retired
+  // historical section.
   await goto(page, `/nodes/${NODE_VISUAL_NAME}/sensors`);
-  await expect(page.getByRole("link", { name: "Outside" })).toBeVisible();
-  await capture(page, `${prefix}-node-sensors-list`);
+  await expect(page.getByText("Configuration status")).toBeVisible();
+  await expect(page.getByText("Active sensors (4)")).toBeVisible();
+  await capture(page, `${prefix}-node-sensors-management`);
+
+  // Pending desired revision: rename a sensor and apply - with no live edge
+  // agent the revision stays "Waiting for node" (pending), which is the
+  // correct observable state to screenshot.
+  const outsideRow = page.getByTestId("sensor-row-greenhouse-outside");
+  await outsideRow.getByRole("button", { name: "Edit" }).click();
+  await outsideRow.getByLabel("Display name").fill("Outside Air");
+  await page.getByRole("button", { name: "Apply desired configuration" }).click();
+  await expect(page.getByText("Waiting for node").first()).toBeVisible({ timeout: 10_000 });
+  await capture(page, `${prefix}-node-sensors-pending-revision`);
 
   // Healthy sensor detail with complete real-looking history and a
   // completed sensor-test result (Outside was seeded free of gaps/failures).
@@ -115,10 +129,18 @@ async function captureNodeSurfaces(page: Page, prefix: string) {
   await page.waitForTimeout(300);
   await capture(page, `${prefix}-sensor-detail-intermittent`);
 
-  // Cameras subsystem page - three cameras, one unavailable.
+  // Camera management: active/unavailable groups, identity evidence, and the
+  // identical-serial cameras distinguished by USB path.
   await goto(page, `/nodes/${NODE_VISUAL_NAME}/cameras`);
-  await expect(page.getByText("Greenhouse Wide")).toBeVisible();
-  await capture(page, `${prefix}-node-cameras`);
+  await expect(page.getByText("Active cameras (2)")).toBeVisible();
+  await expect(page.getByText("Unavailable cameras (1)")).toBeVisible();
+  await capture(page, `${prefix}-node-cameras-management`);
+
+  // Reattach drawer with ambiguous identical-serial candidates.
+  await page.getByRole("button", { name: "Reattach" }).click();
+  await expect(page.getByText(/Multiple endpoints could match/)).toBeVisible();
+  await capture(page, `${prefix}-node-cameras-reattach`);
+  await page.getByRole("button", { name: "Close" }).click();
 
   // Power subsystem page - normal outlet controls (Water included) and the
   // Daily timers table, which also shows a real "Succeeded" schedule
@@ -136,6 +158,11 @@ async function captureNodeSurfaces(page: Page, prefix: string) {
   await goto(page, `/nodes/${NODE_VISUAL_NAME}/activity`);
   await expect(page.getByText(/fans ON succeeded/i)).toBeVisible();
   await capture(page, `${prefix}-node-activity-timeline`);
+
+  // Support bundle collection form (structured options + isolation language).
+  await goto(page, "/support");
+  await expect(page.getByText("New support bundle")).toBeVisible();
+  await capture(page, `${prefix}-support-form`);
 }
 
 for (const viewport of viewports) {
