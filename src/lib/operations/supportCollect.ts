@@ -222,8 +222,8 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
     // --ff-only`. Snapshot their contents so they can be restored afterwards.
     const guardedFiles = ["next-env.d.ts", "tsconfig.json"].map((name) => path.join(process.cwd(), name));
     const originals = await Promise.all(guardedFiles.map((file) => readFile(file, "utf8").then((content) => ({ file, content })).catch(() => null)));
+    const port = await findFreePort();
     try {
-      const port = await findFreePort();
       const { fixtureDb, env } = buildFixtureScreenshotEnv(fixtureRoot, port);
       await mkdir(path.dirname(fixtureDb), { recursive: true });
       const migrate = await execFileResult("pnpm", ["prisma", "migrate", "deploy"], 120_000, process.cwd(), env);
@@ -250,6 +250,11 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
+      // Playwright usually tears down its webServer, but the `next dev` child
+      // can occasionally survive and keep rewriting next-env.d.ts. Free the
+      // fixture port first so no lingering dev server re-dirties the tree
+      // after the restore below.
+      await execFileResult("bash", ["-c", `fuser -k ${port}/tcp 2>/dev/null || true`], 10_000).catch(() => undefined);
       await rm(fixtureRoot, { recursive: true, force: true });
       // Restore any project-root files the fixture `next dev` rewrote, so the
       // repository working tree is left exactly as it was found.
