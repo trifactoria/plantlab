@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { CaptureSourceScheduler, type CaptureSourceFn, type FanOutFn } from "../../src/lib/captureSourceService";
+import { updateCameraInventory } from "../../src/lib/operations/agentProtocol";
+import { attachNodeCamera } from "../../src/lib/operations/nodeCameras";
+import { registerOrRotateNode } from "../../src/lib/operations/nodeCredentials";
 import { prisma } from "../../src/lib/prisma";
 import { nextAlignedCaptureTime } from "../../src/lib/schedule";
 import { cleanupTestCaptureSource, createTestCaptureSource } from "./helpers/testCaptureSource";
@@ -12,6 +15,7 @@ function silentLogger() {
 describe("CaptureSourceScheduler", () => {
   const sources: Array<{ id: string; directory: string }> = [];
   const projects: Array<{ id: string; directory: string }> = [];
+  const nodeNames: string[] = [];
 
   afterEach(async () => {
     for (const { id, directory } of sources.splice(0)) {
@@ -19,6 +23,9 @@ describe("CaptureSourceScheduler", () => {
     }
     for (const { id, directory } of projects.splice(0)) {
       await cleanupTestProject(prisma, id, directory);
+    }
+    for (const name of nodeNames.splice(0)) {
+      await prisma.plantLabNode.deleteMany({ where: { name } });
     }
   });
 
@@ -32,6 +39,34 @@ describe("CaptureSourceScheduler", () => {
     const project = await createTestProject(prisma, { captureEnabled: false, cameraDevice: null, ...overrides });
     projects.push({ id: project.id, directory: project.localPhotoDirectory });
     return project;
+  }
+
+  async function makeRemoteSource() {
+    const nodeName = `vitest-source-scheduler-${crypto.randomUUID()}`;
+    nodeNames.push(nodeName);
+    const registered = await registerOrRotateNode(prisma, { name: nodeName, role: "camera-node", rotateCredential: true });
+    await updateCameraInventory(prisma, registered.node.id, [
+      {
+        stableId: `usb:046d:0825:${nodeName}`,
+        devicePath: "/dev/video0",
+        name: "Remote Camera",
+        vendorId: "046d",
+        productId: "0825",
+        serial: nodeName,
+        physicalPath: `pci-0000/${nodeName}`,
+        formats: [{ pixelFormat: "mjpeg", description: "MJPEG", resolutions: [{ width: 1280, height: 720, frameRates: [] }] }],
+      },
+    ]);
+    const attached = await attachNodeCamera(prisma, {
+      nodeName,
+      stableId: `usb:046d:0825:${nodeName}`,
+      newCaptureSourceName: `${nodeName} source`,
+      width: 1280,
+      height: 720,
+      inputFormat: "mjpeg",
+    });
+    sources.push({ id: attached.captureSource.id, directory: attached.captureSource.captureDirectory });
+    return attached;
   }
 
   it("captures a due source exactly once and fans out, never once per subscribing project", async () => {
@@ -140,6 +175,42 @@ describe("CaptureSourceScheduler", () => {
     // A skipped slot creates no CaptureRun rows - there is nothing new to report.
     const runs = await prisma.captureRun.findMany({ where: { cameraDevice: source.cameraDevice } });
     expect(runs).toHaveLength(0);
+  });
+
+  it("does not fall back to coordinator-local capture when a remote assignment is unavailable", async () => {
+    let now = new Date("2026-07-11T17:00:00Z");
+    const startAt = new Date("2026-07-11T16:59:00Z");
+    const attached = await makeRemoteSource();
+    await prisma.captureSource.update({
+      where: { id: attached.captureSource.id },
+      data: { captureStartAt: startAt, photoIntervalMinutes: 1 },
+    });
+    await prisma.nodeCamera.update({ where: { id: attached.camera.id }, data: { available: false } });
+
+    const captureSourcePhoto: CaptureSourceFn = async () => {
+      throw new Error("remote sources must not fall back to coordinator-local capture");
+    };
+    const runViewportFanOut: FanOutFn = async (sourceCaptureId) => ({
+      sourceCaptureId,
+      sourceWidth: 0,
+      sourceHeight: 0,
+      projectResults: [],
+    });
+
+    const scheduler = new CaptureSourceScheduler({ prisma, captureSourcePhoto, runViewportFanOut, now: () => now, logger: silentLogger() });
+    await scheduler.tick();
+    const target = nextAlignedCaptureTime({ startAt, intervalMinutes: 1, now });
+    now = new Date(target.getTime() + 5);
+    const tick = await scheduler.tick();
+
+    expect(tick.dueCount).toBe(1);
+    expect(tick.captures[0]).toMatchObject({
+      captureSourceId: attached.captureSource.id,
+      status: "failed",
+      errorMessage: "Remote camera assignment is not currently available for scheduled capture.",
+    });
+    await expect(prisma.agentCaptureJob.count({ where: { captureSourceId: attached.captureSource.id } })).resolves.toBe(0);
+    await expect(prisma.sourceCapture.count({ where: { captureSourceId: attached.captureSource.id } })).resolves.toBe(0);
   });
 
   it("does not schedule an inactive capture source", async () => {

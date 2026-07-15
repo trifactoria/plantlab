@@ -79,7 +79,7 @@ export class CaptureSourceScheduler {
     const sources = await this.prisma.captureSource.findMany({
       include: {
         assignments: {
-          where: { active: true, nodeCamera: { available: true, enabled: true, retiredAt: null } },
+          where: { active: true },
           include: { nodeCamera: true },
           orderBy: { updatedAt: "desc" },
           take: 1,
@@ -93,6 +93,7 @@ export class CaptureSourceScheduler {
       cameraDevice: string;
       assignmentId: string | null;
       nodeId: string | null;
+      remoteAssignmentAvailable: boolean;
       captureStartAt: Date;
       photoIntervalMinutes: number;
       timeZone: string;
@@ -175,11 +176,15 @@ export class CaptureSourceScheduler {
       }
 
       if (schedule.target.getTime() <= checkedAt.getTime()) {
+        const assignment = source.assignments[0] ?? null;
         dueSources.push({
           id: source.id,
           cameraDevice: source.cameraDevice,
-          assignmentId: source.assignments[0]?.id ?? null,
-          nodeId: source.assignments[0]?.nodeId ?? null,
+          assignmentId: assignment?.id ?? null,
+          nodeId: assignment?.nodeId ?? null,
+          remoteAssignmentAvailable: assignment
+            ? assignment.nodeCamera.available && assignment.nodeCamera.enabled && assignment.nodeCamera.retiredAt === null
+            : false,
           captureStartAt: schedule.captureStartAt,
           photoIntervalMinutes: schedule.photoIntervalMinutes,
           timeZone: schedule.timeZone,
@@ -207,6 +212,7 @@ export class CaptureSourceScheduler {
     cameraDevice: string;
     assignmentId: string | null;
     nodeId: string | null;
+    remoteAssignmentAvailable: boolean;
     captureStartAt: Date;
     photoIntervalMinutes: number;
     timeZone: string;
@@ -220,6 +226,16 @@ export class CaptureSourceScheduler {
 
     try {
       if (source.assignmentId && source.nodeId) {
+        if (!source.remoteAssignmentAvailable) {
+          result = {
+            captureSourceId: source.id,
+            status: "failed",
+            scheduledFor,
+            errorMessage: "Remote camera assignment is not currently available for scheduled capture.",
+          };
+          return result;
+        }
+
         const existing = await this.prisma.agentCaptureJob.findFirst({
           where: { captureSourceId: source.id, scheduledFor, status: { in: ["queued", "claimed", "completed", "failed"] } },
           orderBy: { requestedAt: "asc" },
