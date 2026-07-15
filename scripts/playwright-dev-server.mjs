@@ -40,21 +40,40 @@ if (!skipBuild) {
   });
 }
 
+// `detached: true` puts the server in its own process group so the whole
+// tree (pnpm -> node -> next-server) can be signalled together. `next dev`/
+// `next start` otherwise leave a next-server grandchild running after
+// Playwright kills only the immediate child - that orphan keeps rewriting
+// next-env.d.ts and holding the port. `next dev` must also run in
+// development mode: launched from inside the coordinator's plantlab-web
+// service the parent has NODE_ENV=production, which the dev server would
+// inherit and 500 on every route.
 const child = skipBuild
   ? spawn("pnpm", ["exec", "next", "dev", "--hostname", "127.0.0.1", "--port", port], {
       stdio: "inherit",
       shell: false,
-      // `next dev` must run in development mode. When this is launched from
-      // inside the coordinator's plantlab-web service, the parent process has
-      // NODE_ENV=production, which the dev server would otherwise inherit and
-      // 500 on every route. Force development here.
+      detached: true,
       env: { ...process.env, NODE_ENV: "development", PLANTLAB_TEST_LOCAL_CAMERA_UI: "1" },
     })
   : spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", port], {
       stdio: "inherit",
       shell: false,
+      detached: true,
       env: { ...process.env, NODE_ENV: "development", PLANTLAB_TEST_LOCAL_CAMERA_UI: "1" },
     });
+
+function killTree(signal) {
+  try {
+    // Negative PID targets the whole process group created by detached:true.
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // already gone
+    }
+  }
+}
 
 child.on("exit", (code, signal) => {
   if (signal) {
@@ -65,8 +84,8 @@ child.on("exit", (code, signal) => {
   process.exit(code ?? 0);
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => {
-    child.kill(signal);
-  });
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => killTree(signal));
 }
+// Backstop: if this wrapper exits for any reason, take the server group down.
+process.on("exit", () => killTree("SIGKILL"));
