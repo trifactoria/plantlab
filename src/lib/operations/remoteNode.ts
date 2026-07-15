@@ -78,6 +78,8 @@ export type RemoteInspection = {
   raw?: unknown;
 };
 
+const REMOTE_HOST_INSPECTION_TIMEOUT_MS = 60_000;
+
 const INSPECT_SCRIPT = String.raw`
 set -eu
 json_escape() {
@@ -199,7 +201,7 @@ export async function inspectRemoteHost(sshHost: string): Promise<RemoteInspecti
   const resolvedHost = await resolveSshHost(sshHost);
   const result = await runLocalCommand("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", sshHost, "sh", "-s"], {
     input: INSPECT_SCRIPT,
-    timeoutMs: 20_000,
+    timeoutMs: REMOTE_HOST_INSPECTION_TIMEOUT_MS,
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     return { stdout: "", stderr: message, status: 255 } as CommandResult;
