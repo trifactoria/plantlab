@@ -226,15 +226,16 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       if (migrate.status !== 0) return;
 
       // Clear any prior (possibly live-readonly) screenshots so only this
-      // fixture run's images get bundled, then capture just the node/
-      // operational surfaces (the "mobile" node-only scope) - fast and
-      // deterministic, and it exercises the isolated fixture homepage node
-      // link this bundle exists to verify. Running the full desktop+laptop
-      // project suite here reliably overruns the probe timeout.
+      // fixture run's images get bundled, then capture the small support
+      // fixture pass (homepage + node overview). It exercises the isolated
+      // fixture homepage node link this bundle exists to verify while
+      // compiling only two routes, so it stays well inside the timeout even
+      // on the coordinator (which shares CPU with the live services). The
+      // full desktop/laptop/mobile suite lives in tests/screenshots.spec.ts.
       await rm(path.join(process.cwd(), "artifacts", "screenshots"), { recursive: true, force: true }).catch(() => undefined);
       const result = await execFileResult(
         "pnpm",
-        ["exec", "playwright", "test", "tests/screenshots.spec.ts", "-g", "mobile"],
+        ["exec", "playwright", "test", "tests/support-fixture-screenshots.spec.ts"],
         300_000,
         process.cwd(),
         env,
