@@ -47,7 +47,7 @@ describe("test project safety", () => {
     const project = await createTestProject(prisma, {
       captureEnabled: false,
       isTestProject: true,
-      cameraDevice: null,
+      cameraDevice: "/dev/video-test",
     });
     cleanup.push(() => cleanupTestProject(prisma, project.id, project.localPhotoDirectory));
 
@@ -64,7 +64,7 @@ describe("test project safety", () => {
     const project = await createTestProject(prisma, {
       captureEnabled: false,
       isTestProject: true,
-      cameraDevice: null,
+      cameraDevice: "/dev/video-test",
     });
     cleanup.push(() => cleanupTestProject(prisma, project.id, project.localPhotoDirectory));
 

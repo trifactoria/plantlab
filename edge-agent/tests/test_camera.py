@@ -166,14 +166,14 @@ def test_identity_helpers_handle_unique_serial_missing_serial_and_hub_paths():
 def test_capture_frame_raises_when_ffmpeg_fails(tmp_path):
     output = tmp_path / "out.jpg"
     with patch("subprocess.run", return_value=_completed(returncode=1, stderr="No such device")):
-        with pytest.raises(RuntimeError, match="ffmpeg capture"):
+        with pytest.raises(RuntimeError, match="camera-fallback-exhausted"):
             camera.capture_frame("/dev/video0", str(output))
 
 
 def test_capture_frame_raises_when_ffmpeg_reports_success_but_wrote_nothing(tmp_path):
     output = tmp_path / "out.jpg"
     with patch("subprocess.run", return_value=_completed(returncode=0)):
-        with pytest.raises(RuntimeError, match="missing or empty"):
+        with pytest.raises(RuntimeError, match="empty or missing file"):
             camera.capture_frame("/dev/video0", str(output))
 
 
@@ -181,8 +181,14 @@ def test_capture_frame_succeeds_and_uses_conservative_default_resolution(tmp_pat
     output = tmp_path / "out.jpg"
 
     def fake_run(args, **kwargs):
-        output.write_bytes(b"\xff\xd8\xff")  # minimal JPEG-looking bytes
-        assert f"{camera.DEFAULT_WIDTH}x{camera.DEFAULT_HEIGHT}" in args
+        if args[0] == "ffmpeg" and args[-1] == str(output):
+            output.write_bytes(b"x" * 100000)
+            assert f"{camera.DEFAULT_WIDTH}x{camera.DEFAULT_HEIGHT}" in args
+            return _completed(returncode=0)
+        if args[0] == "ffprobe":
+            return _completed(stdout='{"streams":[{"width":1280,"height":720,"codec_name":"mjpeg"}]}')
+        if args[0] == "ffmpeg" and args[-1] == "-":
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(64 * 64 * 3)]), stderr=b"")
         return _completed(returncode=0)
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -305,14 +311,33 @@ def test_capture_frame_normalizes_yuyv_to_ffmpeg_yuyv422(tmp_path):
     captured_args = []
 
     def fake_run(args, **kwargs):
-        captured_args.extend(args)
-        output.write_bytes(b"\xff\xd8\xff")
+        if args[0] == "ffmpeg" and args[-1] == str(output):
+            captured_args.extend(args)
+            output.write_bytes(b"x" * 20000)
+            return _completed(returncode=0)
+        if args[0] == "ffprobe":
+            return _completed(stdout='{"streams":[{"width":640,"height":480,"codec_name":"mjpeg"}]}')
+        if args[0] == "ffmpeg" and args[-1] == "-":
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(64 * 64 * 3)]), stderr=b"")
         return _completed(returncode=0)
 
     with patch("subprocess.run", side_effect=fake_run):
         camera.capture_frame("/dev/video0", str(output), width=640, height=480, input_format="YUYV")
 
     assert captured_args[captured_args.index("-input_format") + 1] == "yuyv422"
+
+
+def test_build_capture_args_includes_warmup_select_and_frame_rate():
+    args = camera.build_capture_args(
+        "/dev/video0",
+        "/tmp/out.jpg",
+        camera.CaptureMode(width=1280, height=720, input_format="mjpeg", frame_rate="30.000 fps"),
+        warmup_frames=10,
+    )
+
+    assert args[args.index("-framerate") + 1] == "30"
+    assert args[args.index("-vf") + 1] == "select=gte(n\\,10)"
+    assert args[args.index("-frames:v") + 1] == "1"
 
 
 def test_raspicam_tools_are_never_required_only_opportunistically_detected():

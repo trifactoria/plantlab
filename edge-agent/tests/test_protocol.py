@@ -123,6 +123,10 @@ def test_next_job_parses_a_queued_job(fake_coordinator):
     assert job.id == "job-1"
     assert job.width == 1280
     assert job.device_path == "/dev/video0"
+    assert job.frame_rate is None
+    assert job.warmup_frames == 10
+    assert job.capture_attempts == 2
+    assert job.fallback is None
 
 
 def test_claim_complete_and_fail_job_flow(fake_coordinator):

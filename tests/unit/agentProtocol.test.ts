@@ -543,7 +543,16 @@ describe("agent protocol", () => {
 
     const payload = await serializeJobForAgent(prisma, await nextQueuedJob(prisma, registered.node.id));
 
-    expect(payload?.settings).toEqual({ width: 1920, height: 1080, inputFormat: "mjpeg" });
+    expect(payload?.settings).toMatchObject({
+      width: 1920,
+      height: 1080,
+      inputFormat: "mjpeg",
+      frameRate: null,
+      warmupFrames: 10,
+      captureAttempts: 2,
+      fallback: null,
+      serializeOnNode: true,
+    });
   });
 
   it("resolves the current device path from latest NodeCamera inventory by stable ID immediately before dispatch", async () => {

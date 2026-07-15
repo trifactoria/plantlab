@@ -3,7 +3,16 @@ import sharp from "sharp";
 import { verifyCapturedDimensions } from "../../src/lib/captureVerify";
 
 async function jpegBuffer(width: number, height: number) {
-  return sharp({ create: { width, height, channels: 3, background: { r: 10, g: 20, b: 30 } } }).jpeg().toBuffer();
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let offset = 0; offset < pixels.length; offset += 3) {
+    const index = offset / 3;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    pixels[offset] = x % 256;
+    pixels[offset + 1] = y % 256;
+    pixels[offset + 2] = (x + y) % 256;
+  }
+  return sharp(pixels, { raw: { width, height, channels: 3 } }).jpeg().toBuffer();
 }
 
 describe("verifyCapturedDimensions", () => {
@@ -21,14 +30,10 @@ describe("verifyCapturedDimensions", () => {
     expect(result.byteSize).toBe(buffer.length);
   });
 
-  it("catches a camera falling back to a lower resolution than requested", async () => {
+  it("rejects a camera falling back to a lower resolution than requested", async () => {
     const buffer = await jpegBuffer(1920, 1080);
-    const result = await verifyCapturedDimensions(buffer, { width: 3840, height: 2160 });
 
-    expect(result.matched).toBe(false);
-    expect(result.actualWidth).toBe(1920);
-    expect(result.actualHeight).toBe(1080);
-    expect(result.requestedWidth).toBe(3840);
+    await expect(verifyCapturedDimensions(buffer, { width: 3840, height: 2160 })).rejects.toThrow(/did not match expected width/);
   });
 
   it("throws for bytes that are not a readable image", async () => {

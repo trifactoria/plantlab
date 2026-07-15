@@ -8,6 +8,31 @@ from plantlab_edge_agent.sensors.runtime import EnvironmentalSensorManager
 from plantlab_edge_agent.spool import Spool
 
 
+def _capture_result(output_path):
+    return camera.CaptureResult(
+        output_path=output_path,
+        captured_at="2026-01-01T00:00:01Z",
+        capture_started_at="2026-01-01T00:00:00Z",
+        frame_captured_at="2026-01-01T00:00:01Z",
+        capture_duration_ms=1000,
+        attempts=[
+            camera.CaptureAttempt(
+                mode=camera.CaptureMode(width=1280, height=720, input_format="mjpeg", frame_rate="30 fps"),
+                attempt=1,
+                fallback=False,
+                started_at="2026-01-01T00:00:00Z",
+                completed_at="2026-01-01T00:00:01Z",
+                duration_ms=1000,
+                status="accepted",
+                byte_size=3,
+            )
+        ],
+        effective_mode=camera.CaptureMode(width=1280, height=720, input_format="mjpeg", frame_rate="30 fps"),
+        warmup_frames=10,
+        fallback_used=False,
+    )
+
+
 def _make_config(tmp_path, coordinator_url):
     return config.EdgeAgentConfig(
         role="greenhouse-node",
@@ -207,16 +232,18 @@ def test_poll_and_run_job_captures_a_frame_to_the_durable_spool_before_uploading
             }
         )
 
-        def fake_capture(device, output_path, width=None, height=None, input_format=None):
+        def fake_capture(device, output_path, **kwargs):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(b"\xff\xd8\xff")
+            return _capture_result(output_path)
 
-        with patch.object(camera, "capture_frame", side_effect=fake_capture):
+        with patch.object(camera, "capture_frame_with_result", side_effect=fake_capture):
             agent.poll_and_run_job(cfg, client, spool)
 
         due = spool.due_uploads()
         assert len(due) == 1
         assert due[0].job_id == "job-1"
+        assert due[0].metadata()["effectiveWidth"] == 1280
         assert Path(due[0].local_file_path).exists()
         assert fake_coordinator["state"].claimed["job-1"] is not None
     finally:
@@ -239,7 +266,7 @@ def test_poll_and_run_job_reports_failure_when_capture_raises(tmp_path, fake_coo
             }
         )
 
-        with patch.object(camera, "capture_frame", side_effect=RuntimeError("camera busy")):
+        with patch.object(camera, "capture_frame_with_result", side_effect=RuntimeError("camera busy")):
             agent.poll_and_run_job(cfg, client, spool)
 
         assert spool.due_uploads() == []  # nothing durable was recorded
@@ -265,7 +292,7 @@ def test_poll_and_run_job_skips_capture_when_spool_is_at_capacity(tmp_path, fake
                 "settings": {"width": 1280, "height": 720, "inputFormat": "mjpeg"},
             }
         )
-        with patch.object(camera, "capture_frame") as mocked_capture:
+        with patch.object(camera, "capture_frame_with_result") as mocked_capture:
             agent.poll_and_run_job(cfg, client, spool)
             mocked_capture.assert_not_called()
 

@@ -118,6 +118,12 @@ class Job:
     width: int
     height: int
     input_format: str
+    frame_rate: Optional[str]
+    warmup_frames: int
+    warmup_seconds: Optional[float]
+    capture_attempts: int
+    fallback: Optional[Dict[str, Any]]
+    serialize_on_node: bool
 
     @staticmethod
     def from_wire(raw: dict) -> "Job":
@@ -134,6 +140,12 @@ class Job:
             width=settings["width"],
             height=settings["height"],
             input_format=settings.get("inputFormat", "mjpeg"),
+            frame_rate=settings.get("frameRate"),
+            warmup_frames=int(settings.get("warmupFrames") or 10),
+            warmup_seconds=float(settings["warmupSeconds"]) if settings.get("warmupSeconds") is not None else None,
+            capture_attempts=int(settings.get("captureAttempts") or 2),
+            fallback=settings.get("fallback") if isinstance(settings.get("fallback"), dict) else None,
+            serialize_on_node=settings.get("serializeOnNode") is not False,
         )
 
 

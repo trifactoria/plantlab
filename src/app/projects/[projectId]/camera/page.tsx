@@ -15,7 +15,15 @@ export default async function ProjectCameraPage({ params }: PageProps) {
   const { projectId } = await params;
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    include: { cameraProfile: true },
+    include: {
+      cameraProfile: true,
+      viewports: {
+        where: { active: true },
+        include: { captureSource: true },
+        orderBy: { effectiveFrom: "desc" },
+        take: 1,
+      },
+    },
   });
 
   if (!project) {
@@ -32,6 +40,7 @@ export default async function ProjectCameraPage({ params }: PageProps) {
   });
   const insideWindow = isInsideCaptureWindow(new Date(), project);
   const production = !localCameraHardwareEnabled();
+  const activeViewport = project.viewports[0] ?? null;
 
   return (
     <main className="min-h-screen">
@@ -76,9 +85,11 @@ export default async function ProjectCameraPage({ params }: PageProps) {
                 <div>
                   <dt className="font-medium text-stone-950">Selected camera</dt>
                   <dd className="text-stone-600">
-                    {project.cameraDevice
-                      ? `${project.cameraName ?? "Camera"} (${project.cameraDevice})`
-                      : "No camera selected"}
+                    {activeViewport
+                      ? activeViewport.captureSource.name
+                      : project.cameraDevice
+                        ? `${project.cameraName ?? "Camera"} (${project.cameraDevice})`
+                        : "No camera selected"}
                   </dd>
                 </div>
                 <div>
@@ -111,28 +122,24 @@ export default async function ProjectCameraPage({ params }: PageProps) {
             </div>
           </aside>
 
-          {production ? (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-5 text-amber-950">
-              Local camera controls are unavailable in production. Run PlantLab locally to inspect V4L2 cameras, preview the selected device, and adjust hardware controls.
-            </div>
-          ) : (
-            <CameraSetupPanel
-              projectId={project.id}
-              cameraDevice={project.cameraDevice}
-              cameraName={project.cameraName}
-              cameraStableId={project.cameraStableId}
-              cameraProfileId={project.cameraProfileId}
-              photoIntervalMinutes={project.photoIntervalMinutes}
-              captureStartAt={project.captureStartAt.toISOString()}
-              timeZone={project.timeZone}
-              captureWindowEnabled={project.captureWindowEnabled}
-              captureWindowStartMinutes={project.captureWindowStartMinutes}
-              captureWindowEndMinutes={project.captureWindowEndMinutes}
-              localPhotoDirectory={project.localPhotoDirectory}
-              initialCaptureEnabled={project.captureEnabled}
-              isTestProject={project.isTestProject}
-            />
-          )}
+          <CameraSetupPanel
+            projectId={project.id}
+            cameraDevice={project.cameraDevice}
+            cameraName={project.cameraName}
+            cameraStableId={project.cameraStableId}
+            cameraProfileId={project.cameraProfileId}
+            captureSourceId={activeViewport?.captureSourceId ?? null}
+            localControlsEnabled={!production}
+            photoIntervalMinutes={project.photoIntervalMinutes}
+            captureStartAt={project.captureStartAt.toISOString()}
+            timeZone={project.timeZone}
+            captureWindowEnabled={project.captureWindowEnabled}
+            captureWindowStartMinutes={project.captureWindowStartMinutes}
+            captureWindowEndMinutes={project.captureWindowEndMinutes}
+            localPhotoDirectory={project.localPhotoDirectory}
+            initialCaptureEnabled={project.captureEnabled}
+            isTestProject={project.isTestProject}
+          />
         </div>
       </section>
     </main>

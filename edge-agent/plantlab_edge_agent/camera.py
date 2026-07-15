@@ -12,10 +12,13 @@ defaults (see DEFAULT_WIDTH/DEFAULT_HEIGHT), single JPEG frame.
 from __future__ import annotations
 
 import glob
+import json
+import math
 import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -26,6 +29,9 @@ CAPTURE_TIMEOUT_SECONDS = 15
 CAPTURE_PROBE_TIMEOUT_SECONDS = 8
 CONSERVATIVE_FALLBACK_WIDTH = 640
 CONSERVATIVE_FALLBACK_HEIGHT = 480
+DEFAULT_WARMUP_FRAMES = 10
+DEFAULT_CAPTURE_ATTEMPTS = 2
+DEFAULT_FALLBACK_ATTEMPTS = 1
 
 
 @dataclass
@@ -60,6 +66,80 @@ class CameraInfo:
     # device -> failure reason, for alternates that were actually probed
     # (not just skipped because metadata already ruled them out).
     alternate_probe_errors: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CaptureMode:
+    width: int
+    height: int
+    input_format: str = "mjpeg"
+    frame_rate: Optional[str] = None
+
+
+@dataclass
+class CaptureAttempt:
+    mode: CaptureMode
+    attempt: int
+    fallback: bool
+    started_at: str
+    completed_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+    status: str = "failed"
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    byte_size: Optional[int] = None
+
+
+@dataclass
+class CaptureResult:
+    output_path: str
+    captured_at: str
+    capture_started_at: str
+    frame_captured_at: str
+    capture_duration_ms: int
+    attempts: List[CaptureAttempt]
+    effective_mode: CaptureMode
+    warmup_frames: int
+    fallback_used: bool
+    validation_status: str = "accepted"
+    validation_error_code: Optional[str] = None
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "captureStartedAt": self.capture_started_at,
+            "frameCapturedAt": self.frame_captured_at,
+            "captureDurationMs": self.capture_duration_ms,
+            "effectiveWidth": self.effective_mode.width,
+            "effectiveHeight": self.effective_mode.height,
+            "effectiveInputFormat": _normalize_input_format(self.effective_mode.input_format),
+            "effectiveFrameRate": self.effective_mode.frame_rate,
+            "warmupFrames": self.warmup_frames,
+            "attemptCount": len(self.attempts),
+            "fallbackUsed": self.fallback_used,
+            "validationStatus": self.validation_status,
+            "validationErrorCode": self.validation_error_code,
+            "attempts": [
+                {
+                    "mode": attempt.mode.__dict__,
+                    "attempt": attempt.attempt,
+                    "fallback": attempt.fallback,
+                    "startedAt": attempt.started_at,
+                    "completedAt": attempt.completed_at,
+                    "durationMs": attempt.duration_ms,
+                    "status": attempt.status,
+                    "errorCode": attempt.error_code,
+                    "errorMessage": attempt.error_message,
+                    "byteSize": attempt.byte_size,
+                }
+                for attempt in self.attempts
+            ],
+        }
+
+
+class CaptureValidationError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def command_exists(name: str) -> bool:
@@ -489,9 +569,230 @@ def _attempt_one_frame_capture(device: str, pixel_format: str, width: int, heigh
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def capture_frame(device: str, output_path: str, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, input_format: str = "mjpeg") -> None:
-    """Single-frame capture via ffmpeg - same command shape as src/lib/camera.ts's buildFfmpegArgs(), simplified (no warmup option - the edge agent's manual capture job is a one-shot test, not a scheduled series)."""
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _parse_fps(frame_rate: Optional[str]) -> Optional[float]:
+    if not frame_rate:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)", frame_rate)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if value > 0 else None
+
+
+def _frame_rate_arg(frame_rate: Optional[str]) -> Optional[str]:
+    fps = _parse_fps(frame_rate)
+    if not fps:
+        return None
+    return str(int(fps)) if fps.is_integer() else f"{fps:.3f}".rstrip("0").rstrip(".")
+
+
+def _capture_timeout(mode: CaptureMode, warmup_frames: int, warmup_seconds: Optional[float]) -> int:
+    fps = _parse_fps(mode.frame_rate) or 30.0
+    warmup_from_frames = warmup_frames / fps if warmup_frames > 0 else 0
+    warmup = max(warmup_from_frames, warmup_seconds or 0)
+    return max(CAPTURE_TIMEOUT_SECONDS, int(math.ceil(warmup + 12)))
+
+
+def build_capture_args(device: str, output_path: str, mode: CaptureMode, warmup_frames: int = DEFAULT_WARMUP_FRAMES) -> List[str]:
+    args = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "v4l2",
+    ]
+    frame_rate = _frame_rate_arg(mode.frame_rate)
+    if frame_rate:
+        args.extend(["-framerate", frame_rate])
+    args.extend(
+        [
+            "-input_format",
+            _ffmpeg_input_format(mode.input_format),
+            "-video_size",
+            f"{mode.width}x{mode.height}",
+            "-i",
+            device,
+        ]
+    )
+    if warmup_frames > 0:
+        args.extend(["-vf", f"select=gte(n\\,{warmup_frames})"])
+    args.extend(["-frames:v", "1", "-q:v", "2", "-y", output_path])
+    return args
+
+
+def _minimum_expected_jpeg_bytes(width: int, height: int) -> int:
+    return max(12000, round(width * height * 0.03))
+
+
+def _luma_stats(rgb: bytes) -> Tuple[float, float, int, float]:
+    values: List[int] = []
+    histogram = [0] * 256
+    total = 0
+    min_value = 255
+    max_value = 0
+    for index in range(0, len(rgb) - 2, 3):
+        luma = round(0.2126 * rgb[index] + 0.7152 * rgb[index + 1] + 0.0722 * rgb[index + 2])
+        values.append(luma)
+        histogram[luma] += 1
+        total += luma
+        min_value = min(min_value, luma)
+        max_value = max(max_value, luma)
+    count = max(1, len(values))
+    mean = total / count
+    variance = sum((value - mean) ** 2 for value in values) / count
+    entropy = 0.0
+    for bucket in histogram:
+        if bucket:
+            p = bucket / count
+            entropy -= p * math.log2(p)
+    return mean, math.sqrt(variance), max_value - min_value, entropy
+
+
+def validate_capture_file(path: str, expected: CaptureMode) -> Dict[str, object]:
+    image = Path(path)
+    if not image.exists() or image.stat().st_size <= 0:
+        raise CaptureValidationError("camera-output-empty", "ffmpeg produced an empty or missing file.")
+    byte_size = image.stat().st_size
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,codec_name",
+            "-of",
+            "json",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    if probe.returncode != 0:
+        raise CaptureValidationError("camera-jpeg-invalid", probe.stderr.strip()[:500] or "ffprobe could not decode the image.")
+    try:
+        stream = json.loads(probe.stdout)["streams"][0]
+    except Exception as exc:
+        raise CaptureValidationError("camera-jpeg-invalid", f"ffprobe output did not include an image stream: {exc}")
+
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    if width != expected.width or height != expected.height:
+        raise CaptureValidationError("camera-dimension-mismatch", f"Captured {width}x{height}; expected {expected.width}x{expected.height}.")
+
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-vf", "scale=64:64,format=rgb24", "-f", "rawvideo", "-"],
+        capture_output=True,
+        timeout=10,
+    )
+    if decoded.returncode != 0 or not decoded.stdout:
+        detail = decoded.stderr.decode("utf-8", "replace").strip()[:500]
+        raise CaptureValidationError("camera-jpeg-invalid", detail or "ffmpeg could not fully decode the image.")
+
+    mean, stddev, luma_range, entropy = _luma_stats(decoded.stdout)
+    suspiciously_small = width * height >= 300000 and byte_size < _minimum_expected_jpeg_bytes(width, height)
+    low_detail = stddev < 6 or luma_range < 32 or entropy < 1.2
+    if suspiciously_small and low_detail:
+        raise CaptureValidationError(
+            "camera-frame-corrupt",
+            f"Image decoded but looked like a corrupt or unsettled frame ({byte_size} bytes, luma stddev {stddev:.2f}).",
+        )
+
+    return {
+        "width": width,
+        "height": height,
+        "byteSize": byte_size,
+        "lumaMean": round(mean, 2),
+        "lumaStdDev": round(stddev, 2),
+        "lumaRange": luma_range,
+        "lumaEntropy": round(entropy, 3),
+    }
+
+
+def _attempt_capture(device: str, output_path: str, mode: CaptureMode, warmup_frames: int, warmup_seconds: Optional[float], attempt_number: int, fallback: bool) -> CaptureAttempt:
+    started_monotonic = time.monotonic()
+    started_at = _now_iso()
+    attempt = CaptureAttempt(mode=mode, attempt=attempt_number, fallback=fallback, started_at=started_at)
+    Path(output_path).unlink(missing_ok=True)
+    args = build_capture_args(device, output_path, mode, warmup_frames=warmup_frames)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=_capture_timeout(mode, warmup_frames, warmup_seconds))
+        if result.returncode != 0:
+            raise CaptureValidationError("camera-open-failed", result.stderr.strip()[:500] or f"ffmpeg exited with code {result.returncode}")
+        stats = validate_capture_file(output_path, mode)
+        attempt.status = "accepted"
+        attempt.byte_size = int(stats["byteSize"])
+    except subprocess.TimeoutExpired:
+        attempt.error_code = "camera-timeout"
+        attempt.error_message = f"ffmpeg capture timed out after {_capture_timeout(mode, warmup_frames, warmup_seconds)}s."
+    except CaptureValidationError as exc:
+        attempt.error_code = exc.code
+        attempt.error_message = str(exc)
+    finally:
+        attempt.completed_at = _now_iso()
+        attempt.duration_ms = round((time.monotonic() - started_monotonic) * 1000)
+    return attempt
+
+
+def capture_frame_with_result(
+    device: str,
+    output_path: str,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    input_format: str = "mjpeg",
+    frame_rate: Optional[str] = None,
+    warmup_frames: int = DEFAULT_WARMUP_FRAMES,
+    warmup_seconds: Optional[float] = None,
+    capture_attempts: int = DEFAULT_CAPTURE_ATTEMPTS,
+    fallback_mode: Optional[CaptureMode] = None,
+    fallback_attempts: int = DEFAULT_FALLBACK_ATTEMPTS,
+) -> CaptureResult:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    primary = CaptureMode(width=width, height=height, input_format=input_format, frame_rate=frame_rate)
+    attempts: List[CaptureAttempt] = []
+    started_monotonic = time.monotonic()
+    started_at = _now_iso()
+
+    sequences: List[Tuple[CaptureMode, int, bool]] = [(primary, max(1, capture_attempts), False)]
+    if fallback_mode is not None and fallback_attempts > 0:
+        sequences.append((fallback_mode, fallback_attempts, True))
+
+    for mode, count, fallback in sequences:
+        for _ in range(count):
+            attempt = _attempt_capture(device, output_path, mode, warmup_frames, warmup_seconds, len(attempts) + 1, fallback)
+            attempts.append(attempt)
+            if attempt.status == "accepted":
+                frame_at = attempt.completed_at or _now_iso()
+                return CaptureResult(
+                    output_path=output_path,
+                    captured_at=frame_at,
+                    capture_started_at=started_at,
+                    frame_captured_at=frame_at,
+                    capture_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
+                    attempts=attempts,
+                    effective_mode=mode,
+                    warmup_frames=warmup_frames,
+                    fallback_used=fallback,
+                )
+            if not fallback:
+                time.sleep(0.5)
+
+    Path(output_path).unlink(missing_ok=True)
+    last = attempts[-1] if attempts else None
+    reason = last.error_message if last else "No capture attempts ran."
+    raise RuntimeError(f"camera-fallback-exhausted: {reason}")
+
+
+def capture_frame(device: str, output_path: str, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, input_format: str = "mjpeg") -> None:
+    capture_frame_with_result(device, output_path, width=width, height=height, input_format=input_format)
     args = [
         "ffmpeg",
         "-hide_banner",

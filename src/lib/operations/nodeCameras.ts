@@ -247,7 +247,26 @@ export async function restoreNodeCamera(prisma: PrismaClient, input: { nodeName:
 
 export async function updateCameraAssignmentConfig(
   prisma: PrismaClient,
-  input: { nodeName: string; assignmentId: string; width?: number; height?: number; inputFormat?: string; name?: string; active?: boolean; requestedBy?: string | null },
+  input: {
+    nodeName: string;
+    assignmentId: string;
+    width?: number;
+    height?: number;
+    inputFormat?: string;
+    frameRate?: string | null;
+    warmupFrames?: number;
+    warmupSeconds?: number | null;
+    captureAttempts?: number;
+    fallbackWidth?: number | null;
+    fallbackHeight?: number | null;
+    fallbackInputFormat?: string | null;
+    fallbackFrameRate?: string | null;
+    fallbackAttempts?: number;
+    serializeOnNode?: boolean;
+    name?: string;
+    active?: boolean;
+    requestedBy?: string | null;
+  },
 ) {
   const node = await prisma.plantLabNode.findUniqueOrThrow({ where: { name: input.nodeName } });
   const assignment = await prisma.nodeCameraAssignment.findFirstOrThrow({ where: { id: input.assignmentId, nodeId: node.id } });
@@ -255,6 +274,16 @@ export async function updateCameraAssignmentConfig(
   if (input.width !== undefined) data.width = input.width;
   if (input.height !== undefined) data.height = input.height;
   if (input.inputFormat !== undefined) data.inputFormat = normalizeCameraInputFormat(input.inputFormat);
+  if (input.frameRate !== undefined) data.frameRate = input.frameRate;
+  if (input.warmupFrames !== undefined) data.warmupFrames = input.warmupFrames;
+  if (input.warmupSeconds !== undefined) data.warmupSeconds = input.warmupSeconds;
+  if (input.captureAttempts !== undefined) data.captureAttempts = input.captureAttempts;
+  if (input.fallbackWidth !== undefined) data.fallbackWidth = input.fallbackWidth;
+  if (input.fallbackHeight !== undefined) data.fallbackHeight = input.fallbackHeight;
+  if (input.fallbackInputFormat !== undefined) data.fallbackInputFormat = input.fallbackInputFormat ? normalizeCameraInputFormat(input.fallbackInputFormat) : null;
+  if (input.fallbackFrameRate !== undefined) data.fallbackFrameRate = input.fallbackFrameRate;
+  if (input.fallbackAttempts !== undefined) data.fallbackAttempts = input.fallbackAttempts;
+  if (input.serializeOnNode !== undefined) data.serializeOnNode = input.serializeOnNode;
   if (input.name !== undefined) data.name = input.name.trim();
   if (input.active !== undefined) data.active = input.active;
   const updated = await prisma.nodeCameraAssignment.update({ where: { id: assignment.id }, data });

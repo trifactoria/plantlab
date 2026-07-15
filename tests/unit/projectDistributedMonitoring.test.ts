@@ -3,6 +3,7 @@ import { GET as getAvailableSources } from "../../src/app/api/capture-sources/av
 import { POST as createProjectRoute } from "../../src/app/api/projects/route";
 import { GET as getProjectMetrics } from "../../src/app/api/projects/[projectId]/metrics/history/route";
 import { GET as getPhotoEnvironment } from "../../src/app/api/projects/[projectId]/photos/[photoId]/environment/route";
+import { POST as postProjectCapture } from "../../src/app/api/projects/[projectId]/captures/route";
 import { POST as linkProjectSensorRoute } from "../../src/app/api/projects/[projectId]/sensors/route";
 import { CaptureSourceScheduler, type CaptureSourceFn, type FanOutFn } from "../../src/lib/captureSourceService";
 import { ingestEnvironmentTelemetry, parseEnvironmentBatch } from "../../src/lib/operations/environmentProtocol";
@@ -189,6 +190,38 @@ describe("distributed project capture and environmental bindings", () => {
 
     expect(first.captures[0]).toMatchObject({ status: "queued", captureSourceId: attached.captureSource.id });
     expect(await prisma.agentCaptureJob.count({ where: { captureSourceId: attached.captureSource.id, scheduledFor: target } })).toBe(1);
+  });
+
+  it("manual project capture for a remote capture source queues an AgentCaptureJob", async () => {
+    const nodeName = `vitest-manual-source-${crypto.randomUUID()}`;
+    nodeNames.push(nodeName);
+    const attached = await createRemoteSource(nodeName);
+    captureSourceIds.push(attached.captureSource.id);
+    const project = await createTestProject(prisma, { captureEnabled: false, cameraDevice: null });
+    projectDirs.push({ id: project.id, directory: project.localPhotoDirectory });
+    await prisma.projectViewport.create({
+      data: {
+        projectId: project.id,
+        captureSourceId: attached.captureSource.id,
+        cropX: 0,
+        cropY: 0,
+        cropWidth: 1,
+        cropHeight: 1,
+        effectiveFrom: new Date("2026-07-14T12:00:00.000Z"),
+        active: true,
+      },
+    });
+
+    const response = await postProjectCapture(jsonRequest(`http://localhost/api/projects/${project.id}/captures`, {}), {
+      params: Promise.resolve({ projectId: project.id }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ mode: "remote-job", status: "queued", captureSourceId: attached.captureSource.id, reused: false });
+    const job = await prisma.agentCaptureJob.findUniqueOrThrow({ where: { id: body.jobId } });
+    expect(job).toMatchObject({ assignmentId: attached.assignment.id, captureSourceId: attached.captureSource.id, status: "queued" });
+    expect(job.scheduledFor).toBeNull();
   });
 
   it("links project sensors, returns linked accepted metric history, and bounds nearest photo environment", async () => {

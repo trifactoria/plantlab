@@ -142,15 +142,38 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
 
     output_path = spool.pending_path(capture_id)
     try:
-        camera.capture_frame(job.device_path, output_path, width=job.width, height=job.height, input_format=job.input_format)
+        fallback_mode = None
+        fallback_attempts = 0
+        if job.fallback:
+            fallback_mode = camera.CaptureMode(
+                width=int(job.fallback.get("width") or 0),
+                height=int(job.fallback.get("height") or 0),
+                input_format=str(job.fallback.get("inputFormat") or job.input_format),
+                frame_rate=job.fallback.get("frameRate") if isinstance(job.fallback.get("frameRate"), str) else None,
+            )
+            fallback_attempts = int(job.fallback.get("attempts") or 1)
+        result = camera.capture_frame_with_result(
+            job.device_path,
+            output_path,
+            width=job.width,
+            height=job.height,
+            input_format=job.input_format,
+            frame_rate=job.frame_rate,
+            warmup_frames=job.warmup_frames,
+            warmup_seconds=job.warmup_seconds,
+            capture_attempts=job.capture_attempts,
+            fallback_mode=fallback_mode if fallback_mode and fallback_mode.width > 0 and fallback_mode.height > 0 else None,
+            fallback_attempts=fallback_attempts,
+        )
         spool.record_captured(
             job_id=job.id,
             capture_id=capture_id,
             assignment_id=job.assignment_id,
             capture_source_id=job.capture_source_id,
             local_file_path=output_path,
-            captured_at=_now_iso(),
+            captured_at=result.captured_at,
             scheduled_for=job.scheduled_for,
+            metadata=result.metadata(),
         )
         logger.info("Frame captured to durable spool: job=%s capture=%s", job.id, capture_id)
     except Exception as exc:  # capture/spool failure - report and move on, never crash the loop
@@ -213,6 +236,8 @@ def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sp
                 "expectedByteSize": active.byte_size,
                 "mimeType": "image/jpeg",
             }
+            metadata.update(active.metadata())
+            metadata["uploadStartedAt"] = _now_iso()
             client.upload_capture(active.local_file_path, metadata, cfg.max_upload_bytes)
             client.complete_job(active.job_id, active.capture_id)
             active = spool.move_file_for_state(active, "acknowledged")

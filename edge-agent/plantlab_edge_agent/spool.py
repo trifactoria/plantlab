@@ -12,6 +12,7 @@ whatever happens next.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -45,6 +46,16 @@ class SpoolRecord:
     next_retry_at: Optional[str]
     last_error: Optional[str]
     state: str
+    metadata_json: Optional[str] = None
+
+    def metadata(self) -> dict:
+        if not self.metadata_json:
+            return {}
+        try:
+            parsed = json.loads(self.metadata_json)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
 
 @dataclass
@@ -91,11 +102,13 @@ class Spool:
                 attemptCount INTEGER NOT NULL DEFAULT 0,
                 nextRetryAt TEXT,
                 lastError TEXT,
-                state TEXT NOT NULL
+                state TEXT NOT NULL,
+                metadataJson TEXT
             )
             """
         )
         self._ensure_column("spool_records", "scheduledFor", "TEXT")
+        self._ensure_column("spool_records", "metadataJson", "TEXT")
         self._db.execute("CREATE INDEX IF NOT EXISTS spool_records_state_nextRetryAt_idx ON spool_records(state, nextRetryAt)")
         self._db.execute(
             """
@@ -240,6 +253,7 @@ class Spool:
         local_file_path: str,
         captured_at: str,
         scheduled_for: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> None:
         sha256 = _sha256_file(local_file_path)
         byte_size = os.path.getsize(local_file_path)
@@ -247,10 +261,10 @@ class Spool:
         self._db.execute(
             """
             INSERT INTO spool_records
-              (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 'pending')
+              (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state, metadataJson)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 'pending', ?)
             """,
-            (job_id, capture_id, assignment_id, capture_source_id, local_file_path, captured_at, scheduled_for, sha256, byte_size),
+            (job_id, capture_id, assignment_id, capture_source_id, local_file_path, captured_at, scheduled_for, sha256, byte_size, json.dumps(metadata or {}, sort_keys=True)),
         )
         self._db.commit()
 
@@ -260,7 +274,7 @@ class Spool:
         now = _now_iso()
         rows = self._db.execute(
             """
-            SELECT jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state
+            SELECT jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state, metadataJson
             FROM spool_records
             WHERE state = 'pending' OR (state = 'failed' AND (nextRetryAt IS NULL OR nextRetryAt <= ?))
             ORDER BY capturedAt ASC

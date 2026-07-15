@@ -423,6 +423,18 @@ export type AgentCaptureJobPayload = {
     width: number;
     height: number;
     inputFormat: string;
+    frameRate: string | null;
+    warmupFrames: number;
+    warmupSeconds: number | null;
+    captureAttempts: number;
+    fallback: {
+      width: number;
+      height: number;
+      inputFormat: string;
+      frameRate: string | null;
+      attempts: number;
+    } | null;
+    serializeOnNode: boolean;
   };
 };
 
@@ -459,12 +471,22 @@ export async function completeJob(prisma: PrismaClient, nodeId: string, jobId: s
   }
 
   const job = await prisma.agentCaptureJob.findFirst({ where: { id: jobId, nodeId, status: "claimed", captureId } });
+  const completedAt = new Date();
+  const frameAt = job?.frameCapturedAt ?? sourceCapture.timestamp;
+  const scheduledLatenessMs = job?.scheduledFor ? Math.max(0, frameAt.getTime() - job.scheduledFor.getTime()) : null;
   const updated = await prisma.agentCaptureJob.updateMany({
     where: { id: jobId, nodeId, status: "claimed", captureId },
     data: {
       status: "completed",
-      completedAt: new Date(),
+      completedAt,
       sourceCaptureId: sourceCapture.id,
+      queueLatencyMs: job?.claimedAt ? Math.max(0, job.claimedAt.getTime() - job.requestedAt.getTime()) : undefined,
+      scheduleToCaptureMs: job?.scheduledFor ? Math.max(0, frameAt.getTime() - job.scheduledFor.getTime()) : undefined,
+      captureDurationMs:
+        job?.captureStartedAt && frameAt ? Math.max(0, frameAt.getTime() - job.captureStartedAt.getTime()) : job?.captureDurationMs ?? undefined,
+      totalDurationMs: job ? Math.max(0, completedAt.getTime() - job.requestedAt.getTime()) : undefined,
+      scheduledLatenessMs: scheduledLatenessMs ?? undefined,
+      late: scheduledLatenessMs !== null ? scheduledLatenessMs > 15_000 : undefined,
     },
   });
   if (updated.count === 0) {
@@ -508,6 +530,21 @@ export async function serializeJobForAgent(prisma: PrismaClient, job: Awaited<Re
       width: job.assignment.width,
       height: job.assignment.height,
       inputFormat: job.assignment.inputFormat,
+      frameRate: job.assignment.frameRate,
+      warmupFrames: job.assignment.warmupFrames,
+      warmupSeconds: job.assignment.warmupSeconds,
+      captureAttempts: job.assignment.captureAttempts,
+      fallback:
+        job.assignment.fallbackWidth && job.assignment.fallbackHeight
+          ? {
+              width: job.assignment.fallbackWidth,
+              height: job.assignment.fallbackHeight,
+              inputFormat: job.assignment.fallbackInputFormat ?? job.assignment.inputFormat,
+              frameRate: job.assignment.fallbackFrameRate,
+              attempts: job.assignment.fallbackAttempts,
+            }
+          : null,
+      serializeOnNode: job.assignment.serializeOnNode,
     },
   };
 }

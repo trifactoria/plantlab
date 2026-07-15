@@ -868,6 +868,16 @@ model NodeCameraAssignment {
   width           Int
   height          Int
   inputFormat     String   @default("mjpeg")
+  frameRate       String?
+  warmupFrames    Int      @default(10)
+  warmupSeconds   Float?
+  captureAttempts Int      @default(2)
+  fallbackWidth   Int?
+  fallbackHeight  Int?
+  fallbackInputFormat String?
+  fallbackFrameRate   String?
+  fallbackAttempts    Int      @default(1)
+  serializeOnNode     Boolean  @default(true)
   active          Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -892,10 +902,31 @@ model AgentCaptureJob {
   scheduledFor    DateTime?
   requestedAt     DateTime  @default(now())
   claimedAt       DateTime?
+  captureStartedAt DateTime?
+  frameCapturedAt  DateTime?
+  uploadStartedAt  DateTime?
+  ingestedAt        DateTime?
   completedAt     DateTime?
   captureId       String?   @unique
   sourceCaptureId String?
   errorMessage    String?
+  effectiveWidth   Int?
+  effectiveHeight  Int?
+  effectiveInputFormat String?
+  effectiveFrameRate   String?
+  warmupFrames     Int?
+  attemptCount     Int?
+  fallbackUsed     Boolean?
+  validationStatus String?
+  validationErrorCode String?
+  attemptsJson     String?
+  queueLatencyMs   Int?
+  scheduleToCaptureMs Int?
+  captureDurationMs Int?
+  uploadDurationMs  Int?
+  totalDurationMs   Int?
+  scheduledLatenessMs Int?
+  late              Boolean @default(false)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

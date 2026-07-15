@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CameraSelect } from "@/components/CameraSelect";
+import { CaptureSourceSelect } from "@/components/CaptureSourceSelect";
 import {
   CaptureScheduleFields,
   captureSchedulePayload,
@@ -58,6 +59,8 @@ export function CameraSetupPanel({
   cameraName,
   cameraStableId,
   cameraProfileId,
+  captureSourceId,
+  localControlsEnabled,
   photoIntervalMinutes,
   captureStartAt,
   timeZone,
@@ -73,6 +76,8 @@ export function CameraSetupPanel({
   cameraName: string | null;
   cameraStableId: string | null;
   cameraProfileId: string | null;
+  captureSourceId: string | null;
+  localControlsEnabled: boolean;
   photoIntervalMinutes: number;
   captureStartAt: string;
   timeZone: string;
@@ -88,6 +93,9 @@ export function CameraSetupPanel({
   const [cameraSaveError, setCameraSaveError] = useState<string | null>(null);
   const [selectedCameraDevice, setSelectedCameraDevice] = useState(cameraDevice ?? "");
   const [selectedCameraStableId, setSelectedCameraStableId] = useState<string | null>(cameraStableId);
+  const [selectedCaptureSourceId, setSelectedCaptureSourceId] = useState(captureSourceId ?? "");
+  const [savingCaptureSource, setSavingCaptureSource] = useState(false);
+  const [captureSourceMessage, setCaptureSourceMessage] = useState<string | null>(null);
   const [movedCameraMatch, setMovedCameraMatch] = useState<{ device: string } | null>(null);
   const [updatingMovedCamera, setUpdatingMovedCamera] = useState(false);
   const [captureEnabled, setCaptureEnabled] = useState(initialCaptureEnabled);
@@ -173,7 +181,7 @@ export function CameraSetupPanel({
   const captureErrors = validateCaptureConfig({
     captureStartAt: schedule.captureStartAt,
     photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
-    cameraDevice: selectedCameraDevice || null,
+    cameraDevice: selectedCaptureSourceId ? "capture-source" : selectedCameraDevice || null,
     localPhotoDirectory,
     timeZone: schedule.timeZone,
     captureWindowEnabled: schedule.captureWindowEnabled,
@@ -181,6 +189,29 @@ export function CameraSetupPanel({
     captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
     isTestProject,
   });
+
+  async function saveCaptureSource() {
+    setCaptureSourceMessage(null);
+    setSavingCaptureSource(true);
+    const response = await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        captureSourceId: selectedCaptureSourceId || "",
+        cameraDevice: selectedCaptureSourceId ? null : undefined,
+      }),
+    });
+    const payload = (await response.json()) as { error?: string };
+    setSavingCaptureSource(false);
+
+    if (!response.ok) {
+      setCaptureSourceMessage(payload.error ?? "Could not save capture source.");
+      return;
+    }
+
+    setCaptureSourceMessage(selectedCaptureSourceId ? "Capture source saved." : "Capture source cleared.");
+    router.refresh();
+  }
 
   async function saveCamera(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -196,6 +227,7 @@ export function CameraSetupPanel({
         cameraName: formData.get("cameraName"),
         cameraStableId: selectedCameraStableId,
         cameraProfileId: selectedProfileId || null,
+        captureSourceId: "",
       }),
     });
     const payload = (await response.json()) as { error?: string };
@@ -457,12 +489,12 @@ export function CameraSetupPanel({
     setCapturing(true);
     setCaptureMessage(null);
 
-    const response = await fetch(`/api/projects/${projectId}/photos/capture`, {
+    const response = await fetch(`/api/projects/${projectId}/captures`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ notes: "Camera setup test photo." }),
     });
-    const payload = (await response.json()) as { savedPath?: string; error?: string };
+    const payload = (await response.json()) as { mode?: string; jobId?: string; savedPath?: string; error?: string };
 
     setCapturing(false);
 
@@ -471,7 +503,33 @@ export function CameraSetupPanel({
       return;
     }
 
-    setCaptureMessage(`Test photo saved and registered: ${payload.savedPath}`);
+    if (payload.mode === "remote-job" && payload.jobId) {
+      setCaptureMessage("Queued on node...");
+      setCapturing(true);
+      try {
+        for (let attempt = 0; attempt < 80; attempt += 1) {
+          await sleep(1500);
+          const statusResponse = await fetch(`/api/projects/${projectId}/captures/${payload.jobId}`, { cache: "no-store" });
+          const statusPayload = (await statusResponse.json()) as { status?: string; error?: string; errorMessage?: string | null };
+          if (!statusResponse.ok) throw new Error(statusPayload.error ?? "Could not read capture job status.");
+          if (statusPayload.status === "completed") {
+            setCaptureMessage("Remote test photo saved and registered.");
+            router.refresh();
+            return;
+          }
+          if (statusPayload.status === "failed") throw new Error(statusPayload.errorMessage ?? "Remote test capture failed.");
+          setCaptureMessage(statusPayload.status === "claimed" ? "Capturing on node..." : "Queued on node...");
+        }
+        setCaptureMessage("Remote capture is still running.");
+      } catch (error) {
+        setCaptureMessage(error instanceof Error ? error.message : "Remote test capture failed.");
+      } finally {
+        setCapturing(false);
+      }
+      return;
+    }
+
+    setCaptureMessage(payload.savedPath ? `Test photo saved and registered: ${payload.savedPath}` : "Test photo saved and registered.");
     router.refresh();
   }
 
@@ -708,6 +766,26 @@ export function CameraSetupPanel({
 
   return (
     <div className="grid gap-6">
+      <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-stone-950">Project Capture Source</h2>
+            {!localControlsEnabled ? (
+              <p className="mt-1 text-sm text-stone-600">
+                Local V4L2 camera controls are unavailable on this coordinator, but configured cameras from attached nodes are selectable here.
+              </p>
+            ) : null}
+          </div>
+          <button type="button" className="button" onClick={saveCaptureSource} disabled={savingCaptureSource}>
+            {savingCaptureSource ? "Saving..." : "Save Capture Source"}
+          </button>
+        </div>
+        <div className="mt-4">
+          <CaptureSourceSelect defaultCaptureSourceId={captureSourceId} onChange={setSelectedCaptureSourceId} />
+        </div>
+        {captureSourceMessage ? <p className="mt-3 text-sm font-medium text-stone-700">{captureSourceMessage}</p> : null}
+      </div>
+
       {/* 1. Camera and Profile */}
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Camera and Profile</h2>

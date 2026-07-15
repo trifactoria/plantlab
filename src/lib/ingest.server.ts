@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import Busboy from "busboy";
-import sharp from "sharp";
+import { ImageValidationError, validateImageFile } from "./imageValidation";
 import { resolveCaptureSourcesDataDir, resolveIngestDir } from "./paths.server";
 
 // See src/lib/paths.server.ts for why this is a plain runtime guard rather
@@ -43,10 +43,35 @@ export const SUPPORTED_INGEST_MIME_TYPES = new Map<string, string>([
 
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/i;
 
+function optionalDate(value: unknown, field: string): Date | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new IngestRequestError(`metadata.${field} must be a valid ISO date string when provided.`, 400);
+  }
+  return parsed;
+}
+
+function optionalInteger(value: unknown, field: string): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed)) {
+    throw new IngestRequestError(`metadata.${field} must be an integer when provided.`, 400);
+  }
+  return parsed;
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 export type ParsedIngestMetadata = {
   captureId: string;
   capturedAt: Date;
   scheduledFor: Date | null;
+  captureStartedAt: Date | null;
+  frameCapturedAt: Date | null;
+  uploadStartedAt: Date | null;
   /** Canonical CaptureSource.id, when the agent already knows it - preferred over cameraStableId when both are present. */
   captureSourceId: string | null;
   /** Fallback source identifier resolved by the route via a CaptureSource.cameraStableId lookup. At least one of captureSourceId/cameraStableId is required. */
@@ -55,6 +80,16 @@ export type ParsedIngestMetadata = {
   expectedSha256: string;
   expectedByteSize: number;
   mimeType: string;
+  effectiveWidth: number | null;
+  effectiveHeight: number | null;
+  effectiveInputFormat: string | null;
+  effectiveFrameRate: string | null;
+  warmupFrames: number | null;
+  attemptCount: number | null;
+  fallbackUsed: boolean | null;
+  validationStatus: string | null;
+  validationErrorCode: string | null;
+  attemptsJson: string | null;
 };
 
 export type StagedUpload = {
@@ -251,13 +286,10 @@ export function parseIngestMetadata(raw: unknown): ParsedIngestMetadata {
     throw new IngestRequestError("metadata.capturedAt must be a valid ISO date string.", 400);
   }
 
-  const scheduledFor =
-    typeof value.scheduledFor === "string" && value.scheduledFor.trim().length > 0
-      ? new Date(value.scheduledFor)
-      : null;
-  if (scheduledFor && Number.isNaN(scheduledFor.getTime())) {
-    throw new IngestRequestError("metadata.scheduledFor must be a valid ISO date string when provided.", 400);
-  }
+  const scheduledFor = optionalDate(value.scheduledFor, "scheduledFor");
+  const captureStartedAt = optionalDate(value.captureStartedAt, "captureStartedAt");
+  const frameCapturedAt = optionalDate(value.frameCapturedAt, "frameCapturedAt");
+  const uploadStartedAt = optionalDate(value.uploadStartedAt, "uploadStartedAt");
 
   const captureSourceId = typeof value.captureSourceId === "string" && value.captureSourceId.trim() ? value.captureSourceId.trim() : null;
   const cameraStableId = typeof value.cameraStableId === "string" && value.cameraStableId.trim() ? value.cameraStableId.trim() : null;
@@ -288,7 +320,30 @@ export function parseIngestMetadata(raw: unknown): ParsedIngestMetadata {
     );
   }
 
-  return { captureId, capturedAt, scheduledFor, captureSourceId, cameraStableId, originalFilename, expectedSha256, expectedByteSize, mimeType };
+  return {
+    captureId,
+    capturedAt,
+    scheduledFor,
+    captureStartedAt,
+    frameCapturedAt,
+    uploadStartedAt,
+    captureSourceId,
+    cameraStableId,
+    originalFilename,
+    expectedSha256,
+    expectedByteSize,
+    mimeType,
+    effectiveWidth: optionalInteger(value.effectiveWidth, "effectiveWidth"),
+    effectiveHeight: optionalInteger(value.effectiveHeight, "effectiveHeight"),
+    effectiveInputFormat: optionalString(value.effectiveInputFormat),
+    effectiveFrameRate: optionalString(value.effectiveFrameRate),
+    warmupFrames: optionalInteger(value.warmupFrames, "warmupFrames"),
+    attemptCount: optionalInteger(value.attemptCount, "attemptCount"),
+    fallbackUsed: typeof value.fallbackUsed === "boolean" ? value.fallbackUsed : null,
+    validationStatus: optionalString(value.validationStatus),
+    validationErrorCode: optionalString(value.validationErrorCode),
+    attemptsJson: typeof value.attempts === "string" ? value.attempts : value.attempts ? JSON.stringify(value.attempts) : null,
+  };
 }
 
 /**
@@ -354,30 +409,23 @@ export type ValidatedImage = { width: number; height: number; format: string };
  * Buffer first.
  */
 export async function validateStagedImage(stagingPath: string, metadata: ParsedIngestMetadata): Promise<ValidatedImage> {
-  let imageMetadata;
   try {
-    imageMetadata = await sharp(stagingPath).metadata();
+    const expectedFormat = metadata.mimeType === "image/png" ? "png" : "jpeg";
+    const image = await validateImageFile(stagingPath, {
+      expectedWidth: metadata.effectiveWidth ?? undefined,
+      expectedHeight: metadata.effectiveHeight ?? undefined,
+      expectedFormat,
+    });
+    return { width: image.stats.width, height: image.stats.height, format: image.stats.format };
   } catch (error) {
+    if (error instanceof ImageValidationError) {
+      throw new IngestRequestError(`${error.code}: ${error.message}`, 400);
+    }
     throw new IngestRequestError(
       `Uploaded file is not a valid or supported image: ${error instanceof Error ? error.message : String(error)}`,
       400,
     );
   }
-
-  const { width, height, format } = imageMetadata;
-  if (!width || !height || !format) {
-    throw new IngestRequestError("Could not read the uploaded image's dimensions.", 400);
-  }
-
-  const expectedFormat = metadata.mimeType === "image/png" ? "png" : "jpeg";
-  if (format !== expectedFormat) {
-    throw new IngestRequestError(
-      `Uploaded file's actual image format (${format}) does not match declared metadata.mimeType (${metadata.mimeType}).`,
-      400,
-    );
-  }
-
-  return { width, height, format };
 }
 
 /**

@@ -24,11 +24,6 @@ type Context = {
  * the returned preview bytes are rotated/flipped.
  */
 export async function POST(_request: Request, context: Context) {
-  const blocked = productionLocalOnlyResponse();
-  if (blocked) {
-    return blocked;
-  }
-
   const { sourceId } = await context.params;
   const source = await prisma.captureSource.findUnique({
     where: { id: sourceId },
@@ -77,6 +72,10 @@ export async function POST(_request: Request, context: Context) {
       });
     }
 
+    const blocked = productionLocalOnlyResponse();
+    if (blocked) {
+      return blocked;
+    }
     const { sourceCapture, savedPath } = await captureSourcePhoto(sourceId);
     const rawBuffer = await readFile(savedPath);
     const oriented = await applyOrientation(sharp(rawBuffer), {

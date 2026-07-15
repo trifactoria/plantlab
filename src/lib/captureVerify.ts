@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import { validateImageBuffer } from "./imageValidation";
 
 export type DimensionVerification = {
   requestedWidth: number;
@@ -20,6 +21,11 @@ export async function verifyCapturedDimensions(
   buffer: Buffer,
   requested: { width: number; height: number },
 ): Promise<DimensionVerification> {
+  const validation = await validateImageBuffer(buffer, {
+    expectedWidth: requested.width,
+    expectedHeight: requested.height,
+    expectedFormat: "jpeg",
+  });
   const metadata = await sharp(buffer).metadata();
 
   if (!metadata.width || !metadata.height) {
@@ -32,6 +38,6 @@ export async function verifyCapturedDimensions(
     actualWidth: metadata.width,
     actualHeight: metadata.height,
     matched: metadata.width === requested.width && metadata.height === requested.height,
-    byteSize: buffer.length,
+    byteSize: validation.stats.byteSize,
   };
 }

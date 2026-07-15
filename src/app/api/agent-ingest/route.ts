@@ -146,6 +146,28 @@ export async function POST(request: Request) {
       throw error;
     }
 
+    const ingestAt = new Date();
+    await prisma.agentCaptureJob.updateMany({
+      where: { captureId: metadata.captureId },
+      data: {
+        captureStartedAt: metadata.captureStartedAt,
+        frameCapturedAt: metadata.frameCapturedAt ?? metadata.capturedAt,
+        uploadStartedAt: metadata.uploadStartedAt,
+        ingestedAt: ingestAt,
+        effectiveWidth: metadata.effectiveWidth ?? image.width,
+        effectiveHeight: metadata.effectiveHeight ?? image.height,
+        effectiveInputFormat: metadata.effectiveInputFormat,
+        effectiveFrameRate: metadata.effectiveFrameRate,
+        warmupFrames: metadata.warmupFrames,
+        attemptCount: metadata.attemptCount,
+        fallbackUsed: metadata.fallbackUsed,
+        validationStatus: metadata.validationStatus ?? "accepted",
+        validationErrorCode: metadata.validationErrorCode,
+        attemptsJson: metadata.attemptsJson,
+        uploadDurationMs: metadata.uploadStartedAt ? Math.max(0, ingestAt.getTime() - metadata.uploadStartedAt.getTime()) : undefined,
+      },
+    });
+
     if (runFanOut) {
       try {
         await runViewportFanOut(sourceCapture.id);

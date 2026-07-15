@@ -157,6 +157,22 @@ describe("POST /api/agent-ingest", () => {
     expect(stagingEntries.filter((f) => f.endsWith(".partial"))).toHaveLength(0);
   });
 
+  it("rejects a structurally valid but implausibly low-detail camera-scale JPEG", async () => {
+    process.env.PLANTLAB_INGEST_TOKEN = TOKEN;
+    const source = await makeSource({ width: 1920, height: 1080 });
+    const image = await realJpegBuffer(1920, 1080, { r: 252, g: 252, b: 248 });
+    const metadata = await metadataWithChecksum(image, {
+      captureSourceId: source.id,
+      effectiveWidth: 1920,
+      effectiveHeight: 1080,
+    });
+
+    const response = await postAgentIngest(ingestRequest({ metadata, image, query: "?mode=store-only" }));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/camera-frame-corrupt/);
+    await expect(prisma.sourceCapture.findUnique({ where: { captureId: metadata.captureId as string } })).resolves.toBeNull();
+  });
+
   it("accepts a valid PNG upload", async () => {
     process.env.PLANTLAB_INGEST_TOKEN = TOKEN;
     const source = await makeSource();
