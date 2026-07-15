@@ -109,6 +109,23 @@ describe("unified node summaries", () => {
     });
   });
 
+  it("uses the OS hostname for the self row when local config only has localhost", async () => {
+    await writeNodeConfigRaw({
+      formatVersion: 1,
+      role: "coordinator",
+      configuredAt: new Date("2026-07-13T00:00:00.000Z").toISOString(),
+      hostname: "localhost",
+      nodeName: null,
+      coordinatorUrl: null,
+      spoolRoot: null,
+    });
+
+    const summaries = await getNodeSummaries(prisma, new Date("2026-07-13T12:00:00.000Z"));
+
+    expect(summaries.nodes[0].relationship).toBe("self");
+    expect(summaries.nodes[0].name).not.toBe("localhost");
+  });
+
   it("summarizes attached camera, greenhouse, mixed, pending, and offline nodes in stable order", async () => {
     const selfName = `plantlab-order-${randomUUID()}`;
     await writeSelf("coordinator", selfName);

@@ -47,7 +47,7 @@ export async function getNodeSummaries(prisma: PrismaClient, now = new Date()): 
     }),
   ]);
 
-  const selfName = config?.nodeName ?? config?.hostname ?? os.hostname();
+  const selfName = config?.nodeName ?? nonLoopbackHostname(config?.hostname) ?? os.hostname();
   const selfRole = config?.role ?? "standalone";
   const dbSelf = dbNodes.find((node) => node.name === selfName) ?? null;
   const selfCapabilities = dbSelf ? parseCapabilities(dbSelf.capabilitiesJson) : config?.capabilities ?? [];
@@ -172,4 +172,9 @@ function statusOrder(status: NodeSummary["status"]) {
     case "offline":
       return 3;
   }
+}
+
+function nonLoopbackHostname(hostname: string | null | undefined) {
+  if (!hostname || hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return null;
+  return hostname;
 }
