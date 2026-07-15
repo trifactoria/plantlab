@@ -216,6 +216,12 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
   }
   if (mode === "fixture") {
     const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "plantlab-screenshots-fixture-"));
+    // `next dev` rewrites next-env.d.ts and reformats tsconfig.json in the
+    // project root on startup. When this runs inside the coordinator's repo
+    // it would dirty those tracked files and block a future `git pull
+    // --ff-only`. Snapshot their contents so they can be restored afterwards.
+    const guardedFiles = ["next-env.d.ts", "tsconfig.json"].map((name) => path.join(process.cwd(), name));
+    const originals = await Promise.all(guardedFiles.map((file) => readFile(file, "utf8").then((content) => ({ file, content })).catch(() => null)));
     try {
       const port = await findFreePort();
       const { fixtureDb, env } = buildFixtureScreenshotEnv(fixtureRoot, port);
@@ -245,6 +251,9 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
+      // Restore any project-root files the fixture `next dev` rewrote, so the
+      // repository working tree is left exactly as it was found.
+      await Promise.all(originals.map((original) => (original ? writeFile(original.file, original.content) : Promise.resolve())));
     }
     return;
   }

@@ -11,6 +11,9 @@ coverage
 artifacts/screenshots/
 artifacts/support/
 test-results/
+# Support-bundle fixture screenshot runs create temp roots here when the
+# service TMPDIR points into the repo (see supportCollect.ts).
+tmp/
 backups/
 prisma/dev.db
 prisma/dev.db-journal
