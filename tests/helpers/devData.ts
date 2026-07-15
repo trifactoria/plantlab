@@ -397,6 +397,8 @@ export async function cleanupVisualData() {
 // touch the live xps or plantlab databases). Every ID here is deterministic
 // so repeated seedNodeVisualData() calls within a single spec stay idempotent.
 export const NODE_VISUAL_NAME = "greenhouse-zero";
+/** A project bound to one of NODE_VISUAL_NAME's shelf cameras (remote CaptureSource) with two linked sensors - see the end of seedNodeVisualData(). */
+export const NODE_VISUAL_DISTRIBUTED_PROJECT_ID = "greenhouse-zero-distributed-project";
 
 const SENSOR_DEFS = [
   // Outside: coolest and least humid of the four - and deliberately kept
@@ -432,6 +434,12 @@ export async function seedNodeVisualData(now: Date = new Date()) {
   // PLANTLAB_ROOT_DIR, which assertFixtureDatabase() has already proven is an
   // isolated fixture directory - never the live coordinator's root.
   await writeNodeConfig("coordinator", { nodeName: "fixture-coordinator" });
+  // ProjectSensorBinding.node is onDelete: Restrict, so the distributed
+  // project fixture (created near the end of this function, below) must be
+  // torn down before the node delete on the next line - otherwise a second
+  // seedNodeVisualData() call within the same spec (re-seeding mid-test)
+  // would fail this delete with a foreign-key violation.
+  await prisma.project.deleteMany({ where: { id: NODE_VISUAL_DISTRIBUTED_PROJECT_ID } });
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
   const registered = await registerOrRotateNode(prisma, { name: NODE_VISUAL_NAME, role: "greenhouse-node", rotateCredential: true });
   const nodeId = registered.node.id;
@@ -777,10 +785,10 @@ export async function seedNodeVisualData(now: Date = new Date()) {
     await prisma.nodeCameraEndpoint.create({
       data: { nodeId, nodeCameraId: camera.id, stableId: opts.stableId, devicePath: opts.devicePath, name: opts.name, ...SHARED, physicalPath: opts.physicalPath, usbPath: opts.physicalPath, usbPort: opts.usbPort, formatsJson: CAM_FORMATS, available: true, confidence: "reported-stable-id", evidenceJson: evidence(opts.physicalPath) },
     });
-    return camera;
+    return { camera, source };
   }
 
-  await makeAssignedCamera({ stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.1", name: "Greenhouse Wide", devicePath: "/dev/video0", physicalPath: "platform-fd500000.pcie-usb-0:1.1", usbPort: "1.1", rotation: 0 });
+  const wideCamera = await makeAssignedCamera({ stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.1", name: "Greenhouse Wide", devicePath: "/dev/video0", physicalPath: "platform-fd500000.pcie-usb-0:1.1", usbPort: "1.1", rotation: 0 });
   await makeAssignedCamera({ stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.2", name: "Greenhouse Top Shelf", devicePath: "/dev/video2", physicalPath: "platform-fd500000.pcie-usb-0:1.2", usbPort: "1.2", rotation: 90 });
 
   // The unavailable camera - it was at usb port 1.3 and went missing after a
@@ -824,12 +832,94 @@ export async function seedNodeVisualData(now: Date = new Date()) {
     data: { nodeId, nodeCameraId: null, stableId: "usb:32e6:9221:202601081445001:path:usb-0:1.4", devicePath: "/dev/video8", name: "webcam 1080P", ...SHARED, physicalPath: "platform-fd500000.pcie-usb-0:1.4", usbPath: "platform-fd500000.pcie-usb-0:1.4", usbPort: "1.4", formatsJson: CAM_FORMATS, available: true, confidence: "serial-vendor-product", evidenceJson: evidence("platform-fd500000.pcie-usb-0:1.4") },
   });
 
-  return { nodeName: NODE_VISUAL_NAME, nodeId };
+  // A distributed project bound to the "Greenhouse Wide" shelf camera
+  // (a remote CaptureSource, not a raw /dev/video* path) with two linked
+  // applied/active sensors and one photo timed to land right on the
+  // sensors' last reading - backs the Project UI Phase 1 screenshots and
+  // e2e specs (CaptureSource picker, linked sensors, environment charts,
+  // and the photo environment card's "matched within" case).
+  const distributedProjectDirectory = path.join(process.cwd(), "data", "playwright", "distributed-project-photos");
+  await mkdir(distributedProjectDirectory, { recursive: true });
+  await prisma.project.deleteMany({ where: { id: NODE_VISUAL_DISTRIBUTED_PROJECT_ID } });
+  const distributedProject = await prisma.project.create({
+    data: {
+      id: NODE_VISUAL_DISTRIBUTED_PROJECT_ID,
+      name: "Greenhouse Wide Shelf Study",
+      description: "Distributed project bound to a remote node camera and linked environmental sensors.",
+      gridWidth: 2,
+      gridHeight: 2,
+      photoIntervalMinutes: 60,
+      captureStartAt: new Date(now.getTime() - 60 * 60_000),
+      captureEnabled: false,
+      timeZone: "America/New_York",
+      localPhotoDirectory: distributedProjectDirectory,
+    },
+  });
+  await prisma.projectViewport.create({
+    data: {
+      projectId: distributedProject.id,
+      captureSourceId: wideCamera.source.id,
+      cropX: 0,
+      cropY: 0,
+      cropWidth: 1,
+      cropHeight: 1,
+      effectiveFrom: new Date(now.getTime() - 60 * 60_000),
+      active: true,
+    },
+  });
+  const outsideSensor = await prisma.nodeSensor.findUniqueOrThrow({ where: { nodeId_key: { nodeId, key: "greenhouse-outside" } } });
+  const middleSensor = await prisma.nodeSensor.findUniqueOrThrow({ where: { nodeId_key: { nodeId, key: "greenhouse-middle" } } });
+  await prisma.projectSensorBinding.create({
+    data: { projectId: distributedProject.id, nodeId, sensorId: outsideSensor.id, role: "outside-reference" },
+  });
+  await prisma.projectSensorBinding.create({
+    data: { projectId: distributedProject.id, nodeId, sensorId: middleSensor.id, role: "middle-shelf", label: "Middle Shelf" },
+  });
+  const distributedPhotoPath = path.join(distributedProjectDirectory, "greenhouse-wide-latest.jpg");
+  await writeFixturePhoto(distributedPhotoPath);
+  await prisma.photo.create({
+    data: {
+      id: `${NODE_VISUAL_DISTRIBUTED_PROJECT_ID}-photo`,
+      projectId: distributedProject.id,
+      filename: "greenhouse-wide-latest.jpg",
+      path: distributedPhotoPath,
+      // The outside/middle sensor series' last reading lands exactly at
+      // `now` (7-day span / 30-minute step divides evenly) - a few seconds
+      // off keeps the photo environment card's nearest-match distinct from
+      // a literal zero without missing the match window.
+      timestamp: new Date(now.getTime() - 8_000),
+      notes: null,
+    },
+  });
+
+  return { nodeName: NODE_VISUAL_NAME, nodeId, distributedProjectId: distributedProject.id };
 }
 
 /** Cascades to every row created by seedNodeVisualData() via onDelete: Cascade on PlantLabNode's relations. */
 export async function cleanupNodeVisualData() {
   assertFixtureDatabase();
+  // ProjectSensorBinding.node is onDelete: Restrict (a project should never
+  // be silently orphaned by deleting the node it monitors) - the
+  // distributed project fixture must be deleted before the node, or the
+  // node delete below fails its foreign-key check.
+  const distributedProjectDirectory = path.join(process.cwd(), "data", "playwright", "distributed-project-photos");
+  await prisma.project.deleteMany({ where: { id: NODE_VISUAL_DISTRIBUTED_PROJECT_ID } });
+  await rm(distributedProjectDirectory, { recursive: true, force: true }).catch(() => undefined);
+  // CaptureSource has no nodeId column (NodeCamera -> CaptureSource is the
+  // only link, onDelete: SetNull), so deleting the node alone leaves this
+  // fixture's per-camera CaptureSource rows ("Greenhouse Wide source" etc.)
+  // orphaned in the database instead of cascading away. Across many repeated
+  // seed/cleanup cycles against the same fixture database (e.g. re-running
+  // specs locally) those orphans accumulate, and a lookup by name (as e2e
+  // specs do, since CaptureSource ids are freshly generated every seed) can
+  // resolve to a stale orphan instead of the currently-seeded one. Delete
+  // them explicitly, before the node itself, while they can still be found
+  // via NodeCamera.captureSourceId.
+  const node = await prisma.plantLabNode.findUnique({ where: { name: NODE_VISUAL_NAME }, include: { cameras: { select: { captureSourceId: true } } } });
+  const captureSourceIds = (node?.cameras ?? []).map((camera) => camera.captureSourceId).filter((id): id is string => id !== null);
+  if (captureSourceIds.length > 0) {
+    await prisma.captureSource.deleteMany({ where: { id: { in: captureSourceIds } } });
+  }
   await prisma.plantLabNode.deleteMany({ where: { name: NODE_VISUAL_NAME } });
   // Remove the isolated coordinator config written by seedNodeVisualData so a
   // reused fixture directory doesn't leak coordinator role into later runs.

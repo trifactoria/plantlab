@@ -5,6 +5,7 @@ import { CapturePhotoButton } from "@/components/CapturePhotoButton";
 import { PlantGrid } from "@/components/PlantGrid";
 import { PhotoUploadForm } from "@/components/PhotoUploadForm";
 import { ProjectCropStatus } from "@/components/ProjectCropStatus";
+import { ProjectEnvironmentPanel } from "@/components/ProjectEnvironmentPanel";
 import { ScanPhotosButton } from "@/components/ScanPhotosButton";
 import { computeProjectCropStatus } from "@/lib/cropVersions";
 import { formatDateTime } from "@/lib/format";
@@ -21,6 +22,7 @@ import {
 } from "@/lib/experiment";
 import { groupPhotosByDay, groupPhotosByMonth } from "@/lib/gallery";
 import { localCameraHardwareEnabled } from "@/lib/localOnly";
+import { listProjectSensorBindings } from "@/lib/operations/projectSensors";
 import { prisma } from "@/lib/prisma";
 import { captureWindowLabel, isInsideCaptureWindow, nextPermittedCaptureTime } from "@/lib/schedule";
 import { formatDateTimeInZone } from "@/lib/timezone";
@@ -45,7 +47,7 @@ export default async function ProjectPage({ params }: PageProps) {
 
   await ensureDefaultProjectMilestones(prisma, projectRecord.id);
   await ensurePlantOriginEvents(prisma, projectRecord.id);
-  const [latestPhoto, galleryPhotos, milestones, canonicalEvents, harvestResults, cropStatus] = await Promise.all([
+  const [latestPhoto, galleryPhotos, milestones, canonicalEvents, harvestResults, cropStatus, sensorBindings] = await Promise.all([
     prisma.photo.findFirst({
       where: { projectId: projectRecord.id },
       orderBy: { timestamp: "desc" },
@@ -63,6 +65,7 @@ export default async function ProjectPage({ params }: PageProps) {
     }),
     prisma.plantHarvestResult.findMany({ where: { plant: { projectId: projectRecord.id } } }),
     computeProjectCropStatus(prisma, projectRecord.id),
+    listProjectSensorBindings(prisma, projectRecord.id),
   ]);
   const activeViewport = await prisma.projectViewport.findFirst({
     where: { projectId: projectRecord.id, active: true, effectiveFrom: { lte: new Date() } },
@@ -352,6 +355,13 @@ export default async function ProjectPage({ params }: PageProps) {
             </div>
 
             <ProjectCropStatus projectId={project.id} status={cropStatus} />
+
+            <div>
+              <h2 className="text-xl font-semibold text-stone-950">Environment</h2>
+              <div className="mt-4">
+                <ProjectEnvironmentPanel projectId={project.id} timeZone={project.timeZone} bindings={sensorBindings} />
+              </div>
+            </div>
 
             <div>
               <h2 className="text-xl font-semibold text-stone-950">Grid</h2>

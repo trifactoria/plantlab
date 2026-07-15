@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatDateTime } from "@/lib/format";
-import { celsiusToFahrenheit, formatAge, sensorStatusTone, SENSOR_STATUS_LABEL } from "@/lib/greenhouseDisplay";
+import { celsiusToFahrenheit, formatAge, sensorStatusTone, SENSOR_STATUS_LABEL, SENSOR_STATUS_TONE_STYLES } from "@/lib/greenhouseDisplay";
 import { DEFAULT_HISTORY_RANGE, fetchMetricHistory, type HistoryRangeValue, type NormalizedSeries } from "@/lib/metricHistory";
 import { guidanceForCode, intermittentFailureSummary } from "@/lib/sensorDiagnostics";
 import { RangeSelector } from "./charts/RangeSelector";
@@ -98,14 +98,6 @@ const TEST_STATUS_TONE: Record<SensorTest["status"], string> = {
   failed: "border-red-200 bg-red-100 text-red-900",
   expired: "border-red-200 bg-red-100 text-red-900",
   cancelled: "border-stone-200 bg-stone-100 text-stone-700",
-};
-
-const TONE_STYLES: Record<string, string> = {
-  fresh: "border-emerald-200 bg-emerald-100 text-emerald-900",
-  stale: "border-amber-200 bg-amber-100 text-amber-900",
-  rejected: "border-red-200 bg-red-100 text-red-900",
-  failed: "border-red-200 bg-red-100 text-red-900",
-  unavailable: "border-stone-200 bg-stone-100 text-stone-700",
 };
 
 const NORMAL_POLL_MS = 30_000;
@@ -239,7 +231,7 @@ export function SensorDetailPanel({ nodeName, sensorKey }: { nodeName: string; s
             <h2 className="text-lg font-semibold text-stone-950">{sensor.name}</h2>
             <p className="text-xs text-stone-500">{sensor.key}</p>
           </div>
-          <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${TONE_STYLES[tone]}`}>{SENSOR_STATUS_LABEL[tone]}</span>
+          <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${SENSOR_STATUS_TONE_STYLES[tone]}`}>{SENSOR_STATUS_LABEL[tone]}</span>
         </div>
         <dl className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Type" value={sensor.type} />

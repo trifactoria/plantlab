@@ -126,24 +126,58 @@ export async function fetchMetricHistory(params: MetricHistoryFetchParams): Prom
     return { ok: true, resolution: "raw", rangeFrom: 0, rangeTo: 0, seriesByMetric: Object.fromEntries(params.metrics.map((metric) => [metric, []])) };
   }
 
+  const search = new URLSearchParams({ sensorKeys: params.sensorKeys.join(",") });
+  return fetchAndNormalizeHistory(`/api/nodes/${params.nodeName}/metrics/history`, search, params);
+}
+
+export type ProjectMetricHistoryFetchParams = {
+  projectId: string;
+  /** Empty/omitted means every enabled sensor binding on the project. */
+  bindingIds?: string[];
+  metrics: string[];
+  range: HistoryRangeValue;
+  now?: Date;
+  timeZone?: string;
+  fetchImpl?: typeof fetch;
+};
+
+/**
+ * Project-scoped counterpart to fetchMetricHistory: fetches and normalizes
+ * GET /api/projects/:projectId/metrics/history, which resolves sensor
+ * bindings (potentially spanning several nodes) rather than a single node's
+ * sensor keys - see getProjectMetricHistory in
+ * src/lib/operations/metricHistory.ts.
+ */
+export async function fetchProjectMetricHistory(params: ProjectMetricHistoryFetchParams): Promise<MetricHistoryFetchResult> {
+  if ((params.bindingIds && params.bindingIds.length === 0) || params.metrics.length === 0) {
+    return { ok: true, resolution: "raw", rangeFrom: 0, rangeTo: 0, seriesByMetric: Object.fromEntries(params.metrics.map((metric) => [metric, []])) };
+  }
+
+  const search = new URLSearchParams();
+  if (params.bindingIds && params.bindingIds.length > 0) search.set("bindingIds", params.bindingIds.join(","));
+  return fetchAndNormalizeHistory(`/api/projects/${params.projectId}/metrics/history`, search, params);
+}
+
+async function fetchAndNormalizeHistory(
+  path: string,
+  search: URLSearchParams,
+  params: { metrics: string[]; range: HistoryRangeValue; now?: Date; timeZone?: string; fetchImpl?: typeof fetch },
+): Promise<MetricHistoryFetchResult> {
   const definition = rangeDefinition(params.range);
   const now = params.now ?? new Date();
   const from = new Date(now.getTime() - definition.durationMs);
 
-  const search = new URLSearchParams({
-    sensorKeys: params.sensorKeys.join(","),
-    metrics: params.metrics.join(","),
-    resolution: definition.resolution,
-    from: from.toISOString(),
-    to: now.toISOString(),
-  });
+  search.set("metrics", params.metrics.join(","));
+  search.set("resolution", definition.resolution);
+  search.set("from", from.toISOString());
+  search.set("to", now.toISOString());
   if (params.timeZone) search.set("timeZone", params.timeZone);
 
   const doFetch = params.fetchImpl ?? fetch;
 
   let response: Response;
   try {
-    response = await doFetch(`/api/nodes/${params.nodeName}/metrics/history?${search.toString()}`, { cache: "no-store" });
+    response = await doFetch(`${path}?${search.toString()}`, { cache: "no-store" });
   } catch {
     return { ok: false, error: "Could not reach the coordinator." };
   }

@@ -3,11 +3,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ObservationCard } from "@/components/ObservationCard";
 import { PhotoEditor } from "@/components/PhotoEditor";
+import { PhotoEnvironmentCard } from "@/components/PhotoEnvironmentCard";
 import { PlantCropSummary } from "@/components/PlantCropSummary";
 import { PlantGrid } from "@/components/PlantGrid";
 import { QuickMilestoneEntry } from "@/components/QuickMilestoneEntry";
 import { ensureDefaultProjectMilestones, ensurePlantOriginEvents } from "@/lib/experiment";
 import { formatDateTime } from "@/lib/format";
+import { nearestPhotoEnvironment } from "@/lib/operations/projectSensors";
 import { prisma } from "@/lib/prisma";
 
 type PageProps = {
@@ -60,6 +62,7 @@ export default async function PhotoPage({ params }: PageProps) {
   const index = photos.findIndex((item) => item.id === photo.id);
   const newerPhoto = index > 0 ? photos[index - 1] : null;
   const olderPhoto = index >= 0 && index < photos.length - 1 ? photos[index + 1] : null;
+  const environment = await nearestPhotoEnvironment(prisma, { projectId: photo.projectId, photoId: photo.id });
 
   return (
     <main className="min-h-screen">
@@ -210,15 +213,19 @@ export default async function PhotoPage({ params }: PageProps) {
             </div>
           </div>
 
-          <aside className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
-            <h2 className="text-lg font-semibold text-stone-950">Edit Photo</h2>
-            <div className="mt-4">
-              <PhotoEditor
-                photoId={photo.id}
-                projectId={photo.projectId}
-                timestamp={photo.timestamp.toISOString()}
-                notes={photo.notes}
-              />
+          <aside className="grid content-start gap-4">
+            <PhotoEnvironmentCard capturedAt={photo.timestamp.toISOString()} readings={environment.readings} />
+
+            <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
+              <h2 className="text-lg font-semibold text-stone-950">Edit Photo</h2>
+              <div className="mt-4">
+                <PhotoEditor
+                  photoId={photo.id}
+                  projectId={photo.projectId}
+                  timestamp={photo.timestamp.toISOString()}
+                  notes={photo.notes}
+                />
+              </div>
             </div>
           </aside>
         </div>

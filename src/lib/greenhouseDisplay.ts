@@ -57,6 +57,15 @@ export const SENSOR_STATUS_LABEL: Record<SensorStatusTone, string> = {
   unavailable: "Unavailable",
 };
 
+/** Badge classes for SENSOR_STATUS_LABEL/sensorStatusTone - shared by every sensor freshness badge (node sensor detail, project environment panel, photo environment card). */
+export const SENSOR_STATUS_TONE_STYLES: Record<SensorStatusTone, string> = {
+  fresh: "border-emerald-200 bg-emerald-100 text-emerald-900",
+  stale: "border-amber-200 bg-amber-100 text-amber-900",
+  rejected: "border-red-200 bg-red-100 text-red-900",
+  failed: "border-red-200 bg-red-100 text-red-900",
+  unavailable: "border-stone-200 bg-stone-100 text-stone-700",
+};
+
 export function sensorStatusTone(sensor: EnvironmentSensor | null): SensorStatusTone {
   if (!sensor || !sensor.lastAttemptAt) return "unavailable";
   switch (sensor.latestClassification) {

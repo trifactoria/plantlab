@@ -20,8 +20,11 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await expect(page.getByRole("link", { name: "Playwright Radish Study" })).toBeVisible();
 
   await page.getByLabel("Name").fill("Playwright Auto Folder Project");
-  await expect(page.getByLabel("Camera")).toContainText("Mock USB Camera");
-  await page.getByLabel("Camera").selectOption("/dev/video-test");
+  // Project creation now selects a distributed CaptureSource, not a raw
+  // /dev/video* path - no CaptureSource is configured in this fixture, so
+  // "No camera" is the only real option and stays selected.
+  await expect(page.getByTestId("capture-source-option-none")).toBeVisible();
+  await expect(page.getByTestId("capture-source-option-none").locator('input[type="radio"]')).toBeChecked();
   await expect(page.getByText("Create and use a PlantLab photo folder")).toBeVisible();
   await expect(page.getByLabel("Planting date and time")).toBeVisible();
   await expect(page.getByText("Planting date/time unknown")).toBeVisible();
@@ -72,7 +75,12 @@ test("core CRUD screens render and open edit surfaces", async ({ page }) => {
   await goto(page, `/projects/${ids.projectId}/settings`);
   await expect(page.getByRole("heading", { name: "Project Settings" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Save Settings" })).toBeVisible();
-  await expect(page.getByLabel("Camera")).toContainText("Mock USB Camera");
+  // This fixture project has no camera (mode "none"), so the raw
+  // Direct Local device picker stays hidden until that mode is chosen -
+  // switch to it to confirm mockCameraApis' discovered camera still shows.
+  await expect(page.getByRole("radio", { name: "No Camera" })).toBeChecked();
+  await page.getByRole("radio", { name: "Direct Local" }).check();
+  await expect(page.locator('select[name="cameraDevice"]')).toContainText("Mock USB Camera");
   await expect(page.getByLabel("Planting date and time")).toBeVisible();
   await expect(page.getByLabel("Timezone")).toBeVisible();
   await expect(page.getByLabel("Schedule anchor")).toBeVisible();

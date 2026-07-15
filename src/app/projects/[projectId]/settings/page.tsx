@@ -2,6 +2,9 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ProjectMilestoneSettings } from "@/components/ProjectMilestoneSettings";
 import { ensureDefaultProjectMilestones } from "@/lib/experiment";
+import { projectCaptureSummary } from "@/lib/operations/projectCapture";
+import { listProjectSensorBindings } from "@/lib/operations/projectSensors";
+import { ProjectSensorBindingsPanel } from "@/components/ProjectSensorBindingsPanel";
 import { ProjectSettingsForm } from "@/components/ProjectSettingsForm";
 import { prisma } from "@/lib/prisma";
 
@@ -18,6 +21,14 @@ export default async function ProjectSettingsPage({ params }: PageProps) {
   });
 
   if (!project) {
+    notFound();
+  }
+
+  const [capture, sensorBindings] = await Promise.all([
+    projectCaptureSummary(prisma, project.id),
+    listProjectSensorBindings(prisma, project.id, { includeDisabled: true }),
+  ]);
+  if (!capture) {
     notFound();
   }
 
@@ -53,8 +64,12 @@ export default async function ProjectSettingsPage({ params }: PageProps) {
               localPhotoDirectory: project.localPhotoDirectory,
               cameraDevice: project.cameraDevice,
               cameraName: project.cameraName,
+              capture: { mode: capture.mode, captureSourceId: capture.mode === "capture-source" ? capture.captureSourceId : null },
             }}
           />
+          <div className="mt-6">
+            <ProjectSensorBindingsPanel projectId={project.id} initialBindings={sensorBindings} />
+          </div>
           <div className="mt-6">
             <ProjectMilestoneSettings
               projectId={project.id}

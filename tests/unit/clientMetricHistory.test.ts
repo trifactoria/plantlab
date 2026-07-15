@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { defaultGapThresholdMs, fetchMetricHistory, insertGapBreaks, rangeDefinition } from "../../src/lib/metricHistory";
+import { defaultGapThresholdMs, fetchMetricHistory, fetchProjectMetricHistory, insertGapBreaks, rangeDefinition } from "../../src/lib/metricHistory";
 
 describe("rangeDefinition", () => {
   it("maps every supported range to the recommended resolution", () => {
@@ -147,5 +147,77 @@ describe("fetchMetricHistory", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toBe("Could not reach the coordinator.");
+  });
+});
+
+describe("fetchProjectMetricHistory", () => {
+  function mockFetch(body: unknown, ok = true) {
+    return vi.fn().mockResolvedValue({
+      ok,
+      json: async () => body,
+    }) as unknown as typeof fetch;
+  }
+
+  it("returns empty series per metric without making a request when bindingIds is an empty array", async () => {
+    const fetchImpl = vi.fn();
+    const result = await fetchProjectMetricHistory({
+      projectId: "p1",
+      bindingIds: [],
+      metrics: ["temperatureC"],
+      range: "24h",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.seriesByMetric.temperatureC).toEqual([]);
+  });
+
+  it("hits the project-scoped endpoint with bindingIds instead of sensorKeys", async () => {
+    const fetchImpl = mockFetch({
+      range: { from: "2026-07-13T12:00:00.000Z", to: "2026-07-14T12:00:00.000Z", resolution: "raw" },
+      series: [
+        {
+          key: "binding-1:temperatureC",
+          subjectKey: "greenhouse-outside",
+          metric: "temperatureC",
+          label: "Outside temperature",
+          unit: "celsius",
+          points: [{ at: "2026-07-14T10:00:00.000Z", value: 20 }],
+        },
+      ],
+    });
+
+    const result = await fetchProjectMetricHistory({
+      projectId: "proj-123",
+      bindingIds: ["binding-1"],
+      metrics: ["temperatureC"],
+      range: "1h",
+      fetchImpl,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.seriesByMetric.temperatureC).toHaveLength(1);
+    expect(result.seriesByMetric.temperatureC[0].key).toBe("binding-1:temperatureC");
+
+    const [url] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/api/projects/proj-123/metrics/history?");
+    expect(url).toContain("bindingIds=binding-1");
+    expect(url).not.toContain("sensorKeys");
+  });
+
+  it("omits bindingIds from the query when none are given, requesting every enabled binding", async () => {
+    const fetchImpl = mockFetch({ range: { from: "a", to: "b", resolution: "raw" }, series: [] });
+    await fetchProjectMetricHistory({ projectId: "proj-all", metrics: ["temperatureC"], range: "1h", fetchImpl });
+    const [url] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).not.toContain("bindingIds");
+  });
+
+  it("returns a structured error when the response is not ok", async () => {
+    const fetchImpl = mockFetch({ error: "Unknown sensor binding id(s): bogus." }, false);
+    const result = await fetchProjectMetricHistory({ projectId: "p", bindingIds: ["bogus"], metrics: ["temperatureC"], range: "1h", fetchImpl });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("Unknown sensor binding id(s): bogus.");
   });
 });

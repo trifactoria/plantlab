@@ -1,18 +1,12 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { PROJECT_SENSOR_ROLES } from "../projectSensorRoles";
+import { activeSensorWhere } from "./sensorConfig";
 
 if (typeof window !== "undefined") {
   throw new Error("src/lib/operations/projectSensors.ts is server-only operational code.");
 }
 
-export const PROJECT_SENSOR_ROLES = [
-  "ambient",
-  "outside-reference",
-  "top-shelf",
-  "middle-shelf",
-  "bottom-shelf",
-  "root-zone",
-  "custom",
-] as const;
+export { PROJECT_SENSOR_ROLES };
 
 const BINDING_INCLUDE = {
   node: true,
@@ -51,9 +45,51 @@ export function serializeProjectSensorBinding(
       configuredActive: binding.sensor.configuredActive,
       enabled: binding.sensor.enabled,
       retiredAt: binding.sensor.retiredAt?.toISOString() ?? null,
+      lastAttemptAt: binding.sensor.lastAttemptAt?.toISOString() ?? null,
       lastAcceptedAt: binding.sensor.lastAcceptedAt?.toISOString() ?? null,
+      latestClassification: binding.sensor.latestClassification,
+      latestTemperatureC: binding.sensor.latestTemperatureC,
+      latestHumidityPct: binding.sensor.latestHumidityPct,
     },
   };
+}
+
+export type AvailableProjectSensor = ReturnType<typeof serializeAvailableProjectSensor>;
+
+function serializeAvailableProjectSensor(sensor: Prisma.NodeSensorGetPayload<{ include: { node: true } }>) {
+  return {
+    id: sensor.id,
+    key: sensor.key,
+    name: sensor.name,
+    type: sensor.type,
+    placement: sensor.placement,
+    node: { id: sensor.node.id, name: sensor.node.name, role: sensor.node.role },
+  };
+}
+
+/**
+ * Sensors eligible to link to a project: applied and configured-active only
+ * (same definition as activeSensorWhere/activeSensorsForNode in
+ * sensorConfig.ts - the node config control plane's single source of truth
+ * for "currently configured"), across every registered node. Retired and
+ * historical sensors are never offered here; they remain linkable only via
+ * allowHistorical repair, not this picker.
+ */
+export async function listAvailableProjectSensors(prisma: PrismaClient): Promise<AvailableProjectSensor[]> {
+  const nodes = await prisma.plantLabNode.findMany({
+    where: { sensors: { some: {} } },
+    select: { id: true, name: true },
+    orderBy: { name: "asc" },
+  });
+
+  const perNode = await Promise.all(
+    nodes.map(async (node) => {
+      const where = await activeSensorWhere(prisma, node.id);
+      return prisma.nodeSensor.findMany({ where, include: { node: true }, orderBy: [{ placement: "asc" }, { key: "asc" }] });
+    }),
+  );
+
+  return perNode.flat().map(serializeAvailableProjectSensor);
 }
 
 export async function listProjectSensorBindings(prisma: PrismaClient, projectId: string, options: { includeDisabled?: boolean } = {}) {

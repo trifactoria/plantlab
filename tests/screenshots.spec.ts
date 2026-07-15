@@ -1,7 +1,16 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { cleanupNodeVisualData, cleanupVisualData, disconnectPrisma, mockCameraApis, NODE_VISUAL_NAME, seedNodeVisualData, seedVisualData } from "./helpers/devData";
+import {
+  cleanupNodeVisualData,
+  cleanupVisualData,
+  disconnectPrisma,
+  mockCameraApis,
+  NODE_VISUAL_DISTRIBUTED_PROJECT_ID,
+  NODE_VISUAL_NAME,
+  seedNodeVisualData,
+  seedVisualData,
+} from "./helpers/devData";
 import { goto } from "./helpers/navigation";
 
 if (process.env.PLANTLAB_SCREENSHOTS_LIVE_READONLY === "1") {
@@ -68,6 +77,13 @@ const projectSurfaces = [
   "/plants/:plantId",
   "/projects/:projectId/gallery/:month",
   "/projects/:projectId/gallery/:month/:day",
+  // Distributed project UI (Project UI Phase 1) - the CaptureSource picker
+  // and sensor checklist need a node with cameras/sensors configured to show
+  // real content, so this full-scope run also seeds seedNodeVisualData().
+  "/ (CaptureSource picker + sensor checklist)",
+  "/projects/:distributedProjectId (linked sensors + environment charts)",
+  "/projects/:distributedProjectId/settings (capture mode + sensor bindings)",
+  "/photos/:distributedPhotoId (photo environment card)",
 ] as const;
 
 /** Home page plus every /nodes/[nodeName]/... operational surface: outlet controls (including Water as an ordinary outlet), charts, sensor/camera/power/activity subsystem pages. See nodeSurfaces above. */
@@ -177,10 +193,26 @@ for (const viewport of viewports) {
 
     await mockCameraApis(page);
     const ids = await seedVisualData();
+    // The distributed project UI's CaptureSource picker and sensor
+    // checklist need a node with real cameras/sensors configured - without
+    // this, "project creation" would only show empty "No cameras are
+    // configured yet" / "No active sensors are configured yet" states.
+    await seedNodeVisualData();
 
     await goto(page, "/");
     await capture(page, `${prefix}-home`);
     await capture(page, `${prefix}-project-create-schedule-timezone`);
+
+    // Distributed CaptureSource picker (grouped by node, remote cameras
+    // visible with resolution/availability badges) and the applied/active
+    // sensor checklist, both on the project-creation form.
+    await expect(page.getByTestId("capture-source-option-none")).toBeVisible();
+    // Scoped to the radio itself (not getByText) so it can't collide with
+    // the "Greenhouse Wide Shelf Study" project card title also on this page.
+    await expect(page.getByRole("radio", { name: /Greenhouse Wide/ })).toBeVisible();
+    await expect(page.getByText("Environmental Sensors", { exact: true })).toBeVisible();
+    await expect(page.getByText("Outside", { exact: true })).toBeVisible();
+    await capture(page, `${prefix}-project-create-capture-source-picker`);
 
     await goto(page, `/projects/${ids.projectId}`);
     await capture(page, `${prefix}-project-dashboard`);
@@ -236,6 +268,33 @@ for (const viewport of viewports) {
     await goto(page, `/projects/${ids.otherProjectId}`);
     await page.getByTestId("capture-origin-card").waitFor();
     await capture(page, `${prefix}-shared-source-project-summary`);
+
+    // Distributed project (remote node camera + two linked sensors):
+    // Environment section with linked sensors, freshness badges, current
+    // readings, and the temperature/humidity charts.
+    await goto(page, `/projects/${NODE_VISUAL_DISTRIBUTED_PROJECT_ID}`);
+    await expect(page.getByText("Linked Sensors")).toBeVisible();
+    await expect(page.locator("svg.recharts-surface").first()).toBeVisible();
+    await page.waitForTimeout(300);
+    await capture(page, `${prefix}-project-environment-linked-sensors-and-charts`);
+
+    // Distributed project settings: capture mode picker (Capture Source
+    // selected, schedule-controlled-by-source message) and the sensor
+    // bindings management panel.
+    await goto(page, `/projects/${NODE_VISUAL_DISTRIBUTED_PROJECT_ID}/settings`);
+    await expect(page.getByText("Capture schedule controlled by the selected Capture Source.")).toBeVisible();
+    // The binding's label lives in an editable input, not a text node.
+    await expect(page.locator('input[value="Middle Shelf"]')).toBeVisible();
+    await capture(page, `${prefix}-project-settings-capture-mode-and-sensors`);
+
+    // Photo environment card: nearest reading per linked sensor with a
+    // "Matched within N seconds" note.
+    await goto(page, `/photos/${NODE_VISUAL_DISTRIBUTED_PROJECT_ID}-photo`);
+    await expect(page.getByTestId("photo-environment-card")).toBeVisible();
+    // Both linked sensors' last reading lands at the same fixture timestamp,
+    // so more than one "Matched within" note is expected here.
+    await expect(page.getByText(/Matched within/).first()).toBeVisible();
+    await capture(page, `${prefix}-photo-environment-card`);
 
     await goto(page, `/projects/${ids.projectId}/timeline`);
     await capture(page, `${prefix}-project-timeline`);

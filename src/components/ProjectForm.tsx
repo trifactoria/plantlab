@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CameraSelect } from "@/components/CameraSelect";
+import { CaptureSourceSelect } from "@/components/CaptureSourceSelect";
 import {
   CaptureScheduleFields,
   browserTimeZone,
@@ -10,6 +10,7 @@ import {
   initialScheduleValue,
   type CaptureScheduleValue,
 } from "@/components/CaptureScheduleFields";
+import { ProjectSensorChecklist } from "@/components/ProjectSensorChecklist";
 import { validateCaptureConfig } from "@/lib/captureValidation";
 import { toDateTimeLocal } from "@/lib/format";
 import { safeTimeInputToMinutes } from "@/lib/timezone";
@@ -24,7 +25,8 @@ export function ProjectForm() {
   const [saving, setSaving] = useState(false);
   const [useDefaultFolder, setUseDefaultFolder] = useState(true);
   const [plantingUnknown, setPlantingUnknown] = useState(false);
-  const [cameraDevice, setCameraDevice] = useState("");
+  const [captureSourceId, setCaptureSourceId] = useState("");
+  const [selectedSensorIds, setSelectedSensorIds] = useState<Set<string>>(new Set());
   const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
     initialScheduleValue({
       timeZone: browserTimeZone(),
@@ -35,16 +37,22 @@ export function ProjectForm() {
   const [localPhotoDirectory, setLocalPhotoDirectory] = useState("");
   const [captureEnabled, setCaptureEnabled] = useState(false);
 
-  const captureErrors = validateCaptureConfig({
-    captureStartAt: schedule.captureStartAt || null,
-    photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
-    cameraDevice: cameraDevice || null,
-    localPhotoDirectory: useDefaultFolder ? "auto" : localPhotoDirectory,
-    timeZone: schedule.timeZone,
-    captureWindowEnabled: schedule.captureWindowEnabled,
-    captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
-    captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
-  });
+  // The coordinator validates capture-source eligibility itself
+  // (validateProjectCaptureSourceSelection) - the local cameraDevice/
+  // directory/schedule checks below only apply when no capture source is
+  // selected, mirroring POST /api/projects's own branch.
+  const captureErrors = captureSourceId
+    ? []
+    : validateCaptureConfig({
+        captureStartAt: schedule.captureStartAt || null,
+        photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
+        cameraDevice: null,
+        localPhotoDirectory: useDefaultFolder ? "auto" : localPhotoDirectory,
+        timeZone: schedule.timeZone,
+        captureWindowEnabled: schedule.captureWindowEnabled,
+        captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
+        captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
+      });
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,8 +81,7 @@ export function ProjectForm() {
           : new Date(String(formData.get("plantedAt"))).toISOString(),
         useDefaultPhotoDirectory: useDefaultFolder,
         localPhotoDirectory,
-        cameraDevice,
-        cameraName: formData.get("cameraName"),
+        captureSourceId: captureSourceId || undefined,
       }),
     });
 
@@ -85,6 +92,19 @@ export function ProjectForm() {
       setError(payload.error ?? "Could not create project");
       return;
     }
+
+    // Best-effort: the project itself is already created, so a failed
+    // sensor link is not fatal - it can be added later from Project
+    // Settings. Fire all links in parallel rather than serially.
+    await Promise.allSettled(
+      [...selectedSensorIds].map((sensorId) =>
+        fetch(`/api/projects/${payload.id}/sensors`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sensorId }),
+        }),
+      ),
+    );
 
     router.push(`/projects/${payload.id}`);
     router.refresh();
@@ -135,7 +155,9 @@ export function ProjectForm() {
 
       <CaptureScheduleFields value={schedule} onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))} />
 
-      <CameraSelect onDeviceChange={setCameraDevice} />
+      <CaptureSourceSelect onChange={setCaptureSourceId} />
+
+      <ProjectSensorChecklist selected={selectedSensorIds} onChange={setSelectedSensorIds} />
 
       <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">
         <label className="flex items-center gap-2 text-sm font-medium text-stone-800">

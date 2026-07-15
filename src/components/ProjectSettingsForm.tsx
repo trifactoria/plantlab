@@ -2,7 +2,6 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CameraSelect } from "@/components/CameraSelect";
 import {
   CaptureScheduleFields,
   captureSchedulePayload,
@@ -10,6 +9,7 @@ import {
   type CaptureScheduleValue,
 } from "@/components/CaptureScheduleFields";
 import { ConfirmActionButton } from "@/components/ConfirmActionButton";
+import { ProjectCaptureModeSection, type ProjectCaptureMode } from "@/components/ProjectCaptureModeSection";
 import { validateCaptureConfig } from "@/lib/captureValidation";
 import { toDateTimeLocal } from "@/lib/format";
 import { safeTimeInputToMinutes } from "@/lib/timezone";
@@ -32,6 +32,7 @@ type ProjectSettings = {
   localPhotoDirectory: string;
   cameraDevice: string | null;
   cameraName: string | null;
+  capture: { mode: ProjectCaptureMode; captureSourceId: string | null };
 };
 
 export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
@@ -43,7 +44,9 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
   const [plantingUnknown, setPlantingUnknown] = useState(project.plantedAt === null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<ProjectCaptureMode>(project.capture.mode);
   const [cameraDevice, setCameraDevice] = useState(project.cameraDevice ?? "");
+  const [captureSourceId, setCaptureSourceId] = useState(project.capture.captureSourceId ?? "");
   const [schedule, setSchedule] = useState<CaptureScheduleValue>(() =>
     initialScheduleValue({
       timeZone: project.timeZone,
@@ -56,17 +59,23 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
   );
   const [captureEnabled, setCaptureEnabled] = useState(project.captureEnabled);
 
-  const captureErrors = validateCaptureConfig({
-    captureStartAt: schedule.captureStartAt || null,
-    photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
-    cameraDevice: cameraDevice || null,
-    localPhotoDirectory: useCustomFolder ? photoDirectory : project.localPhotoDirectory,
-    timeZone: schedule.timeZone,
-    captureWindowEnabled: schedule.captureWindowEnabled,
-    captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
-    captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
-    isTestProject: project.isTestProject,
-  });
+  // The coordinator validates capture-source eligibility itself
+  // (validateProjectCaptureSourceSelection) - the local cameraDevice/
+  // directory/schedule checks below only apply outside capture-source mode,
+  // mirroring PATCH /api/projects/:id's own branch.
+  const captureErrors = mode === "capture-source"
+    ? []
+    : validateCaptureConfig({
+        captureStartAt: schedule.captureStartAt || null,
+        photoIntervalMinutes: Number.parseInt(schedule.photoIntervalMinutes, 10),
+        cameraDevice: mode === "direct-local" ? cameraDevice || null : null,
+        localPhotoDirectory: useCustomFolder ? photoDirectory : project.localPhotoDirectory,
+        timeZone: schedule.timeZone,
+        captureWindowEnabled: schedule.captureWindowEnabled,
+        captureWindowStartMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowStart) : null,
+        captureWindowEndMinutes: schedule.captureWindowEnabled ? safeTimeInputToMinutes(schedule.captureWindowEnd) : null,
+        isTestProject: project.isTestProject,
+      });
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -90,14 +99,20 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
         description: formData.get("description"),
         gridWidth: formData.get("gridWidth"),
         gridHeight: formData.get("gridHeight"),
-        ...captureSchedulePayload(schedule),
+        // The project's own schedule fields are irrelevant while a
+        // CaptureSource is active - see ProjectCaptureModeSection - so they
+        // are left untouched (undefined) rather than resubmitted, which
+        // could never overwrite the shared CaptureSource's own schedule but
+        // would otherwise silently rewrite unused Project columns.
+        ...(mode === "capture-source" ? {} : captureSchedulePayload(schedule)),
         captureEnabled: project.isTestProject ? false : captureEnabled,
         plantedAt: plantingUnknown
           ? null
           : new Date(String(formData.get("plantedAt"))).toISOString(),
         localPhotoDirectory: customDirectory,
-        cameraDevice,
-        cameraName: formData.get("cameraName"),
+        captureSourceId: mode === "capture-source" ? captureSourceId : "",
+        cameraDevice: mode === "direct-local" ? cameraDevice : "",
+        cameraName: mode === "direct-local" ? formData.get("cameraName") : "",
       }),
     });
     const payload = (await response.json()) as { error?: string };
@@ -177,15 +192,21 @@ export function ProjectSettingsForm({ project }: { project: ProjectSettings }) {
           Planting date/time unknown
         </label>
 
-        <CaptureScheduleFields
-          value={schedule}
-          onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))}
-        />
+        {mode !== "capture-source" ? (
+          <CaptureScheduleFields
+            value={schedule}
+            onChange={(patch) => setSchedule((current) => ({ ...current, ...patch }))}
+          />
+        ) : null}
 
-        <CameraSelect
-          defaultDevice={project.cameraDevice}
-          defaultName={project.cameraName}
-          onDeviceChange={setCameraDevice}
+        <ProjectCaptureModeSection
+          mode={mode}
+          onModeChange={setMode}
+          cameraDevice={cameraDevice}
+          cameraName={project.cameraName}
+          onCameraDeviceChange={setCameraDevice}
+          captureSourceId={captureSourceId}
+          onCaptureSourceIdChange={setCaptureSourceId}
         />
 
         <div className="grid gap-3 rounded-md border border-stone-200 bg-stone-50 p-3">
