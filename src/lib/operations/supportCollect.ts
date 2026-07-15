@@ -217,9 +217,9 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
   if (mode === "fixture") {
     const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "plantlab-screenshots-fixture-"));
     // `next dev` rewrites next-env.d.ts and reformats tsconfig.json in the
-    // project root on startup. When this runs inside the coordinator's repo
-    // it would dirty those tracked files and block a future `git pull
-    // --ff-only`. Snapshot their contents so they can be restored afterwards.
+    // project root on startup. When this runs inside the coordinator's repo it
+    // would dirty those tracked files and block a future `git pull --ff-only`;
+    // the finally below restores the committed versions with git checkout.
     const port = await findFreePort();
     try {
       const { fixtureDb, env } = buildFixtureScreenshotEnv(fixtureRoot, port);
@@ -237,9 +237,14 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       // on the coordinator (which shares CPU with the live services). The
       // full desktop/laptop/mobile suite lives in tests/screenshots.spec.ts.
       await rm(path.join(process.cwd(), "artifacts", "screenshots"), { recursive: true, force: true }).catch(() => undefined);
+      // Retry once: the fixture `next dev` server occasionally throws a
+      // first-compile "Expected clientReferenceManifest to be defined"
+      // invariant on an RSC route under the coordinator's shared CPU, which a
+      // recompile clears. The retry keeps the isolated fixture pass reliable
+      // without touching any live data.
       const result = await execFileResult(
         "pnpm",
-        ["exec", "playwright", "test", "tests/support-fixture-screenshots.spec.ts"],
+        ["exec", "playwright", "test", "--retries=1", "tests/support-fixture-screenshots.spec.ts"],
         300_000,
         process.cwd(),
         env,
@@ -248,43 +253,27 @@ async function collectScreenshots(root: string, manifest: { probes: ProbeResult[
       manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
     } finally {
-      // The fixture `next dev` spawns a `next-server` render worker that holds
-      // the fixture port and keeps rewriting next-env.d.ts. Killing only the
-      // `next dev` parent leaves that worker alive to re-dirty the tree after
-      // the checkout, so kill by the fixture port (fuser targets exactly the
-      // holder of that random free port — never the live server on 3000) and
-      // loop until the port is actually released before restoring. The parent
-      // is matched precisely by its --port argument so a gentle kill lands too.
-      const kill = await execFileResult(
+      // Tear down the fixture `next dev` server: kill its parent (matched
+      // precisely by the --port argument) and the render worker holding the
+      // fixture port (fuser targets exactly that random free port — never the
+      // live server on 3000). A short settle follows so the worker is gone
+      // before the restore.
+      await execFileResult(
         "bash",
-        [
-          "-c",
-          `for i in $(seq 1 40); do ` +
-            `pkill -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; ` +
-            `fuser -k ${port}/tcp 2>/dev/null; ` +
-            `fuser ${port}/tcp 2>/dev/null || break; ` +
-            `sleep 0.5; ` +
-            `done; echo "port-free-after=$i"`,
-        ],
-        30_000,
-      ).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
+        ["-c", `pkill -9 -f 'next dev --hostname 127.0.0.1 --port ${port}' 2>/dev/null; fuser -k -9 ${port}/tcp 2>/dev/null; sleep 2; true`],
+        15_000,
+      ).catch(() => undefined);
       await rm(fixtureRoot, { recursive: true, force: true });
       // Restore the committed next-env.d.ts (which next dev repointed at the
       // fixture types dir) and tsconfig.json (which it reformats) with git, so
       // the working tree is left clean regardless of the state it was found in
       // — a plain content snapshot would perpetuate a pre-existing dirty state
-      // instead of correcting it. Done only after the port is released above so
-      // no surviving worker rewrites the file after the checkout.
+      // instead of correcting it.
       const checkout = await execFileResult("git", ["checkout", "--", "next-env.d.ts", "tsconfig.json"], 15_000).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
       const after = await execFileResult("git", ["status", "--short"], 15_000).catch((error) => ({ stdout: "", stderr: String(error), status: -1 }));
       await writeFile(
         path.join(dir, "fixture-cleanup.txt"),
-        redact(
-          `cwd=${process.cwd()} port=${port}\n` +
-            `kill status=${kill.status}\n${kill.stdout}\n${kill.stderr}\n` +
-            `checkout status=${checkout.status}\n${checkout.stdout}\n${checkout.stderr}\n` +
-            `git status --short after (status=${after.status}):\n${after.stdout}\n${after.stderr}\n`,
-        ),
+        redact(`git checkout status=${checkout.status}${checkout.stderr ? `\n${checkout.stderr}` : ""}\ngit status --short after:\n${after.stdout || "(clean)"}\n`),
       ).catch(() => undefined);
     }
     return;
