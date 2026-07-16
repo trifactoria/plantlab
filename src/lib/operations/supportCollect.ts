@@ -288,9 +288,9 @@ async function collectHost(
 
 function hostCommands(host: string, role: string, opts: { includeLogs: boolean; includeHardwareTests: boolean }): HostCommand[] {
   const common: HostCommand[] = [
-    { path: "system/hostname.txt", remote: "hostname", timeoutMs: 8_000 },
-    { path: "system/time.txt", remote: "date -Is; timedatectl 2>/dev/null | sed -n '1,8p'", timeoutMs: 8_000 },
-    { path: "system/disk.txt", remote: "df -h .", timeoutMs: 10_000 },
+    { path: "system/hostname.txt", remote: "hostname", timeoutMs: 20_000 },
+    { path: "system/time.txt", remote: "date -Is; timedatectl 2>/dev/null | sed -n '1,8p'", timeoutMs: 20_000 },
+    { path: "system/disk.txt", remote: "df -h .", timeoutMs: 20_000 },
     { path: "system/git.txt", remote: "cd ~/projects/plantlab 2>/dev/null || cd ~/plantlab 2>/dev/null || cd /home/andy/projects/plantlab 2>/dev/null || exit 0; git status --short --branch; git rev-parse HEAD" },
   ];
   if (role === "coordinator") {
