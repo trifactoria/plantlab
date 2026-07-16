@@ -77,15 +77,22 @@ async function capture(page: Page, route: SupportScreenshotRoute, index: number)
 test("live readonly support screenshot surfaces", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const routes = await readRoutes();
+  test.setTimeout(Math.max(90_000, routes.length * 20_000));
   const metadata: ScreenshotMetadata[] = [];
 
   for (const [index, route] of routes.entries()) {
     metadata.push(await capture(page, route, index));
+    await writeMetadata(metadata);
   }
 
-  await writeFile(path.join(outputDir, "metadata.json"), `${JSON.stringify({ screenshots: metadata }, null, 2)}\n`);
+  await writeMetadata(metadata);
   expect(metadata.filter((item) => !item.ready)).toEqual([]);
 });
+
+async function writeMetadata(metadata: ScreenshotMetadata[]) {
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "metadata.json"), `${JSON.stringify({ screenshots: metadata }, null, 2)}\n`);
+}
 
 async function waitForSupportReadiness(page: Page, readiness: NonNullable<SupportScreenshotRoute["readiness"]>) {
   await expect(page.locator("body")).toBeVisible({ timeout: 30_000 });

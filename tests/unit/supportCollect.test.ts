@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redact, selectedHosts, summarizeHostStatus } from "../../src/lib/operations/supportCollect";
+import { redact, resolveSupportOutputDir, selectedHosts, summarizeHostStatus } from "../../src/lib/operations/supportCollect";
 import { buildSummaryMarkdown, evaluateProbeOutput, overallHealth } from "../../src/lib/operations/supportHealth";
 import { discoverScreenshotRoutes } from "../../src/lib/operations/supportScreenshots";
 
@@ -18,6 +18,10 @@ describe("support collect", () => {
     expect(redacted).not.toContain("hunter2");
     expect(redacted).not.toContain("supersecret");
     expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("resolves relative output directories before zipping from a temporary workdir", () => {
+    expect(resolveSupportOutputDir("artifacts/support-test")).toBe(`${process.cwd()}/artifacts/support-test`);
   });
 });
 

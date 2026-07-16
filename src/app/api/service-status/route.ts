@@ -1,16 +1,10 @@
 import { NextResponse } from "next/server";
-import { productionLocalOnlyResponse } from "@/lib/localOnly";
 import { prisma } from "@/lib/prisma";
 import { getProjectCaptureStatus, getServiceStatusSnapshot } from "@/lib/serviceStatus";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const blocked = productionLocalOnlyResponse();
-  if (blocked) {
-    return blocked;
-  }
-
   const now = new Date();
   const [service, projects] = await Promise.all([
     getServiceStatusSnapshot(prisma, now),

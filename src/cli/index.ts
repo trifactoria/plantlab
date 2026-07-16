@@ -1,17 +1,9 @@
 import "../lib/suppressExpectedWarnings";
 import { Command } from "commander";
 import packageJson from "../../package.json";
-import { registerBackupCommand } from "./commands/backup";
-import { registerCameraCommand } from "./commands/camera";
-import { registerCaptureCommand } from "./commands/capture";
-import { registerDoctorCommand } from "./commands/doctor";
-import { registerInstallCommand } from "./commands/install";
-import { registerNodeCommand } from "./commands/node";
-import { registerProjectCommand } from "./commands/project";
-import { registerServiceCommand } from "./commands/service";
-import { registerSupportCommand } from "./commands/support";
-import { registerUpdateCommand } from "./commands/update";
-import { registerVersionCommand } from "./commands/version";
+import { loadPlantLabEnvFiles } from "../lib/envFiles.server";
+
+loadPlantLabEnvFiles();
 
 /**
  * The canonical PlantLab operational interface. Every command here is a
@@ -20,7 +12,32 @@ import { registerVersionCommand } from "./commands/version";
  * remain as compatibility wrappers that call into this same CLI rather than
  * duplicating any of it.
  */
-export function buildProgram(): Command {
+export async function buildProgram(): Promise<Command> {
+  const [
+    { registerBackupCommand },
+    { registerCameraCommand },
+    { registerCaptureCommand },
+    { registerDoctorCommand },
+    { registerInstallCommand },
+    { registerNodeCommand },
+    { registerProjectCommand },
+    { registerServiceCommand },
+    { registerSupportCommand },
+    { registerUpdateCommand },
+    { registerVersionCommand },
+  ] = await Promise.all([
+    import("./commands/backup"),
+    import("./commands/camera"),
+    import("./commands/capture"),
+    import("./commands/doctor"),
+    import("./commands/install"),
+    import("./commands/node"),
+    import("./commands/project"),
+    import("./commands/service"),
+    import("./commands/support"),
+    import("./commands/update"),
+    import("./commands/version"),
+  ]);
   const program = new Command();
 
   program
@@ -57,7 +74,7 @@ Examples:
 }
 
 async function main() {
-  const program = buildProgram();
+  const program = await buildProgram();
   await program.parseAsync(process.argv);
 }
 

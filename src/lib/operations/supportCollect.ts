@@ -88,7 +88,7 @@ const DEFAULT_HOSTS = [
 
 export async function collectSupportBundle(options: SupportCollectOptions = {}) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const outputDir = options.outputDir ?? path.join(process.cwd(), "artifacts", "support");
+  const outputDir = resolveSupportOutputDir(options.outputDir);
   await mkdir(outputDir, { recursive: true });
   const workDir = await mkdtemp(path.join(os.tmpdir(), "plantlab-support-"));
   const root = path.join(workDir, `plantlab-support-${timestamp}`);
@@ -146,6 +146,10 @@ export async function collectSupportBundle(options: SupportCollectOptions = {}) 
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
+}
+
+export function resolveSupportOutputDir(outputDir?: string): string {
+  return path.resolve(outputDir ?? path.join(process.cwd(), "artifacts", "support"));
 }
 
 /** Succeeded when every probe passed, failed when none did, partial otherwise - one offline host never aborts the whole bundle. */
@@ -407,7 +411,7 @@ async function collectLiveReadonlyScreenshotsForHost(
         "-lc",
         "rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
       ],
-      240_000,
+      screenshotTimeoutMs(routes),
     );
     await writeFile(path.join(dir, "live-readonly-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
     manifest.probes.push({ host, role: "screenshots", command: "pnpm screenshots live-readonly", ok: result.status === 0, status: result.status, path: path.join(dir, "live-readonly-run.txt") });
@@ -433,7 +437,7 @@ async function collectLiveReadonlyScreenshotsForHost(
       host,
       "cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
     ],
-    240_000,
+    screenshotTimeoutMs(routes),
   );
   await writeFile(path.join(dir, "live-readonly-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
   manifest.probes.push({ host, role: "screenshots", command: "pnpm screenshots live-readonly", ok: result.status === 0, status: result.status, path: path.join(dir, "live-readonly-run.txt") });
@@ -441,6 +445,10 @@ async function collectLiveReadonlyScreenshotsForHost(
   await writeFile(path.join(dir, "live-readonly-copy.txt"), redact(`${copyResult.stdout}\n${copyResult.stderr}`));
   manifest.probes.push({ host, role: "screenshots", command: "copy live-readonly screenshots", ok: copyResult.status === 0, status: copyResult.status, path: path.join(dir, "live-readonly-copy.txt") });
   return await readScreenshotMetadata(path.join(dir, "artifacts"));
+}
+
+function screenshotTimeoutMs(routes: SupportScreenshotRoute[]) {
+  return Math.max(240_000, routes.length * 20_000);
 }
 
 async function discoverLiveScreenshotRoutes(host: string, runner: "ssh" | "local-shell"): Promise<SupportScreenshotRoute[]> {

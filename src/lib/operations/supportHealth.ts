@@ -249,7 +249,7 @@ export function buildSummaryMarkdown(input: SupportReportInput): string {
     ...findingLines(warnings),
     "",
     "## Healthy Items",
-    ...(healthyProbes.length ? healthyProbes.slice(0, 80).map((probe) => `- ${probe.host}: ${probe.command}`) : ["- No passing probes recorded."]),
+    ...(healthyProbes.length ? healthyProbes.slice(0, 80).map((probe) => `- ${probe.host}: ${shortCommand(probe.command)} (${probe.path})`) : ["- No passing probes recorded."]),
     "",
     "## Host Summaries",
     ...[...byHost.entries()].map(([host, probes]) => {
@@ -268,7 +268,7 @@ export function buildSummaryMarkdown(input: SupportReportInput): string {
       : ["- No screenshots captured."]),
     "",
     "## Skipped Or Failed Probes",
-    ...(failedProbes.length ? failedProbes.map((probe) => `- ${probe.host}: ${probe.command} (${probe.status ?? "unknown"})`) : ["- No failed probes recorded."]),
+    ...(failedProbes.length ? failedProbes.map((probe) => `- ${probe.host}: ${shortCommand(probe.command)} (${probe.status ?? "unknown"}, ${probe.path})`) : ["- No failed probes recorded."]),
     "",
     "## Suggested Next Steps",
     ...suggestedNextSteps(input.findings),
@@ -313,6 +313,13 @@ function findingLines(findings: SupportFinding[]) {
   return findings.length
     ? findings.map((finding) => `- ${finding.host} [${finding.category}]: ${finding.title}. ${finding.detail}`)
     : ["- None."];
+}
+
+function shortCommand(command: string) {
+  const singleLine = command.replace(/\s+/g, " ").trim();
+  if (singleLine.includes("python3 - <<")) return singleLine.includes("PLANTLAB_SUPPORT_QUERIES") ? "sqlite diagnostic query" : "sqlite database summary";
+  if (singleLine.length <= 160) return singleLine;
+  return `${singleLine.slice(0, 157)}...`;
 }
 
 function groupByHost(probes: SupportProbeLike[]) {
