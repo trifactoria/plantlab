@@ -28,6 +28,17 @@ if (typeof window !== "undefined") {
 }
 
 export type ScreenshotMode = "fixture" | "live-readonly" | "none";
+export type SupportCollectionScope = "coordinator" | "selected-nodes" | "all";
+
+export type SupportCollectionRequest = {
+  scope: SupportCollectionScope;
+  nodeNames: string[];
+  coordinator: string;
+  screenshotMode: ScreenshotMode;
+  includeLogs: boolean;
+  includeHardwareDiagnostics: boolean;
+  outputDir?: string;
+};
 
 export type SupportTargetStatus = "queued" | "collecting" | "succeeded" | "partial" | "failed";
 
@@ -61,11 +72,29 @@ export type ProbeResult = SupportProbeLike & {
   error?: string;
 };
 
+export type HostUiClassification = "available" | "unreachable" | "not-running" | "not-applicable" | "unknown";
+
+export type HostUiCoverage = {
+  host: string;
+  role: string;
+  classification: HostUiClassification;
+  baseUrl: string | null;
+  detectionEvidence: string[];
+  reason: string | null;
+  discoveredSurfaces: number;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  screenshots: number;
+  skipped: number;
+};
+
 type SupportManifest = {
   createdAt: string;
   invokedOn: string;
   screenshots: ScreenshotMode;
   collectionOptions: Record<string, unknown>;
+  uiCoverage: HostUiCoverage[];
   probes: ProbeResult[];
   failures: ProbeResult[];
   findings: SupportFinding[];
@@ -87,8 +116,9 @@ const DEFAULT_HOSTS = [
 ] as const;
 
 export async function collectSupportBundle(options: SupportCollectOptions = {}) {
+  const request = normalizeSupportCollectionRequest(options);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const outputDir = resolveSupportOutputDir(options.outputDir);
+  const outputDir = resolveSupportOutputDir(request.outputDir);
   await mkdir(outputDir, { recursive: true });
   const workDir = await mkdtemp(path.join(os.tmpdir(), "plantlab-support-"));
   const root = path.join(workDir, `plantlab-support-${timestamp}`);
@@ -97,15 +127,15 @@ export async function collectSupportBundle(options: SupportCollectOptions = {}) 
   const manifest: SupportManifest = {
     createdAt: new Date().toISOString(),
     invokedOn: os.hostname(),
-    screenshots: options.screenshots ?? "none",
+    screenshots: request.screenshotMode,
     collectionOptions: {
-      scope: options.all ? "all" : options.node ? "node" : options.nodes?.length ? "nodes" : options.coordinator ? "coordinator" : "default-coordinator",
-      node: options.node ?? null,
-      nodes: options.nodes ?? [],
-      coordinator: options.coordinator ?? "plantlab",
-      includeLogs: options.includeLogs !== false,
-      includeHardwareTests: options.includeHardwareTests === true,
+      scope: request.scope,
+      nodeNames: request.nodeNames,
+      coordinator: request.coordinator,
+      includeLogs: request.includeLogs,
+      includeHardwareDiagnostics: request.includeHardwareDiagnostics,
     },
+    uiCoverage: [],
     probes: [],
     failures: [],
     findings: [],
@@ -114,20 +144,22 @@ export async function collectSupportBundle(options: SupportCollectOptions = {}) 
   };
 
   try {
-    const hosts = selectedHosts(options);
+    const hosts = selectedHostsForRequest(request);
     await collectLocal(root, manifest);
     for (const host of hosts) {
       options.onProgress?.({ type: "target-start", host: host.host, role: host.role });
       const before = manifest.probes.length;
-      await collectHost(root, manifest, host.host, host.role, options, isLocalHostAlias(host.host) ? "local-shell" : "ssh");
+      await collectHost(root, manifest, host.host, host.role, request, isLocalHostAlias(host.host) ? "local-shell" : "ssh");
       const hostProbes = manifest.probes.slice(before);
       options.onProgress?.({ type: "target-done", host: host.host, role: host.role, status: summarizeHostStatus(hostProbes) });
     }
-    if ((options.screenshots ?? "none") !== "none") options.onProgress?.({ type: "screenshots-start", mode: options.screenshots ?? "none" });
+    if (request.screenshotMode !== "none") options.onProgress?.({ type: "screenshots-start", mode: request.screenshotMode });
     const screenshotsBefore = manifest.probes.length;
-    const screenshotMetadata = await collectScreenshots(root, manifest, options.screenshots ?? "none", options.coordinator ?? "plantlab", hosts);
+    const screenshotResult = await collectScreenshots(root, manifest, request.screenshotMode, hosts);
+    const screenshotMetadata = screenshotResult.metadata;
     manifest.screenshotsMetadata.push(...screenshotMetadata);
-    if ((options.screenshots ?? "none") !== "none") {
+    manifest.uiCoverage.push(...screenshotResult.coverage);
+    if (request.screenshotMode !== "none") {
       options.onProgress?.({ type: "screenshots-done", ok: manifest.probes.slice(screenshotsBefore).every((probe) => probe.ok) });
     }
     manifest.findings = await findingsForProbes(manifest.probes);
@@ -148,6 +180,51 @@ export async function collectSupportBundle(options: SupportCollectOptions = {}) 
   }
 }
 
+export function normalizeSupportCollectionRequest(options: SupportCollectOptions = {}): SupportCollectionRequest {
+  if (options.all) {
+    return {
+      scope: "all",
+      nodeNames: [],
+      coordinator: options.coordinator ?? "plantlab",
+      screenshotMode: options.screenshots ?? "none",
+      includeLogs: options.includeLogs !== false,
+      includeHardwareDiagnostics: options.includeHardwareTests === true,
+      outputDir: options.outputDir,
+    };
+  }
+  if (options.nodes?.length) {
+    return {
+      scope: "selected-nodes",
+      nodeNames: options.nodes.filter(Boolean),
+      coordinator: options.coordinator ?? "plantlab",
+      screenshotMode: options.screenshots ?? "none",
+      includeLogs: options.includeLogs !== false,
+      includeHardwareDiagnostics: options.includeHardwareTests === true,
+      outputDir: options.outputDir,
+    };
+  }
+  if (options.node) {
+    return {
+      scope: "selected-nodes",
+      nodeNames: [options.node],
+      coordinator: options.coordinator ?? "plantlab",
+      screenshotMode: options.screenshots ?? "none",
+      includeLogs: options.includeLogs !== false,
+      includeHardwareDiagnostics: options.includeHardwareTests === true,
+      outputDir: options.outputDir,
+    };
+  }
+  return {
+    scope: "coordinator",
+    nodeNames: [],
+    coordinator: options.coordinator ?? "plantlab",
+    screenshotMode: options.screenshots ?? "none",
+    includeLogs: options.includeLogs !== false,
+    includeHardwareDiagnostics: options.includeHardwareTests === true,
+    outputDir: options.outputDir,
+  };
+}
+
 export function resolveSupportOutputDir(outputDir?: string): string {
   return path.resolve(outputDir ?? path.join(process.cwd(), "artifacts", "support"));
 }
@@ -162,22 +239,20 @@ export function summarizeHostStatus(probes: ProbeResult[]): SupportTargetStatus 
 }
 
 export function selectedHosts(options: SupportCollectOptions): Array<{ host: string; role: string }> {
-  if (options.all) return [...DEFAULT_HOSTS];
-  const nodes = options.nodes?.filter(Boolean) ?? [];
-  if (nodes.length > 0) {
-    const coordinator = options.coordinator ? [{ host: options.coordinator, role: "coordinator" }] : [];
-    const mapped = nodes.map((node) => DEFAULT_HOSTS.find((host) => host.host === node) ?? { host: node, role: "node" });
+  return selectedHostsForRequest(normalizeSupportCollectionRequest(options));
+}
+
+export function selectedHostsForRequest(request: SupportCollectionRequest): Array<{ host: string; role: string }> {
+  if (request.scope === "all") return [...DEFAULT_HOSTS];
+  if (request.scope === "selected-nodes") {
+    const coordinator = request.coordinator ? [{ host: request.coordinator, role: "coordinator" }] : [];
+    const mapped = request.nodeNames.map((node) => DEFAULT_HOSTS.find((host) => host.host === node) ?? { host: node, role: "node" });
     // De-duplicate by host in case the coordinator was also listed as a node.
     const byHost = new Map<string, { host: string; role: string }>();
     for (const entry of [...coordinator, ...mapped]) byHost.set(entry.host, entry);
     return [...byHost.values()];
   }
-  if (options.node) {
-    const known = DEFAULT_HOSTS.find((host) => host.host === options.node);
-    return [known ?? { host: options.node, role: "node" }];
-  }
-  if (options.coordinator) return [{ host: options.coordinator, role: "coordinator" }];
-  return [{ host: "plantlab", role: "coordinator" }];
+  return [{ host: request.coordinator, role: "coordinator" }];
 }
 
 async function collectLocal(root: string, manifest: { probes: ProbeResult[] }) {
@@ -199,12 +274,12 @@ async function collectHost(
   manifest: { probes: ProbeResult[] },
   host: string,
   role: string,
-  options: SupportCollectOptions,
+  request: SupportCollectionRequest,
   runner: "ssh" | "local-shell" = "ssh",
 ) {
   const dir = path.join(root, host);
   await mkdir(dir, { recursive: true });
-  const commands = hostCommands(host, role, { includeLogs: options.includeLogs !== false, includeHardwareTests: options.includeHardwareTests === true });
+  const commands = hostCommands(host, role, { includeLogs: request.includeLogs, includeHardwareTests: request.includeHardwareDiagnostics });
   for (const item of commands) {
     if (runner === "local-shell") await runProbe(manifest, host, role, "bash", ["-lc", item.remote], path.join(dir, item.path), item.timeoutMs);
     else await runProbe(manifest, host, role, "ssh", [host, item.remote], path.join(dir, item.path), item.timeoutMs);
@@ -213,7 +288,9 @@ async function collectHost(
 
 function hostCommands(host: string, role: string, opts: { includeLogs: boolean; includeHardwareTests: boolean }): HostCommand[] {
   const common: HostCommand[] = [
-    { path: "system/hostname.txt", remote: "hostname; date -Is; timedatectl 2>/dev/null | sed -n '1,8p'; df -h ." },
+    { path: "system/hostname.txt", remote: "hostname", timeoutMs: 8_000 },
+    { path: "system/time.txt", remote: "date -Is; timedatectl 2>/dev/null | sed -n '1,8p'", timeoutMs: 8_000 },
+    { path: "system/disk.txt", remote: "df -h .", timeoutMs: 10_000 },
     { path: "system/git.txt", remote: "cd ~/projects/plantlab 2>/dev/null || cd ~/plantlab 2>/dev/null || cd /home/andy/projects/plantlab 2>/dev/null || exit 0; git status --short --branch; git rev-parse HEAD" },
   ];
   if (role === "coordinator") {
@@ -310,16 +387,17 @@ async function collectScreenshots(
   root: string,
   manifest: { probes: ProbeResult[] },
   mode: ScreenshotMode,
-  coordinatorHost: string,
   hosts: Array<{ host: string; role: string }>,
-): Promise<ScreenshotMetadata[]> {
-  const dir = path.join(root, coordinatorHost, "screenshots");
-  await mkdir(dir, { recursive: true });
+): Promise<{ metadata: ScreenshotMetadata[]; coverage: HostUiCoverage[] }> {
+  const defaultDir = path.join(root, hosts.find((host) => host.role === "coordinator")?.host ?? "plantlab", "screenshots");
+  await mkdir(defaultDir, { recursive: true });
   if (mode === "none") {
-    await writeFile(path.join(dir, "README.txt"), "Screenshot collection disabled.\n");
-    return [];
+    const coverage = hosts.map((host) => noScreenshotCoverage(host, "unknown", "Screenshot collection disabled."));
+    await writeFile(path.join(defaultDir, "README.txt"), "Screenshot collection disabled.\n");
+    return { metadata: [], coverage };
   }
   if (mode === "fixture") {
+    const dir = defaultDir;
     const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "plantlab-screenshots-fixture-"));
     // `next dev` rewrites next-env.d.ts and reformats tsconfig.json in the
     // project root on startup. Snapshot the exact pre-run content and restore
@@ -333,7 +411,12 @@ async function collectScreenshots(
       const migrate = await execFileResult("pnpm", ["prisma", "migrate", "deploy"], 120_000, process.cwd(), env);
       await writeFile(path.join(dir, "fixture-migrate.txt"), redact(`${migrate.stdout}\n${migrate.stderr}`));
       manifest.probes.push({ host: "local", role: "screenshots", command: "fixture prisma migrate deploy", ok: migrate.status === 0, status: migrate.status, path: path.join(dir, "fixture-migrate.txt") });
-      if (migrate.status !== 0) return [];
+      if (migrate.status !== 0) {
+        return {
+          metadata: [],
+          coverage: [noScreenshotCoverage({ host: "fixture", role: "screenshots" }, "unknown", "Fixture screenshot migration failed.")],
+        };
+      }
 
       // Clear any prior (possibly live-readonly) screenshots so only this
       // fixture run's images get bundled, then capture the small support
@@ -358,7 +441,26 @@ async function collectScreenshots(
       await writeFile(path.join(dir, "fixture-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
       manifest.probes.push({ host: "local", role: "screenshots", command: "pnpm screenshots (fixture, node surfaces)", ok: result.status === 0, status: result.status, path: path.join(dir, "fixture-run.txt") });
       await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
-      return await readScreenshotMetadata(path.join(dir, "artifacts"));
+      const metadata = await readScreenshotMetadata(path.join(dir, "artifacts"));
+      return {
+        metadata,
+        coverage: [
+          {
+            host: "fixture",
+            role: "screenshots",
+            classification: "available",
+            baseUrl: null,
+            detectionEvidence: ["fixture mode uses isolated temporary database"],
+            reason: null,
+            discoveredSurfaces: metadata.length,
+            attempted: metadata.length,
+            succeeded: metadata.filter((item) => item.ready && (item.httpStatus ?? 0) < 400 && item.consoleErrors.length === 0 && item.networkErrors.length === 0).length,
+            failed: metadata.filter((item) => !item.ready || (item.httpStatus ?? 0) >= 400 || item.consoleErrors.length > 0 || item.networkErrors.length > 0).length,
+            screenshots: metadata.length,
+            skipped: 0,
+          },
+        ],
+      };
     } finally {
       // Tear down the fixture `next dev` server: kill its parent (matched
       // precisely by the --port argument) and the render worker holding the
@@ -378,16 +480,39 @@ async function collectScreenshots(
         redact(`restore snapshots: ${JSON.stringify(restore)}\ngit status --short after:\n${after.stdout || "(clean)"}\n${after.stderr ? `stderr:\n${after.stderr}\n` : ""}`),
       ).catch(() => undefined);
     }
-    return [];
+    return { metadata: [], coverage: [noScreenshotCoverage({ host: "fixture", role: "screenshots" }, "unknown", "Fixture screenshot collection did not complete.")] };
   }
   const metadata: ScreenshotMetadata[] = [];
-  if (hosts.some((host) => host.host === coordinatorHost || host.role === "coordinator")) {
-    metadata.push(...(await collectLiveReadonlyScreenshotsForHost(root, manifest, coordinatorHost, "coordinator", "ssh")));
+  const coverage: HostUiCoverage[] = [];
+  for (const host of hosts) {
+    const runner = isLocalHostAlias(host.host) ? "local-shell" : "ssh";
+    const ui = await classifyHostUi(host.host, host.role, runner);
+    if (ui.classification !== "available") {
+      const item = {
+        host: host.host,
+        role: host.role,
+        classification: ui.classification,
+        baseUrl: ui.baseUrl,
+        detectionEvidence: ui.detectionEvidence,
+        reason: ui.reason,
+        discoveredSurfaces: 0,
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        screenshots: 0,
+        skipped: 0,
+      };
+      coverage.push(item);
+      const coveragePath = path.join(root, host.host, "screenshots", "coverage.json");
+      await mkdir(path.dirname(coveragePath), { recursive: true });
+      await writeJson(coveragePath, item);
+      continue;
+    }
+    const result = await collectLiveReadonlyScreenshotsForHost(root, manifest, host.host, host.role, runner, ui.baseUrl ?? "http://127.0.0.1:3000", ui);
+    metadata.push(...result.metadata);
+    coverage.push(result.coverage);
   }
-  for (const host of hosts.filter((item) => item.role === "standalone" && isLocalHostAlias(item.host))) {
-    metadata.push(...(await collectLiveReadonlyScreenshotsForHost(root, manifest, host.host, host.role, "local-shell")));
-  }
-  return metadata;
+  return { metadata, coverage };
 }
 
 async function collectLiveReadonlyScreenshotsForHost(
@@ -396,11 +521,23 @@ async function collectLiveReadonlyScreenshotsForHost(
   host: string,
   role: string,
   runner: "ssh" | "local-shell",
-): Promise<ScreenshotMetadata[]> {
+  baseUrl: string,
+  ui: Pick<HostUiCoverage, "classification" | "baseUrl" | "detectionEvidence" | "reason">,
+): Promise<{ metadata: ScreenshotMetadata[]; coverage: HostUiCoverage }> {
   const dir = path.join(root, host, "screenshots");
   await mkdir(dir, { recursive: true });
   const routes = await discoverLiveScreenshotRoutes(host, runner);
   await writeJson(path.join(dir, "discovered-routes.json"), { host, role, routes });
+  const baseCoverage = {
+    host,
+    role,
+    classification: ui.classification,
+    baseUrl: ui.baseUrl ?? baseUrl,
+    detectionEvidence: ui.detectionEvidence,
+    reason: ui.reason,
+    discoveredSurfaces: routes.length,
+    skipped: 0,
+  };
 
   if (runner === "local-shell") {
     const routeManifest = path.join(process.cwd(), "artifacts", "support-screenshot-routes.json");
@@ -409,14 +546,20 @@ async function collectLiveReadonlyScreenshotsForHost(
       "bash",
       [
         "-lc",
-        "rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
+        `rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=${shellQuote(baseUrl)} pnpm exec playwright test tests/live-readonly-screenshots.spec.ts`,
       ],
       screenshotTimeoutMs(routes),
     );
     await writeFile(path.join(dir, "live-readonly-run.txt"), redact(`${result.stdout}\n${result.stderr}`));
     manifest.probes.push({ host, role: "screenshots", command: "pnpm screenshots live-readonly", ok: result.status === 0, status: result.status, path: path.join(dir, "live-readonly-run.txt") });
     await copyIfExists(path.join(process.cwd(), "artifacts", "screenshots"), path.join(dir, "artifacts"));
-    return await readScreenshotMetadata(path.join(dir, "artifacts"));
+    const metadata = await readScreenshotMetadata(path.join(dir, "artifacts"));
+    const coverage = coverageFromMetadata(baseCoverage, routes.length, metadata);
+    await writeJson(path.join(dir, "coverage.json"), coverage);
+    if (coverage.classification === "available" && (coverage.attempted === 0 || coverage.screenshots === 0 || coverage.succeeded === 0)) {
+      await writeScreenshotCoverageFailure(root, manifest, coverage);
+    }
+    return { metadata, coverage };
   }
 
   const routeJson = JSON.stringify({ routes }).replace(/'/g, "'\\''");
@@ -435,7 +578,7 @@ async function collectLiveReadonlyScreenshotsForHost(
     "ssh",
     [
       host,
-      "cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 pnpm exec playwright test tests/live-readonly-screenshots.spec.ts",
+      `cd /home/andy/projects/plantlab && rm -rf artifacts/screenshots && mkdir -p artifacts/screenshots && PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 PLANTLAB_SUPPORT_SCREENSHOT_ROUTES_JSON=artifacts/support-screenshot-routes.json PLAYWRIGHT_REUSE_EXISTING_SERVER=1 PLAYWRIGHT_BASE_URL=${shellQuote(baseUrl)} pnpm exec playwright test tests/live-readonly-screenshots.spec.ts`,
     ],
     screenshotTimeoutMs(routes),
   );
@@ -444,7 +587,90 @@ async function collectLiveReadonlyScreenshotsForHost(
   const copyResult = await execFileResult("scp", ["-r", `${host}:/home/andy/projects/plantlab/artifacts/screenshots`, path.join(dir, "artifacts")], 120_000);
   await writeFile(path.join(dir, "live-readonly-copy.txt"), redact(`${copyResult.stdout}\n${copyResult.stderr}`));
   manifest.probes.push({ host, role: "screenshots", command: "copy live-readonly screenshots", ok: copyResult.status === 0, status: copyResult.status, path: path.join(dir, "live-readonly-copy.txt") });
-  return await readScreenshotMetadata(path.join(dir, "artifacts"));
+  const metadata = await readScreenshotMetadata(path.join(dir, "artifacts"));
+  const coverage = coverageFromMetadata(baseCoverage, routes.length, metadata);
+  await writeJson(path.join(dir, "coverage.json"), coverage);
+  if (coverage.classification === "available" && (coverage.attempted === 0 || coverage.screenshots === 0 || coverage.succeeded === 0)) {
+    await writeScreenshotCoverageFailure(root, manifest, coverage);
+  }
+  return { metadata, coverage };
+}
+
+async function classifyHostUi(host: string, role: string, runner: "ssh" | "local-shell"): Promise<Pick<HostUiCoverage, "classification" | "baseUrl" | "detectionEvidence" | "reason">> {
+  if (role !== "coordinator" && role !== "standalone") {
+    return {
+      classification: "not-applicable",
+      baseUrl: null,
+      detectionEvidence: [`role=${role}`],
+      reason: "This host is an edge/agent node and does not run the normal PlantLab web UI.",
+    };
+  }
+  const baseUrl = "http://127.0.0.1:3000";
+  const result = await fetchLocalText(host, runner, "/api/health", 8_000);
+  if (result.status === 0) {
+    return {
+      classification: "available",
+      baseUrl,
+      detectionEvidence: [`GET ${baseUrl}/api/health succeeded`],
+      reason: null,
+    };
+  }
+  const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
+  return {
+    classification: output.includes("connection refused") || output.includes("failed to connect") ? "not-running" : "unreachable",
+    baseUrl,
+    detectionEvidence: [`GET ${baseUrl}/api/health failed with status ${result.status}`],
+    reason: result.stderr.trim() || result.stdout.trim() || "PlantLab web UI health endpoint did not respond.",
+  };
+}
+
+function coverageFromMetadata(
+  base: Pick<HostUiCoverage, "host" | "role" | "classification" | "baseUrl" | "detectionEvidence" | "reason" | "discoveredSurfaces" | "skipped">,
+  attempted: number,
+  metadata: ScreenshotMetadata[],
+): HostUiCoverage {
+  const failed = metadata.filter((item) => !item.ready || (item.httpStatus ?? 0) >= 400 || item.consoleErrors.length > 0 || item.networkErrors.length > 0).length;
+  return {
+    ...base,
+    attempted,
+    succeeded: metadata.length - failed,
+    failed,
+    screenshots: metadata.length,
+  };
+}
+
+function noScreenshotCoverage(host: { host: string; role: string }, classification: HostUiClassification, reason: string): HostUiCoverage {
+  return {
+    host: host.host,
+    role: host.role,
+    classification,
+    baseUrl: null,
+    detectionEvidence: [],
+    reason,
+    discoveredSurfaces: 0,
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    screenshots: 0,
+    skipped: 0,
+  };
+}
+
+async function writeScreenshotCoverageFailure(root: string, manifest: { probes: ProbeResult[] }, coverage: HostUiCoverage) {
+  const evidencePath = path.join(root, coverage.host, "screenshots", "coverage-failure.txt");
+  await writeFile(
+    evidencePath,
+    `UI host ${coverage.host} was classified as ${coverage.classification}, but screenshot coverage was insufficient.\n${JSON.stringify(coverage, null, 2)}\n`,
+  );
+  manifest.probes.push({
+    host: coverage.host,
+    role: "screenshots",
+    command: "support screenshot coverage assertion",
+    ok: false,
+    status: 1,
+    path: evidencePath,
+    error: "Available UI host produced no successful screenshots.",
+  });
 }
 
 function screenshotTimeoutMs(routes: SupportScreenshotRoute[]) {
@@ -556,6 +782,15 @@ async function fetchLocalJson(host: string, runner: "ssh" | "local-shell", route
   }
 }
 
+async function fetchLocalText(host: string, runner: "ssh" | "local-shell", route: string, timeoutMs: number) {
+  const remote = `curl -fsS http://127.0.0.1:3000${route} 2>&1`;
+  return runner === "local-shell" ? execFileResult("bash", ["-lc", remote], timeoutMs) : execFileResult("ssh", [host, remote], timeoutMs);
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 async function readScreenshotMetadata(artifactsDir: string): Promise<ScreenshotMetadata[]> {
   try {
     const raw = await readFile(path.join(artifactsDir, "metadata.json"), "utf8");
@@ -625,6 +860,9 @@ async function writeHostDiagnosticSummaries(root: string, manifest: SupportManif
   if (manifest.screenshotsMetadata.length > 0) {
     await writeJson(path.join(root, "screenshots-summary.json"), summarizeScreenshotMetadata(manifest.screenshotsMetadata));
   }
+  if (manifest.uiCoverage.length > 0) {
+    await writeJson(path.join(root, "ui-coverage.json"), manifest.uiCoverage);
+  }
 }
 
 function probeSummary(probes: ProbeResult[], ...pathIncludes: string[]) {
@@ -646,6 +884,10 @@ function manifestForArchive(root: string, manifest: SupportManifest): SupportMan
     findings: manifest.findings.map((finding) => ({
       ...finding,
       evidencePath: finding.evidencePath ? path.relative(root, finding.evidencePath) || finding.evidencePath : undefined,
+      evidence: finding.evidence?.map((item) => ({
+        ...item,
+        path: item.path && path.isAbsolute(item.path) ? path.relative(root, item.path) || item.path : item.path,
+      })),
     })),
   };
 }

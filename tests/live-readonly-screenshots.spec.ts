@@ -60,6 +60,17 @@ async function capture(page: Page, route: SupportScreenshotRoute, index: number)
   try {
     const response = await gotoForResponse(page, route.route);
     const readiness = await waitForSupportReadiness(page, route.readiness ?? "generic");
+    const httpStatus = response?.status() ?? null;
+    const failureReason =
+      httpStatus !== null && httpStatus >= 400
+        ? "http-error"
+        : consoleErrors.length > 0
+          ? "console-error"
+          : networkErrors.length > 0
+            ? "network-error"
+            : readiness.ready
+              ? null
+              : readiness.reason;
     await page.screenshot({
       path: path.join(outputDir, filename),
       fullPage: true,
@@ -70,12 +81,32 @@ async function capture(page: Page, route: SupportScreenshotRoute, index: number)
       host: route.host,
       viewport: page.viewportSize() ?? { width: 0, height: 0 },
       capturedAt: new Date().toISOString(),
-      httpStatus: response?.status() ?? null,
+      httpStatus,
       consoleErrors,
       networkErrors,
       outputFilename: filename,
-      ready: readiness.ready,
-      readinessReason: readiness.reason,
+      ready: failureReason === null,
+      readinessReason: failureReason,
+    };
+  } catch (error) {
+    const errorText = error instanceof Error ? error.message : String(error);
+    consoleErrors.push(errorText);
+    await page.screenshot({
+      path: path.join(outputDir, filename),
+      fullPage: true,
+    }).catch(() => undefined);
+    return {
+      route: route.route,
+      title: route.title,
+      host: route.host,
+      viewport: page.viewportSize() ?? { width: 0, height: 0 },
+      capturedAt: new Date().toISOString(),
+      httpStatus: null,
+      consoleErrors,
+      networkErrors,
+      outputFilename: filename,
+      ready: false,
+      readinessReason: "render-error",
     };
   } finally {
     page.off("console", onConsole);
@@ -95,7 +126,7 @@ test("live readonly support screenshot surfaces", async ({ page }) => {
   }
 
   await writeMetadata(metadata);
-  expect(metadata.filter((item) => !item.ready)).toEqual([]);
+  expect(metadata.filter((item) => !item.ready || (item.httpStatus ?? 0) >= 400 || item.consoleErrors.length > 0 || item.networkErrors.length > 0)).toEqual([]);
 });
 
 async function writeMetadata(metadata: ScreenshotMetadata[]) {
