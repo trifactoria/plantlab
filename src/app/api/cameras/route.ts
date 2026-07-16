@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
-import { productionLocalOnlyResponse } from "@/lib/localOnly";
+import { canDiscoverLocalCameraHardware } from "@/lib/localOnly";
 import { discoverLocalCameras } from "@/lib/v4l2";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const blocked = productionLocalOnlyResponse();
-  if (blocked) {
-    return blocked;
-  }
+  if (!canDiscoverLocalCameraHardware()) return NextResponse.json({ cameras: [] });
 
   if (process.env.PLANTLAB_TEST_LOCAL_CAMERA_UI === "1") {
     return NextResponse.json({
