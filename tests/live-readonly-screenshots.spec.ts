@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type ConsoleMessage, type Page, type Request } from "@playwright/test";
 
 if (process.env.PLANTLAB_SCREENSHOTS_LIVE_READONLY !== "1") {
   throw new Error("tests/live-readonly-screenshots.spec.ts is only for PLANTLAB_SCREENSHOTS_LIVE_READONLY=1 support collection.");
@@ -47,31 +47,40 @@ async function capture(page: Page, route: SupportScreenshotRoute, index: number)
   const filename = `${String(index + 1).padStart(3, "0")}-${slug(route.host)}-${slug(route.title || route.route)}.png`;
   const consoleErrors: string[] = [];
   const networkErrors: string[] = [];
-  page.on("console", (message) => {
+  const onConsole = (message: ConsoleMessage) => {
     if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("requestfailed", (request) => {
-    networkErrors.push(`${request.method()} ${request.url()} ${request.failure()?.errorText ?? ""}`.trim());
-  });
-  const response = await gotoForResponse(page, route.route);
-  const readiness = await waitForSupportReadiness(page, route.readiness ?? "generic");
-  await page.screenshot({
-    path: path.join(outputDir, filename),
-    fullPage: true,
-  });
-  return {
-    route: route.route,
-    title: await page.title(),
-    host: route.host,
-    viewport: page.viewportSize() ?? { width: 0, height: 0 },
-    capturedAt: new Date().toISOString(),
-    httpStatus: response?.status() ?? null,
-    consoleErrors,
-    networkErrors,
-    outputFilename: filename,
-    ready: readiness.ready,
-    readinessReason: readiness.reason,
   };
+  const onRequestFailed = (request: Request) => {
+    const errorText = request.failure()?.errorText ?? "";
+    if (errorText.includes("net::ERR_ABORTED") && request.url().includes("_rsc=")) return;
+    networkErrors.push(`${request.method()} ${request.url()} ${errorText}`.trim());
+  };
+  page.on("console", onConsole);
+  page.on("requestfailed", onRequestFailed);
+  try {
+    const response = await gotoForResponse(page, route.route);
+    const readiness = await waitForSupportReadiness(page, route.readiness ?? "generic");
+    await page.screenshot({
+      path: path.join(outputDir, filename),
+      fullPage: true,
+    });
+    return {
+      route: route.route,
+      title: await page.title(),
+      host: route.host,
+      viewport: page.viewportSize() ?? { width: 0, height: 0 },
+      capturedAt: new Date().toISOString(),
+      httpStatus: response?.status() ?? null,
+      consoleErrors,
+      networkErrors,
+      outputFilename: filename,
+      ready: readiness.ready,
+      readinessReason: readiness.reason,
+    };
+  } finally {
+    page.off("console", onConsole);
+    page.off("requestfailed", onRequestFailed);
+  }
 }
 
 test("live readonly support screenshot surfaces", async ({ page }) => {

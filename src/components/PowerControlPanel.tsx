@@ -277,6 +277,7 @@ export function PowerControlPanel({ nodeName }: { nodeName: string }) {
   }
 
   const loading = outlets === null && schedules === null && !loadError;
+  const hasLoadedPower = outlets !== null && schedules !== null;
 
   return (
     <div className="grid grid-cols-1 gap-4">
@@ -284,6 +285,11 @@ export function PowerControlPanel({ nodeName }: { nodeName: string }) {
       {loadError ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">{loadError}</p> : null}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {hasLoadedPower && orderOutlets(outlets ?? []).length === 0 ? (
+          <p className="rounded-lg border border-dashed border-stone-300 bg-white p-4 text-sm text-stone-600 sm:col-span-2 lg:col-span-3">
+            No power outlets are configured for this node.
+          </p>
+        ) : null}
         {orderOutlets(outlets ?? []).map((outlet) => {
           const outletKey = outlet.key;
           const label = outletLabel(outlet);
@@ -471,7 +477,7 @@ export function PowerControlPanel({ nodeName }: { nodeName: string }) {
                   }));
                 }}
               >
-                {schedulableOutlets.length === 0 ? <option value="">Loading outlets...</option> : null}
+                {schedulableOutlets.length === 0 ? <option value="">{hasLoadedPower ? "No configured outlets" : "Loading outlets..."}</option> : null}
                 {scheduleForm.outletKey && !schedulableOutlets.some((outlet) => outlet.key === scheduleForm.outletKey) ? (
                   <option value={scheduleForm.outletKey}>{outletLabel({ key: scheduleForm.outletKey })}</option>
                 ) : null}

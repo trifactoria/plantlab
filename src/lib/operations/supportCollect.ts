@@ -480,14 +480,41 @@ async function discoverLiveScreenshotRoutes(host: string, runner: "ssh" | "local
     camerasByNode.set(nodeName, [...(camerasByNode.get(nodeName) ?? []), { id }]);
   }
 
-  snapshot.nodes = nodeRows
-    .map((node) => {
-      const item = node as { name?: unknown };
-      return typeof item.name === "string"
-        ? { name: item.name, sensors: sensorsByNode.get(item.name) ?? [], cameras: camerasByNode.get(item.name) ?? [] }
-        : null;
-    })
-    .filter((node): node is { name: string; sensors: Array<{ key: string }>; cameras: Array<{ id: string }> } => node !== null);
+  const snapshotNodes: NonNullable<SupportScreenshotDiscoverySnapshot["nodes"]> = [];
+  for (const node of nodeRows) {
+    const item = node as {
+      name?: unknown;
+      relationship?: unknown;
+      mode?: unknown;
+      detailsUrl?: unknown;
+      activityUrl?: unknown;
+      resources?: {
+        cameras?: { count?: unknown; url?: unknown };
+        sensors?: { count?: unknown; url?: unknown };
+      };
+    };
+    if (typeof item.name !== "string") continue;
+    snapshotNodes.push({
+      name: item.name,
+      relationship: typeof item.relationship === "string" ? item.relationship : undefined,
+      mode: typeof item.mode === "string" ? item.mode : undefined,
+      detailsUrl: typeof item.detailsUrl === "string" ? item.detailsUrl : null,
+      activityUrl: typeof item.activityUrl === "string" ? item.activityUrl : null,
+      resources: {
+        cameras: {
+          count: typeof item.resources?.cameras?.count === "number" ? item.resources.cameras.count : undefined,
+          url: typeof item.resources?.cameras?.url === "string" ? item.resources.cameras.url : null,
+        },
+        sensors: {
+          count: typeof item.resources?.sensors?.count === "number" ? item.resources.sensors.count : undefined,
+          url: typeof item.resources?.sensors?.url === "string" ? item.resources.sensors.url : null,
+        },
+      },
+      sensors: sensorsByNode.get(item.name) ?? [],
+      cameras: camerasByNode.get(item.name) ?? [],
+    });
+  }
+  snapshot.nodes = snapshotNodes;
 
   const photoRows = asArray(photos);
   const photoByProject = new Map<string, string>();

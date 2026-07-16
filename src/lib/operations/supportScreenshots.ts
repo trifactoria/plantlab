@@ -17,7 +17,19 @@ export type SupportScreenshotRoute = {
 export type SupportScreenshotDiscoverySnapshot = {
   host: string;
   projects?: Array<{ id: string; name?: string | null; photoId?: string | null }>;
-  nodes?: Array<{ name: string; sensors?: Array<{ key: string }>; cameras?: Array<{ id: string }> }>;
+  nodes?: Array<{
+    name: string;
+    relationship?: "self" | "attached" | string;
+    mode?: string;
+    detailsUrl?: string | null;
+    activityUrl?: string | null;
+    resources?: {
+      cameras?: { count?: number; url?: string | null };
+      sensors?: { count?: number; url?: string | null };
+    };
+    sensors?: Array<{ key: string }>;
+    cameras?: Array<{ id: string }>;
+  }>;
   captureSources?: Array<{ id: string; name?: string | null }>;
   photos?: Array<{ id: string }>;
   warnings?: Array<{ route: string; title?: string | null }>;
@@ -38,13 +50,43 @@ export function discoverScreenshotRoutes(snapshot: SupportScreenshotDiscoverySna
 
   for (const node of snapshot.nodes ?? []) {
     const encodedNode = encodeURIComponent(node.name);
-    routes.push(
-      { route: `/nodes/${encodedNode}`, title: `Node ${node.name}`, category: "node", host: snapshot.host, readiness: "hardware" },
-      { route: `/nodes/${encodedNode}/cameras`, title: `Node ${node.name} Cameras`, category: "camera", host: snapshot.host, readiness: "hardware" },
-      { route: `/nodes/${encodedNode}/sensors`, title: `Node ${node.name} Sensors`, category: "sensor", host: snapshot.host, readiness: "environment" },
-      { route: `/nodes/${encodedNode}/power`, title: `Node ${node.name} Power`, category: "node", host: snapshot.host, readiness: "generic" },
-      { route: `/nodes/${encodedNode}/activity`, title: `Node ${node.name} Activity`, category: "node", host: snapshot.host, readiness: "generic" },
-    );
+    const detailsRoute = typeof node.detailsUrl === "string" ? routablePath(node.detailsUrl) : `/nodes/${encodedNode}`;
+    const hasNodeDetailPage = Boolean(detailsRoute?.startsWith(`/nodes/${encodedNode}`));
+    if (hasNodeDetailPage) {
+      routes.push({ route: detailsRoute!, title: `Node ${node.name}`, category: "node", host: snapshot.host, readiness: "hardware" });
+    }
+
+    const cameraCount = node.resources?.cameras?.count ?? node.cameras?.length ?? 0;
+    if (cameraCount > 0) {
+      routes.push({
+        route: routablePath(node.resources?.cameras?.url) ?? `/nodes/${encodedNode}/cameras`,
+        title: `Node ${node.name} Cameras`,
+        category: "camera",
+        host: snapshot.host,
+        readiness: "hardware",
+      });
+    }
+
+    const sensorCount = node.resources?.sensors?.count ?? node.sensors?.length ?? 0;
+    if (sensorCount > 0) {
+      routes.push({
+        route: routablePath(node.resources?.sensors?.url) ?? `/nodes/${encodedNode}/sensors`,
+        title: `Node ${node.name} Sensors`,
+        category: "sensor",
+        host: snapshot.host,
+        readiness: "environment",
+      });
+    }
+
+    if (hasNodeDetailPage && nodeHasPowerSurface(node)) {
+      routes.push({ route: `/nodes/${encodedNode}/power`, title: `Node ${node.name} Power`, category: "node", host: snapshot.host, readiness: "generic" });
+    }
+
+    const activityRoute = routablePath(node.activityUrl) ?? (hasNodeDetailPage ? `/nodes/${encodedNode}/activity` : null);
+    if (activityRoute && activityRoute.startsWith(`/nodes/${encodedNode}`)) {
+      routes.push({ route: activityRoute, title: `Node ${node.name} Activity`, category: "node", host: snapshot.host, readiness: "generic" });
+    }
+
     for (const sensor of node.sensors ?? []) {
       routes.push({
         route: `/nodes/${encodedNode}/sensors/${encodeURIComponent(sensor.key)}`,
@@ -97,6 +139,14 @@ export function discoverScreenshotRoutes(snapshot: SupportScreenshotDiscoverySna
   }
 
   return dedupeRoutes(routes);
+}
+
+function routablePath(value: string | null | undefined) {
+  return typeof value === "string" && value.startsWith("/") && value !== "/" ? value : null;
+}
+
+function nodeHasPowerSurface(node: NonNullable<SupportScreenshotDiscoverySnapshot["nodes"]>[number]) {
+  return node.mode === "greenhouse-node" || node.mode === "mixed";
 }
 
 export async function writeScreenshotRouteManifest(filePath: string, routes: SupportScreenshotRoute[]) {

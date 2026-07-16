@@ -139,7 +139,7 @@ describe("support screenshot discovery", () => {
   it("discovers dashboard, node, project, photo, and capture-source surfaces without hardcoded greenhouse names", () => {
     const routes = discoverScreenshotRoutes({
       host: "plantlab",
-      nodes: [{ name: "camera-rack", sensors: [{ key: "air" }], cameras: [{ id: "cam-1" }] }],
+      nodes: [{ name: "camera-rack", mode: "greenhouse-node", sensors: [{ key: "air" }], cameras: [{ id: "cam-1" }] }],
       projects: [{ id: "project-1", name: "Shelf A", photoId: "photo-1" }],
       captureSources: [{ id: "source-1", name: "Shelf camera" }],
       photos: [{ id: "photo-2" }],
@@ -160,5 +160,45 @@ describe("support screenshot discovery", () => {
       ]),
     );
     expect(routes.some((route) => route.route.includes("greenhouse-zero"))).toBe(false);
+  });
+
+  it("uses advertised node URLs and skips zero-resource subsystem pages", () => {
+    const routes = discoverScreenshotRoutes({
+      host: "plantlab",
+      nodes: [
+        {
+          name: "plantlab",
+          relationship: "self",
+          mode: "coordinator",
+          detailsUrl: "/",
+          activityUrl: "/support",
+          resources: {
+            cameras: { count: 0, url: "/capture-sources" },
+            sensors: { count: 0, url: "/" },
+          },
+        },
+        {
+          name: "camera-rack",
+          relationship: "attached",
+          mode: "camera-node",
+          detailsUrl: "/nodes/camera-rack",
+          activityUrl: "/nodes/camera-rack/activity",
+          resources: {
+            cameras: { count: 1, url: "/nodes/camera-rack/cameras" },
+            sensors: { count: 0, url: "/nodes/camera-rack/sensors" },
+          },
+          cameras: [{ id: "cam-1" }],
+        },
+      ],
+    });
+
+    const paths = routes.map((route) => route.route);
+    expect(paths).toContain("/nodes/camera-rack");
+    expect(paths).toContain("/nodes/camera-rack/cameras");
+    expect(paths).toContain("/nodes/camera-rack/activity");
+    expect(paths).not.toContain("/nodes/plantlab");
+    expect(paths).not.toContain("/nodes/plantlab/cameras");
+    expect(paths).not.toContain("/nodes/camera-rack/sensors");
+    expect(paths).not.toContain("/nodes/camera-rack/power");
   });
 });
