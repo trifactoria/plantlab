@@ -666,6 +666,7 @@ url = os.environ.get("DATABASE_URL")
 if url and url.startswith("file:"):
     paths.append(url[5:])
 paths.extend([
+    "/home/andy/projects/plantlab/prisma/dev.db",
     "/home/andy/projects/plantlab/prisma/plantlab.db",
     "/home/andy/projects/plantlab/data/plantlab.db",
     os.path.expanduser("~/.local/share/plantlab/plantlab.db"),
@@ -734,6 +735,7 @@ url = os.environ.get("DATABASE_URL")
 if url and url.startswith("file:"):
     paths.append(url[5:])
 paths.extend([
+    "/home/andy/projects/plantlab/prisma/dev.db",
     "/home/andy/projects/plantlab/prisma/plantlab.db",
     "/home/andy/projects/plantlab/data/plantlab.db",
     os.path.expanduser("~/.local/share/plantlab/plantlab.db"),
