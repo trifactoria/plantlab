@@ -23,7 +23,7 @@ export type FleetCameraSummary = {
   stableId: string;
   displayName: string;
   reportedName: string | null;
-  node: { id: string; name: string; role: string; online: boolean; capabilities: string[]; localToCoordinator: boolean };
+  node: { id: string; name: string; role: string; online: boolean; capabilities: string[]; localToCoordinator: boolean; lastInventoryAt: string | null };
   available: boolean;
   enabled: boolean;
   retired: boolean;
@@ -128,6 +128,15 @@ export async function listFleetCameras(prisma: PrismaClient, options: { includeL
   return summaries;
 }
 
+/** Single canonical fleet camera summary by id - used to reload after a configuration save or inventory refresh. */
+export async function getFleetCamera(prisma: PrismaClient, cameraId: string, options: { now?: Date } = {}): Promise<FleetCameraSummary | null> {
+  const camera = await prisma.nodeCamera.findUnique({ where: { id: cameraId }, include: CAMERA_INCLUDE });
+  if (!camera) return null;
+  const nodeConfig = await readNodeConfig();
+  const localNodeName = nodeConfig?.nodeName ?? nodeConfig?.hostname ?? null;
+  return serializeFleetCamera(camera, { now: options.now ?? new Date(), localNodeName });
+}
+
 export function serializeFleetCamera(camera: CameraWithFleetRelations, options: { now?: Date; localNodeName?: string | null } = {}): FleetCameraSummary {
   const now = options.now ?? new Date();
   const activeCredential = camera.node.credentials.length > 0;
@@ -159,6 +168,7 @@ export function serializeFleetCamera(camera: CameraWithFleetRelations, options: 
       online,
       capabilities: parseCapabilities(camera.node.capabilitiesJson),
       localToCoordinator: Boolean(options.localNodeName && camera.node.name === options.localNodeName),
+      lastInventoryAt: camera.node.lastInventoryAt?.toISOString() ?? null,
     },
     available: camera.available,
     enabled: camera.enabled,
@@ -521,7 +531,7 @@ function serializeLocalDiscoveryCamera(camera: LocalCamera, input: { nodeName: s
     stableId,
     displayName: camera.name || "Local camera",
     reportedName: camera.name || null,
-    node: { id: "local", name: input.nodeName, role: input.nodeRole, online: true, capabilities: ["camera"], localToCoordinator: true },
+    node: { id: "local", name: input.nodeName, role: input.nodeRole, online: true, capabilities: ["camera"], localToCoordinator: true, lastInventoryAt: null },
     available,
     enabled: true,
     retired: false,

@@ -14,11 +14,6 @@ type Context = {
 };
 
 export async function GET(_request: Request, context: Context) {
-  const blocked = productionLocalOnlyResponse();
-  if (blocked) {
-    return blocked;
-  }
-
   const { sourceId } = await context.params;
   const source = await prisma.captureSource.findUnique({
     where: { id: sourceId },
@@ -36,9 +31,17 @@ export async function GET(_request: Request, context: Context) {
     return notFound("Capture source not found");
   }
 
+  // A remote (node-backed) camera's supported modes come from stored inventory,
+  // not local hardware, so the local-hardware production guard must not apply.
   const remoteAssignment = source.assignments[0];
   if (remoteAssignment) {
     return NextResponse.json({ formats: parseNodeCameraFormats(remoteAssignment.nodeCamera) });
+  }
+
+  // Only reading local V4L2 hardware requires the local-camera capability.
+  const blocked = productionLocalOnlyResponse();
+  if (blocked) {
+    return blocked;
   }
 
   const device = process.env.CAMERA_DEVICE || source.cameraDevice;

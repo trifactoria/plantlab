@@ -67,9 +67,12 @@ type SourceProps = {
 export function ShelfLayoutEditor({
   source,
   projects,
+  hideCameraConfig = false,
 }: {
   source: SourceProps;
   projects: Array<{ id: string; name: string; isTestProject: boolean }>;
+  /** When the canonical camera-configuration UI owns capture mode/orientation/schedule (e.g. a remote node camera), hide this editor's own capability/orientation card and keep only the shelf-layout crop editor. */
+  hideCameraConfig?: boolean;
 }) {
   const router = useRouter();
   const stageRef = useRef<HTMLDivElement>(null);
@@ -363,6 +366,7 @@ export function ShelfLayoutEditor({
 
   return (
     <div className="grid gap-6">
+      {hideCameraConfig ? null : (
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-stone-950">Capability and Orientation</h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -469,6 +473,7 @@ export function ShelfLayoutEditor({
           {savingSettings ? "Saving..." : "Save Shelf Camera Settings"}
         </button>
       </div>
+      )}
 
       <div className="rounded-lg border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
