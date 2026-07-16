@@ -270,7 +270,46 @@ def test_poll_and_run_job_reports_failure_when_capture_raises(tmp_path, fake_coo
             agent.poll_and_run_job(cfg, client, spool)
 
         assert spool.due_uploads() == []  # nothing durable was recorded
-        assert fake_coordinator["state"].failed == [{"jobId": "job-2", "error": "camera busy"}]
+        assert fake_coordinator["state"].failed == [{"jobId": "job-2", "error": "camera busy", "metadata": None}]
+    finally:
+        spool.close()
+
+
+def test_poll_and_run_job_reports_rejected_capture_metadata(tmp_path, fake_coordinator):
+    cfg = _make_config(tmp_path, fake_coordinator["url"])
+    client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
+    spool = Spool(cfg.spool_root, max_spool_bytes=cfg.max_spool_bytes)
+    spool.init()
+    try:
+        fake_coordinator["state"].next_job_queue.append(
+            {
+                "id": "job-rejected",
+                "captureSourceId": "source-1",
+                "assignmentId": "assign-1",
+                "camera": {"devicePath": "/dev/video0", "stableId": "s1", "name": "Cam"},
+                "settings": {"width": 1280, "height": 720, "inputFormat": "mjpeg"},
+            }
+        )
+        attempt = camera.CaptureAttempt(
+            mode=camera.CaptureMode(width=1280, height=720, input_format="mjpeg"),
+            attempt=1,
+            fallback=False,
+            started_at="2026-07-16T17:25:22Z",
+        )
+        attempt.completed_at = "2026-07-16T17:25:38Z"
+        attempt.status = "failed"
+        attempt.error_code = "partial-frame"
+        attempt.error_message = "Image decoded but contains a horizontal split-frame discontinuity."
+        attempt.validation_stats = {"horizontalEdgeScore": 30}
+
+        with patch.object(camera, "capture_frame_with_result", side_effect=camera.CaptureFailedError("camera-fallback-exhausted: partial-frame", [attempt])):
+            agent.poll_and_run_job(cfg, client, spool)
+
+        assert spool.due_uploads() == []
+        assert fake_coordinator["state"].failed[0]["jobId"] == "job-rejected"
+        assert fake_coordinator["state"].failed[0]["metadata"]["validationStatus"] == "rejected"
+        assert fake_coordinator["state"].failed[0]["metadata"]["validationErrorCode"] == "partial-frame"
+        assert fake_coordinator["state"].failed[0]["metadata"]["attempts"][0]["validationStats"]["horizontalEdgeScore"] == 30
     finally:
         spool.close()
 

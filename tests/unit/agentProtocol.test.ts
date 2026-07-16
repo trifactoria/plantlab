@@ -465,7 +465,23 @@ describe("agent protocol", () => {
     });
     expect(await claimJob(prisma, registered.node.id, failed.id, "capture-fail")).toBeTruthy();
     expect(await claimJob(prisma, registered.node.id, failed.id, "duplicate")).toBeNull();
-    expect(await failJob(prisma, registered.node.id, failed.id, "camera busy")).toBe(true);
+    expect(
+      await failJob(prisma, registered.node.id, failed.id, "camera busy", {
+        validationStatus: "rejected",
+        validationErrorCode: "partial-frame",
+        attemptCount: 2,
+        fallbackUsed: false,
+        attempts: [{ attempt: 1, status: "failed", errorCode: "partial-frame" }],
+      }),
+    ).toBe(true);
+    await expect(prisma.agentCaptureJob.findUnique({ where: { id: failed.id } })).resolves.toMatchObject({
+      status: "failed",
+      validationStatus: "rejected",
+      validationErrorCode: "partial-frame",
+      attemptCount: 2,
+      fallbackUsed: false,
+      attemptsJson: expect.stringContaining("partial-frame"),
+    });
 
     const completed = await prisma.agentCaptureJob.create({
       data: {

@@ -177,8 +177,9 @@ def poll_and_run_job(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, s
         )
         logger.info("Frame captured to durable spool: job=%s capture=%s", job.id, capture_id)
     except Exception as exc:  # capture/spool failure - report and move on, never crash the loop
+        metadata = exc.metadata() if hasattr(exc, "metadata") and callable(exc.metadata) else None
         try:
-            client.fail_job(job.id, str(exc))
+            client.fail_job(job.id, str(exc), metadata=metadata if isinstance(metadata, dict) else None)
         except ProtocolError:
             pass
         logger.error("Capture job %s failed: %s", job.id, exc)
@@ -244,13 +245,15 @@ def process_uploads(cfg: config.EdgeAgentConfig, client: AgentProtocolClient, sp
             spool.mark_acknowledged(active.job_id)
             logger.info("Capture acknowledged: job=%s capture=%s", active.job_id, active.capture_id)
         except Exception as exc:
+            metadata = active.metadata()
+            metadata["validationStatus"] = metadata.get("validationStatus") or "upload-failed"
             try:
                 spool.move_file_for_state(active, "failed")
             except Exception:
                 pass
             spool.mark_failed(active.job_id, str(exc))
             try:
-                client.fail_job(active.job_id, str(exc))
+                client.fail_job(active.job_id, str(exc), metadata=metadata)
             except ProtocolError:
                 pass
             logger.warning("Capture upload failed: job=%s error=%s", active.job_id, exc)

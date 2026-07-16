@@ -9,7 +9,8 @@ export async function POST(request: Request, context: { params: Promise<{ jobId:
   const { jobId } = await context.params;
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const errorMessage = typeof body.error === "string" ? body.error : "Agent reported job failure.";
-  const ok = await failJob(prisma, auth.node.id, jobId, errorMessage);
+  const metadata = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) ? body.metadata : {};
+  const ok = await failJob(prisma, auth.node.id, jobId, errorMessage, metadata);
   if (!ok) {
     return NextResponse.json({ error: "No active job with that id is available for this node." }, { status: 409 });
   }

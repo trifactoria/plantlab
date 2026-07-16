@@ -133,12 +133,12 @@ def test_claim_complete_and_fail_job_flow(fake_coordinator):
     client = AgentProtocolClient(fake_coordinator["url"], "pln_validtoken")
     client.claim_job("job-2", "capture-2")
     client.complete_job("job-2", "capture-2")
-    client.fail_job("job-3", "camera busy")
+    client.fail_job("job-3", "camera busy", metadata={"validationStatus": "rejected"})
 
     state = fake_coordinator["state"]
     assert state.claimed["job-2"] == "capture-2"
     assert state.completed == [{"jobId": "job-2", "captureId": "capture-2"}]
-    assert state.failed == [{"jobId": "job-3", "error": "camera busy"}]
+    assert state.failed == [{"jobId": "job-3", "error": "camera busy", "metadata": {"validationStatus": "rejected"}}]
 
 
 def test_upload_capture_refuses_files_over_the_size_cap(tmp_path, fake_coordinator):

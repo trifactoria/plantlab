@@ -469,14 +469,42 @@ export async function claimJob(prisma: PrismaClient, nodeId: string, jobId: stri
   });
 }
 
-export async function failJob(prisma: PrismaClient, nodeId: string, jobId: string, errorMessage: string) {
+type FailedCaptureMetadata = {
+  validationStatus?: string | null;
+  validationErrorCode?: string | null;
+  attemptCount?: number | null;
+  fallbackUsed?: boolean | null;
+  attempts?: unknown;
+  attemptsJson?: string | null;
+  captureDurationMs?: number | null;
+};
+
+export async function failJob(
+  prisma: PrismaClient,
+  nodeId: string,
+  jobId: string,
+  errorMessage: string,
+  metadata: FailedCaptureMetadata = {},
+) {
   const job = await prisma.agentCaptureJob.findFirst({ where: { id: jobId, nodeId } });
+  const attemptsJson =
+    typeof metadata.attemptsJson === "string"
+      ? metadata.attemptsJson
+      : metadata.attempts
+        ? JSON.stringify(metadata.attempts).slice(0, 20_000)
+        : undefined;
   const updated = await prisma.agentCaptureJob.updateMany({
     where: { id: jobId, nodeId, status: { in: ["queued", "claimed"] } },
     data: {
       status: "failed",
       completedAt: new Date(),
       errorMessage: errorMessage.slice(0, 2000),
+      validationStatus: metadata.validationStatus ?? undefined,
+      validationErrorCode: metadata.validationErrorCode ?? undefined,
+      attemptCount: metadata.attemptCount ?? undefined,
+      fallbackUsed: metadata.fallbackUsed ?? undefined,
+      captureDurationMs: metadata.captureDurationMs ?? undefined,
+      attemptsJson,
     },
   });
   if (updated.count > 0 && job?.scheduledFor) {

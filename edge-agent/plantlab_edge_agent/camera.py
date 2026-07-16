@@ -12,10 +12,12 @@ defaults (see DEFAULT_WIDTH/DEFAULT_HEIGHT), single JPEG frame.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -88,6 +90,9 @@ class CaptureAttempt:
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     byte_size: Optional[int] = None
+    sha256: Optional[str] = None
+    rejected_artifact_path: Optional[str] = None
+    validation_stats: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -130,6 +135,9 @@ class CaptureResult:
                     "errorCode": attempt.error_code,
                     "errorMessage": attempt.error_message,
                     "byteSize": attempt.byte_size,
+                    "sha256": attempt.sha256,
+                    "rejectedArtifactPath": attempt.rejected_artifact_path,
+                    "validationStats": attempt.validation_stats,
                 }
                 for attempt in self.attempts
             ],
@@ -137,9 +145,43 @@ class CaptureResult:
 
 
 class CaptureValidationError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, stats: Optional[Dict[str, object]] = None):
         super().__init__(message)
         self.code = code
+        self.stats = stats
+
+
+class CaptureFailedError(RuntimeError):
+    def __init__(self, message: str, attempts: List[CaptureAttempt]):
+        super().__init__(message)
+        self.attempts = attempts
+
+    def metadata(self) -> Dict[str, object]:
+        last = self.attempts[-1] if self.attempts else None
+        return {
+            "attemptCount": len(self.attempts),
+            "fallbackUsed": any(attempt.status == "accepted" and attempt.fallback for attempt in self.attempts),
+            "validationStatus": "rejected",
+            "validationErrorCode": last.error_code if last else None,
+            "attempts": [
+                {
+                    "mode": attempt.mode.__dict__,
+                    "attempt": attempt.attempt,
+                    "fallback": attempt.fallback,
+                    "startedAt": attempt.started_at,
+                    "completedAt": attempt.completed_at,
+                    "durationMs": attempt.duration_ms,
+                    "status": attempt.status,
+                    "errorCode": attempt.error_code,
+                    "errorMessage": attempt.error_message,
+                    "byteSize": attempt.byte_size,
+                    "sha256": attempt.sha256,
+                    "rejectedArtifactPath": attempt.rejected_artifact_path,
+                    "validationStats": attempt.validation_stats,
+                }
+                for attempt in self.attempts
+            ],
+        }
 
 
 def command_exists(name: str) -> bool:
@@ -653,6 +695,106 @@ def _luma_stats(rgb: bytes) -> Tuple[float, float, int, float]:
     return mean, math.sqrt(variance), max_value - min_value, entropy
 
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _rejected_artifact_path(output_path: str, attempt_number: int) -> Path:
+    output = Path(output_path)
+    root = output.parent
+    if output.parent.name in {"pending", "uploading", "acknowledged", "failed"} and output.parent.parent.name == "spool":
+        root = output.parent.parent.parent
+    date_dir = time.strftime("%Y-%m-%d", time.gmtime())
+    return root / "diagnostics" / "rejected-captures" / date_dir / f"{output.stem}-attempt-{attempt_number}.jpg"
+
+
+def _preserve_rejected_artifact(output_path: str, attempt_number: int) -> Optional[str]:
+    source = Path(output_path)
+    if not source.exists() or source.stat().st_size <= 0:
+        return None
+    destination = _rejected_artifact_path(output_path, attempt_number)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return str(destination)
+
+
+def _mean(values: List[float]) -> float:
+    return sum(values) / max(1, len(values))
+
+
+def _strongest_split(rgb: bytes, width: int, height: int, axis: str) -> Dict[str, float]:
+    line_count = height if axis == "horizontal" else width
+    line_means: List[float] = []
+    for line in range(line_count):
+        total = 0.0
+        count = 0
+        if axis == "horizontal":
+            for x in range(width):
+                index = (line * width + x) * 3
+                total += 0.2126 * rgb[index] + 0.7152 * rgb[index + 1] + 0.0722 * rgb[index + 2]
+                count += 1
+        else:
+            for y in range(height):
+                index = (y * width + line) * 3
+                total += 0.2126 * rgb[index] + 0.7152 * rgb[index + 1] + 0.0722 * rgb[index + 2]
+                count += 1
+        line_means.append(total / max(1, count))
+
+    edge_score = 0.0
+    position = 1
+    for line in range(1, len(line_means)):
+        delta = abs(line_means[line] - line_means[line - 1])
+        if delta > edge_score:
+            edge_score = delta
+            position = line
+
+    before_luma: List[float] = []
+    after_luma: List[float] = []
+    before_rg: List[float] = []
+    after_rg: List[float] = []
+    before_gb: List[float] = []
+    after_gb: List[float] = []
+    for y in range(height):
+        for x in range(width):
+            before = y < position if axis == "horizontal" else x < position
+            index = (y * width + x) * 3
+            r = rgb[index]
+            g = rgb[index + 1]
+            b = rgb[index + 2]
+            luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            (before_luma if before else after_luma).append(luma)
+            (before_rg if before else after_rg).append(r - g)
+            (before_gb if before else after_gb).append(g - b)
+
+    luma_delta = abs(_mean(before_luma) - _mean(after_luma))
+    channel_delta = max(abs(_mean(before_rg) - _mean(after_rg)), abs(_mean(before_gb) - _mean(after_gb)))
+    return {
+        "edgeScore": round(edge_score, 2),
+        "splitLumaDelta": round(luma_delta, 2),
+        "splitChannelDelta": round(channel_delta, 2),
+        "splitPosition": round(position / max(1, line_count), 3),
+    }
+
+
+def _split_frame_stats(rgb: bytes, width: int, height: int) -> Dict[str, object]:
+    horizontal = _strongest_split(rgb, width, height, "horizontal")
+    vertical = _strongest_split(rgb, width, height, "vertical")
+    return {
+        "horizontalEdgeScore": horizontal["edgeScore"],
+        "horizontalSplitLumaDelta": horizontal["splitLumaDelta"],
+        "horizontalSplitChannelDelta": horizontal["splitChannelDelta"],
+        "horizontalSplitPosition": horizontal["splitPosition"],
+        "verticalEdgeScore": vertical["edgeScore"],
+        "verticalSplitLumaDelta": vertical["splitLumaDelta"],
+        "verticalSplitChannelDelta": vertical["splitChannelDelta"],
+        "verticalSplitPosition": vertical["splitPosition"],
+    }
+
+
 def validate_capture_file(path: str, expected: CaptureMode) -> Dict[str, object]:
     image = Path(path)
     if not image.exists() or image.stat().st_size <= 0:
@@ -698,15 +840,18 @@ def validate_capture_file(path: str, expected: CaptureMode) -> Dict[str, object]
         raise CaptureValidationError("camera-jpeg-invalid", detail or "ffmpeg could not fully decode the image.")
 
     mean, stddev, luma_range, entropy = _luma_stats(decoded.stdout)
-    suspiciously_small = width * height >= 300000 and byte_size < _minimum_expected_jpeg_bytes(width, height)
-    low_detail = stddev < 6 or luma_range < 32 or entropy < 1.2
-    if suspiciously_small and low_detail:
-        raise CaptureValidationError(
-            "camera-frame-corrupt",
-            f"Image decoded but looked like a corrupt or unsettled frame ({byte_size} bytes, luma stddev {stddev:.2f}).",
-        )
-
-    return {
+    integrity = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path, "-vf", "scale=128:72,format=rgb24", "-f", "rawvideo", "-"],
+        capture_output=True,
+        timeout=10,
+    )
+    if integrity.returncode != 0 or not integrity.stdout:
+        detail = integrity.stderr.decode("utf-8", "replace").strip()[:500]
+        raise CaptureValidationError("camera-jpeg-invalid", detail or "ffmpeg could not decode image integrity sample.")
+    if len(integrity.stdout) != 128 * 72 * 3:
+        raise CaptureValidationError("camera-jpeg-invalid", "ffmpeg returned an unexpected image integrity sample size.")
+    split_stats = _split_frame_stats(integrity.stdout, 128, 72)
+    stats = {
         "width": width,
         "height": height,
         "byteSize": byte_size,
@@ -714,7 +859,36 @@ def validate_capture_file(path: str, expected: CaptureMode) -> Dict[str, object]
         "lumaStdDev": round(stddev, 2),
         "lumaRange": luma_range,
         "lumaEntropy": round(entropy, 3),
+        **split_stats,
     }
+    suspiciously_small = width * height >= 300000 and byte_size < _minimum_expected_jpeg_bytes(width, height)
+    low_detail = stddev < 6 or luma_range < 32 or entropy < 1.2
+    if suspiciously_small and low_detail:
+        raise CaptureValidationError(
+            "camera-frame-corrupt",
+            f"Image decoded but looked like a corrupt or unsettled frame ({byte_size} bytes, luma stddev {stddev:.2f}).",
+            stats,
+        )
+
+    horizontal_partial = (
+        float(stats["horizontalEdgeScore"]) >= 24
+        and float(stats["horizontalSplitLumaDelta"]) >= 35
+        and (float(stats["horizontalSplitChannelDelta"]) >= 20 or float(stats["horizontalSplitLumaDelta"]) >= 50)
+    )
+    vertical_partial = (
+        float(stats["verticalEdgeScore"]) >= 24
+        and float(stats["verticalSplitLumaDelta"]) >= 35
+        and (float(stats["verticalSplitChannelDelta"]) >= 20 or float(stats["verticalSplitLumaDelta"]) >= 50)
+    )
+    if horizontal_partial or vertical_partial:
+        axis = "horizontal" if horizontal_partial else "vertical"
+        raise CaptureValidationError(
+            "partial-frame",
+            f"Image decoded but contains a {axis} split-frame discontinuity.",
+            stats,
+        )
+
+    return stats
 
 
 def _attempt_capture(device: str, output_path: str, mode: CaptureMode, warmup_frames: int, warmup_seconds: Optional[float], attempt_number: int, fallback: bool) -> CaptureAttempt:
@@ -730,12 +904,19 @@ def _attempt_capture(device: str, output_path: str, mode: CaptureMode, warmup_fr
         stats = validate_capture_file(output_path, mode)
         attempt.status = "accepted"
         attempt.byte_size = int(stats["byteSize"])
+        attempt.sha256 = _sha256_file(output_path)
+        attempt.validation_stats = stats
     except subprocess.TimeoutExpired:
         attempt.error_code = "camera-timeout"
         attempt.error_message = f"ffmpeg capture timed out after {_capture_timeout(mode, warmup_frames, warmup_seconds)}s."
     except CaptureValidationError as exc:
         attempt.error_code = exc.code
         attempt.error_message = str(exc)
+        attempt.validation_stats = exc.stats
+        if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+            attempt.byte_size = Path(output_path).stat().st_size
+            attempt.sha256 = _sha256_file(output_path)
+            attempt.rejected_artifact_path = _preserve_rejected_artifact(output_path, attempt_number)
     finally:
         attempt.completed_at = _now_iso()
         attempt.duration_ms = round((time.monotonic() - started_monotonic) * 1000)
@@ -788,7 +969,7 @@ def capture_frame_with_result(
     Path(output_path).unlink(missing_ok=True)
     last = attempts[-1] if attempts else None
     reason = last.error_message if last else "No capture attempts ran."
-    raise RuntimeError(f"camera-fallback-exhausted: {reason}")
+    raise CaptureFailedError(f"camera-fallback-exhausted: {reason}", attempts)
 
 
 def capture_frame(device: str, output_path: str, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, input_format: str = "mjpeg") -> None:

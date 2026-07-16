@@ -200,7 +200,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/agents/jobs/") and self.path.endswith("/fail"):
             job_id = self.path.split("/")[4]
             body = self._read_json_body()
-            self.state.failed.append({"jobId": job_id, "error": body.get("error")})
+            self.state.failed.append({"jobId": job_id, "error": body.get("error"), "metadata": body.get("metadata")})
             self._send_json(200, {"status": "failed"})
             return
 

@@ -293,8 +293,11 @@ class AgentProtocolClient:
     def complete_job(self, job_id: str, capture_id: str) -> None:
         request_json(self._url(f"/api/agents/jobs/{job_id}/complete"), self.token, method="POST", body={"captureId": capture_id})
 
-    def fail_job(self, job_id: str, error_message: str) -> None:
-        request_json(self._url(f"/api/agents/jobs/{job_id}/fail"), self.token, method="POST", body={"error": error_message})
+    def fail_job(self, job_id: str, error_message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        body: Dict[str, Any] = {"error": error_message}
+        if metadata:
+            body["metadata"] = metadata
+        request_json(self._url(f"/api/agents/jobs/{job_id}/fail"), self.token, method="POST", body=body)
 
     def upload_capture(self, file_path: str, metadata: Dict[str, Any], max_bytes: int) -> dict:
         return post_multipart(

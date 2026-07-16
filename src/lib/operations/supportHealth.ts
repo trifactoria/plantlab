@@ -149,7 +149,7 @@ export function evaluateProbeOutput(probe: SupportProbeLike, output: string): Su
     }, probe));
   }
 
-  const corruptFrames = countMatches(text, /camera-frame-corrupt|frame corrupt|invalid image|validationstatus[^a-z0-9]+rejected/g);
+  const corruptFrames = countMatches(text, /camera-frame-corrupt|partial-frame|frame corrupt|invalid image|validationstatus[^a-z0-9]+rejected/g);
   if (corruptFrames >= 2) {
     findings.push(withFindingKey({
       level: "warning",

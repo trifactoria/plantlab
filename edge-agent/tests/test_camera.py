@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +10,135 @@ from plantlab_edge_agent import __main__ as edge_cli
 
 def _completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _capture_attempt(status="failed", attempt=1, fallback=False, code="partial-frame"):
+    result = camera.CaptureAttempt(
+        mode=camera.CaptureMode(width=1920 if not fallback else 1280, height=1080 if not fallback else 720, input_format="mjpeg"),
+        attempt=attempt,
+        fallback=fallback,
+        started_at="2026-07-16T17:25:22Z",
+    )
+    result.completed_at = "2026-07-16T17:25:38Z"
+    result.duration_ms = 100
+    result.status = status
+    result.byte_size = 123456
+    result.sha256 = "a" * 64
+    result.validation_stats = {"horizontalEdgeScore": 30, "horizontalSplitLumaDelta": 55, "horizontalSplitChannelDelta": 40}
+    if status != "accepted":
+        result.error_code = code
+        result.error_message = "Image decoded but contains a horizontal split-frame discontinuity."
+    return result
+
+
+def test_split_frame_stats_detect_obvious_horizontal_channel_discontinuity():
+    width = 128
+    height = 72
+    raw = bytearray(width * height * 3)
+    for y in range(height):
+        for x in range(width):
+            index = (y * width + x) * 3
+            texture = (x * 17 + y * 31 + ((x * y) % 53)) % 80
+            raw[index] = 70 + texture
+            raw[index + 1] = 95 + ((texture + x) % 95)
+            raw[index + 2] = 55 + ((texture + y) % 70)
+            if y >= int(height * 0.34):
+                raw[index] = min(255, raw[index] + 75)
+                raw[index + 1] = min(255, raw[index + 1] + 110)
+                raw[index + 2] = max(0, raw[index + 2] - 35)
+
+    stats = camera._split_frame_stats(bytes(raw), width, height)
+    assert stats["horizontalEdgeScore"] >= 24
+    assert stats["horizontalSplitLumaDelta"] >= 35
+    assert stats["horizontalSplitChannelDelta"] >= 20
+
+
+def test_capture_retries_primary_before_fallback_and_keeps_primary_mode(tmp_path):
+    output = tmp_path / "out.jpg"
+    attempts = [_capture_attempt(attempt=1), _capture_attempt(status="accepted", attempt=2)]
+    with patch.object(camera, "_attempt_capture", side_effect=attempts) as mocked:
+        result = camera.capture_frame_with_result(
+            "/dev/video0",
+            str(output),
+            width=1920,
+            height=1080,
+            capture_attempts=2,
+            fallback_mode=camera.CaptureMode(width=1280, height=720),
+            fallback_attempts=1,
+        )
+
+    assert mocked.call_count == 2
+    assert result.fallback_used is False
+    assert result.effective_mode.width == 1920
+    assert result.attempts[0].error_code == "partial-frame"
+    assert result.attempts[1].status == "accepted"
+
+
+def test_capture_uses_fallback_only_after_primary_retries_fail(tmp_path):
+    output = tmp_path / "out.jpg"
+    attempts = [_capture_attempt(attempt=1), _capture_attempt(attempt=2), _capture_attempt(status="accepted", attempt=3, fallback=True)]
+    with patch.object(camera, "_attempt_capture", side_effect=attempts) as mocked:
+        result = camera.capture_frame_with_result(
+            "/dev/video0",
+            str(output),
+            width=1920,
+            height=1080,
+            capture_attempts=2,
+            fallback_mode=camera.CaptureMode(width=1280, height=720),
+            fallback_attempts=1,
+        )
+
+    assert mocked.call_count == 3
+    assert result.fallback_used is True
+    assert result.effective_mode.width == 1280
+
+
+def test_capture_failure_preserves_rejected_attempt_diagnostics(tmp_path):
+    output = tmp_path / "out.jpg"
+    attempts = [_capture_attempt(attempt=1), _capture_attempt(attempt=2), _capture_attempt(attempt=3, fallback=True)]
+    with patch.object(camera, "_attempt_capture", side_effect=attempts):
+        with pytest.raises(camera.CaptureFailedError) as exc:
+            camera.capture_frame_with_result(
+                "/dev/video0",
+                str(output),
+                width=1920,
+                height=1080,
+                capture_attempts=2,
+                fallback_mode=camera.CaptureMode(width=1280, height=720),
+                fallback_attempts=1,
+            )
+
+    metadata = exc.value.metadata()
+    assert metadata["validationStatus"] == "rejected"
+    assert metadata["validationErrorCode"] == "partial-frame"
+    assert metadata["attemptCount"] == 3
+    assert metadata["attempts"][0]["validationStats"]["horizontalEdgeScore"] == 30
+
+
+def test_rejected_attempt_preserves_local_diagnostic_artifact(tmp_path):
+    output = tmp_path / "spool" / "pending" / "capture-1.jpg"
+
+    def fake_run(args, **kwargs):
+        if args[0] == "ffmpeg" and args[-1] == str(output):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"bad-jpeg-evidence")
+            return _completed(returncode=0)
+        return _completed(returncode=0)
+
+    with patch("subprocess.run", side_effect=fake_run), patch.object(
+        camera,
+        "validate_capture_file",
+        side_effect=camera.CaptureValidationError("partial-frame", "split frame", {"horizontalEdgeScore": 30}),
+    ):
+        attempt = camera._attempt_capture("/dev/video0", str(output), camera.CaptureMode(width=1920, height=1080), 10, None, 1, False)
+
+    assert attempt.error_code == "partial-frame"
+    assert attempt.sha256 is not None
+    assert attempt.rejected_artifact_path is not None
+    artifact = Path(attempt.rejected_artifact_path)
+    assert artifact.exists()
+    assert artifact.read_bytes() == b"bad-jpeg-evidence"
+    assert artifact.parts[-4:] == ("diagnostics", "rejected-captures", artifact.parts[-2], "capture-1-attempt-1.jpg")
 
 
 def test_discover_cameras_returns_empty_list_when_no_video_devices():
@@ -188,7 +318,8 @@ def test_capture_frame_succeeds_and_uses_conservative_default_resolution(tmp_pat
         if args[0] == "ffprobe":
             return _completed(stdout='{"streams":[{"width":1280,"height":720,"codec_name":"mjpeg"}]}')
         if args[0] == "ffmpeg" and args[-1] == "-":
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(64 * 64 * 3)]), stderr=b"")
+            sample_size = 128 * 72 * 3 if "scale=128:72,format=rgb24" in args else 64 * 64 * 3
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(sample_size)]), stderr=b"")
         return _completed(returncode=0)
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -318,7 +449,8 @@ def test_capture_frame_normalizes_yuyv_to_ffmpeg_yuyv422(tmp_path):
         if args[0] == "ffprobe":
             return _completed(stdout='{"streams":[{"width":640,"height":480,"codec_name":"mjpeg"}]}')
         if args[0] == "ffmpeg" and args[-1] == "-":
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(64 * 64 * 3)]), stderr=b"")
+            sample_size = 128 * 72 * 3 if "scale=128:72,format=rgb24" in args else 64 * 64 * 3
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=bytes([i % 256 for i in range(sample_size)]), stderr=b"")
         return _completed(returncode=0)
 
     with patch("subprocess.run", side_effect=fake_run):

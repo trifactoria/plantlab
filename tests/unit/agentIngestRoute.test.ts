@@ -22,6 +22,25 @@ async function realPngBuffer(width = 20, height = 20) {
   return sharp({ create: { width, height, channels: 3, background: { r: 5, g: 5, b: 200 } } }).png().toBuffer();
 }
 
+async function splitFrameJpeg(width = 320, height = 180) {
+  const data = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 3;
+      const texture = (x * 17 + y * 31 + ((x * y) % 53)) % 80;
+      data[index] = 70 + texture;
+      data[index + 1] = 95 + ((texture + x) % 95);
+      data[index + 2] = 55 + ((texture + y) % 70);
+      if (y >= Math.floor(height * 0.34)) {
+        data[index] = Math.min(255, data[index] + 75);
+        data[index + 1] = Math.min(255, data[index + 1] + 110);
+        data[index + 2] = Math.max(0, data[index + 2] - 35);
+      }
+    }
+  }
+  return sharp(data, { raw: { width, height, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
+}
+
 function ingestRequest(opts: {
   metadata?: Record<string, unknown>;
   metadataRaw?: string;
@@ -171,6 +190,40 @@ describe("POST /api/agent-ingest", () => {
     expect(response.status).toBe(400);
     expect((await response.json()).error).toMatch(/camera-frame-corrupt/);
     await expect(prisma.sourceCapture.findUnique({ where: { captureId: metadata.captureId as string } })).resolves.toBeNull();
+  });
+
+  it("rejects a visually corrupted split-frame upload before SourceCapture or Project Photo fan-out", async () => {
+    process.env.PLANTLAB_INGEST_TOKEN = TOKEN;
+    const source = await makeSource({ width: 320, height: 180 });
+    const project = await createTestProject(prisma, { captureEnabled: false, cameraDevice: null });
+    cleanupFns.push(() => cleanupTestProject(prisma, project.id, project.localPhotoDirectory));
+
+    await prisma.projectViewport.create({
+      data: {
+        projectId: project.id,
+        captureSourceId: source.id,
+        cropX: 0,
+        cropY: 0,
+        cropWidth: 1,
+        cropHeight: 1,
+        effectiveFrom: new Date("2026-07-01T00:00:00.000Z"),
+        active: true,
+      },
+    });
+
+    const image = await splitFrameJpeg();
+    const metadata = await metadataWithChecksum(image, {
+      captureSourceId: source.id,
+      effectiveWidth: 320,
+      effectiveHeight: 180,
+      capturedAt: "2026-07-11T15:00:00.000Z",
+    });
+
+    const response = await postAgentIngest(ingestRequest({ metadata, image }));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/partial-frame/);
+    await expect(prisma.sourceCapture.findUnique({ where: { captureId: metadata.captureId as string } })).resolves.toBeNull();
+    await expect(prisma.photo.count({ where: { projectId: project.id } })).resolves.toBe(0);
   });
 
   it("accepts a valid PNG upload", async () => {
