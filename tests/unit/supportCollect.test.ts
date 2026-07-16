@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { redact, resolveSupportOutputDir, selectedHosts, summarizeHostStatus } from "../../src/lib/operations/supportCollect";
-import { buildSummaryMarkdown, evaluateProbeOutput, overallHealth } from "../../src/lib/operations/supportHealth";
+import {
+  normalizeSupportCollectionRequest,
+  redact,
+  resolveSupportOutputDir,
+  selectedHosts,
+  selectedHostsForRequest,
+  summarizeHostStatus,
+} from "../../src/lib/operations/supportCollect";
+import { toSupportCollectionRequest } from "../../src/lib/operations/supportBundleJobs";
+import { buildSummaryMarkdown, evaluateProbeOutput, hostHealthSummary, overallHealth } from "../../src/lib/operations/supportHealth";
 import { discoverScreenshotRoutes } from "../../src/lib/operations/supportScreenshots";
 
 describe("support collect", () => {
@@ -52,6 +60,24 @@ describe("support bundle host selection", () => {
   it("maps an unknown node to a generic node role", () => {
     expect(selectedHosts({ nodes: ["some-new-node"] }).find((host) => host.host === "some-new-node")?.role).toBe("node");
   });
+
+  it("normalizes CLI and web all-host requests to the same target hosts", () => {
+    const cli = normalizeSupportCollectionRequest({
+      all: true,
+      coordinator: "plantlab",
+      screenshots: "live-readonly",
+      includeLogs: true,
+      includeHardwareTests: false,
+    });
+    const web = toSupportCollectionRequest({
+      scope: "all",
+      screenshots: "live-readonly",
+      includeLogs: true,
+      includeHardwareTests: false,
+    });
+    expect(web).toEqual(cli);
+    expect(selectedHostsForRequest(web).map((host) => host.host)).toEqual(["xps", "plantlab", "greenhouse-zero", "bokchoy"]);
+  });
 });
 
 describe("summarizeHostStatus (one offline host yields partial, never aborts)", () => {
@@ -96,6 +122,56 @@ describe("support health semantic findings", () => {
     expect(findings).toEqual(expect.arrayContaining([expect.objectContaining({ level: "warning", category: "cameras" })]));
   });
 
+  it("does not warn merely because fallback mode is configured", () => {
+    const findings = evaluateProbeOutput(
+      { ...probe(true), path: "plantlab/api/hardware-cameras.json" },
+      JSON.stringify({
+        cameras: Array.from({ length: 20 }, (_, index) => ({
+          id: `camera-${index}`,
+          reliability: { fallbackMode: { width: 1280, height: 720, attempts: 1 } },
+        })),
+      }),
+    );
+    expect(findings.filter((finding) => finding.category === "captures")).toEqual([]);
+  });
+
+  it("warns when runtime evidence says fallback was actually used", () => {
+    const findings = evaluateProbeOutput({ ...probe(true), path: "plantlab/capture/queues.json" }, 'fallbackUsed": true\nfallback used');
+    expect(findings).toEqual(expect.arrayContaining([expect.objectContaining({ level: "warning", category: "captures" })]));
+  });
+
+  it("aggregates duplicate corrupt-frame evidence under one semantic key", async () => {
+    const { findingsForProbes } = await import("../../src/lib/operations/supportHealth");
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "support-findings-"));
+    try {
+      const a = join(dir, "a.txt");
+      const b = join(dir, "b.txt");
+      await writeFile(a, "camera-frame-corrupt\ncamera-frame-corrupt\n");
+      await writeFile(b, "validationStatus rejected\nvalidationStatus rejected\n");
+      const findings = await findingsForProbes([
+        { ...probe(true), host: "bokchoy", role: "camera-node", path: a },
+        { ...probe(true), host: "bokchoy", role: "camera-node", path: b },
+      ]);
+      const cameraFindings = findings.filter((finding) => finding.category === "cameras");
+      expect(cameraFindings).toHaveLength(1);
+      expect(cameraFindings[0].evidence?.length).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("separates stale stored fleet records from host service health", () => {
+    const staleProbe = { ...probe(true), host: "xps", role: "standalone", path: "xps/api/nodes-summary.json" };
+    const findings = evaluateProbeOutput(staleProbe, '{"nodes":[{"name":"greenhouse-zero","online":false}]}');
+    expect(findings).toEqual(expect.arrayContaining([expect.objectContaining({ category: "fleet-state" })]));
+    const summary = hostHealthSummary("xps", "standalone", [staleProbe], findings);
+    expect(summary.hostHealth).toBe("healthy");
+    expect(summary.fleetRecordHealth).toBe("warning");
+  });
+
   it("does not classify one transient DHT22 miss as failed", () => {
     const findings = evaluateProbeOutput(probe(true), "DHT22 checksum failed once\n");
     expect(findings.filter((finding) => finding.category === "sensors")).toEqual([]);
@@ -126,11 +202,39 @@ describe("support health semantic findings", () => {
           readinessReason: null,
         },
       ],
+      uiCoverage: [
+        {
+          host: "plantlab",
+          role: "coordinator",
+          classification: "available",
+          baseUrl: "http://127.0.0.1:3000",
+          reason: null,
+          discoveredSurfaces: 1,
+          attempted: 1,
+          succeeded: 1,
+          failed: 0,
+          screenshots: 1,
+        },
+        {
+          host: "greenhouse-zero",
+          role: "greenhouse-node",
+          classification: "not-applicable",
+          baseUrl: null,
+          reason: "This host is an edge/agent node and does not run the normal PlantLab web UI.",
+          discoveredSurfaces: 0,
+          attempted: 0,
+          succeeded: 0,
+          failed: 0,
+          screenshots: 0,
+        },
+      ],
       collectionOptions: {},
     });
     expect(summary).toContain("Overall health: critical");
     expect(summary).toContain("## Critical Findings");
     expect(summary).toContain("001-home.png");
+    expect(summary).toContain("| plantlab |");
+    expect(summary).toContain("greenhouse-zero: no normal web UI");
     expect(summary).toContain("## Skipped Or Failed Probes");
   });
 });

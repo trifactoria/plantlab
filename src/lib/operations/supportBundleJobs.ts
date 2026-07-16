@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   collectSupportBundle,
-  selectedHosts,
+  selectedHostsForRequest,
   type ScreenshotMode,
-  type SupportCollectOptions,
+  type SupportCollectionRequest,
   type SupportTargetStatus,
 } from "./supportCollect";
 
@@ -26,6 +26,7 @@ type Target = { host: string; role: string; status: SupportTargetStatus };
 type SupportBundleJob = {
   id: string;
   request: SupportBundleRequest;
+  normalizedRequest: SupportCollectionRequest;
   status: "running" | "succeeded" | "partial" | "failed";
   targets: Target[];
   screenshots: { mode: ScreenshotMode; status: "queued" | "collecting" | "succeeded" | "failed" | "skipped" };
@@ -56,27 +57,28 @@ function prune() {
   }
 }
 
-/** Maps the structured UI request to the (still structured) collector options - never a shelled command string. */
-function toCollectOptions(request: SupportBundleRequest): SupportCollectOptions {
-  const base: SupportCollectOptions = {
+/** Maps the structured UI request to the canonical collector request - never a shelled command string. */
+export function toSupportCollectionRequest(request: SupportBundleRequest): SupportCollectionRequest {
+  const base = {
     coordinator: "plantlab",
-    screenshots: request.screenshots,
+    screenshotMode: request.screenshots,
     includeLogs: request.includeLogs,
-    includeHardwareTests: request.includeHardwareTests,
+    includeHardwareDiagnostics: request.includeHardwareTests,
   };
-  if (request.scope === "all") return { ...base, all: true };
-  if (request.scope === "nodes") return { ...base, nodes: (request.nodes ?? []).slice(0, 8) };
-  return base; // coordinator only
+  if (request.scope === "all") return { ...base, scope: "all", nodeNames: [] };
+  if (request.scope === "nodes") return { ...base, scope: "selected-nodes", nodeNames: (request.nodes ?? []).slice(0, 8) };
+  return { ...base, scope: "coordinator", nodeNames: [] };
 }
 
 export function createSupportBundleJob(request: SupportBundleRequest): SupportBundleJob {
   prune();
-  const options = toCollectOptions(request);
-  const hosts = selectedHosts(options);
+  const normalizedRequest = toSupportCollectionRequest(request);
+  const hosts = selectedHostsForRequest(normalizedRequest);
   const id = randomUUID();
   const job: SupportBundleJob = {
     id,
     request,
+    normalizedRequest,
     status: "running",
     targets: hosts.map((host) => ({ host: host.host, role: host.role, status: "queued" })),
     screenshots: { mode: request.screenshots, status: request.screenshots === "none" ? "skipped" : "queued" },
@@ -92,7 +94,12 @@ export function createSupportBundleJob(request: SupportBundleRequest): SupportBu
 
   const startedAtMs = Date.now();
   void collectSupportBundle({
-    ...options,
+    all: normalizedRequest.scope === "all",
+    nodes: normalizedRequest.scope === "selected-nodes" ? normalizedRequest.nodeNames : [],
+    coordinator: normalizedRequest.coordinator,
+    screenshots: normalizedRequest.screenshotMode,
+    includeLogs: normalizedRequest.includeLogs,
+    includeHardwareTests: normalizedRequest.includeHardwareDiagnostics,
     onProgress: (event) => {
       if (event.type === "target-start") {
         const target = job.targets.find((candidate) => candidate.host === event.host);
