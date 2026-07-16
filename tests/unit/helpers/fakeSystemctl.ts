@@ -23,6 +23,7 @@ export type FakeSystemctl = {
   isMasked(unit: string): Promise<boolean>;
   isActive(unit: string): Promise<boolean>;
   isEnabled(unit: string): Promise<boolean>;
+  actions(): Promise<string[]>;
   cleanup(): Promise<void>;
 };
 
@@ -101,7 +102,7 @@ case "$action" in
     exit 0
     ;;
   restart)
-    for u in "$@"; do touch "$STATE/$u.enabled" "$STATE/$u.active"; done
+    for u in "$@"; do echo "restart $u" >> "$STATE/actions.log"; touch "$STATE/$u.enabled" "$STATE/$u.active"; done
     exit 0
     ;;
   status)
@@ -160,6 +161,12 @@ esac
     },
     async isEnabled(unit: string) {
       return fileExists(path.join(stateDir, `${unit}.enabled`));
+    },
+    async actions() {
+      const { readFile } = await import("node:fs/promises");
+      return readFile(path.join(stateDir, "actions.log"), "utf8")
+        .then((contents) => contents.trim().split("\n").filter(Boolean))
+        .catch(() => []);
     },
     async cleanup() {
       await rm(binDir, { recursive: true, force: true }).catch(() => undefined);

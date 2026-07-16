@@ -96,6 +96,9 @@ describe("plantlab update - role awareness", () => {
 
       expect(await fake.isActive("plantlab-web.service")).toBe(true);
       expect(await fake.isActive("plantlab-camera.service")).toBe(true);
+      await expect(fake.actions()).resolves.toEqual(
+        expect.arrayContaining(["restart plantlab-web.service", "restart plantlab-camera.service"]),
+      );
     } finally {
       await cleanup();
     }

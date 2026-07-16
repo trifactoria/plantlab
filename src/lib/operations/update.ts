@@ -122,6 +122,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<UpdateResu
     // does that.
     credential: null,
     startServices: options.restartServices !== false,
+    forceRestart: options.restartServices !== false,
   });
   for (const step of convergence.steps) {
     steps.push({ name: `service:${step.name}`, ok: step.status !== "failed", detail: step.detail });
