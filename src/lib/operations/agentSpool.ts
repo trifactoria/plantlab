@@ -23,6 +23,7 @@ export type SpoolRecord = {
   nextRetryAt: string | null;
   lastError: string | null;
   state: SpoolState;
+  metadataJson?: string | null;
 };
 
 export class AgentSpool {
@@ -55,13 +56,17 @@ export class AgentSpool {
         attemptCount INTEGER NOT NULL DEFAULT 0,
         nextRetryAt TEXT,
         lastError TEXT,
-        state TEXT NOT NULL
+        state TEXT NOT NULL,
+        metadataJson TEXT
       );
       CREATE INDEX IF NOT EXISTS spool_records_state_nextRetryAt_idx ON spool_records(state, nextRetryAt);
     `);
     const columns = this.db.prepare("PRAGMA table_info(spool_records)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "scheduledFor")) {
       this.db.exec("ALTER TABLE spool_records ADD COLUMN scheduledFor TEXT;");
+    }
+    if (!columns.some((column) => column.name === "metadataJson")) {
+      this.db.exec("ALTER TABLE spool_records ADD COLUMN metadataJson TEXT;");
     }
   }
 
@@ -86,6 +91,7 @@ export class AgentSpool {
     localFilePath: string;
     capturedAt: Date;
     scheduledFor?: Date | null;
+    metadata?: Record<string, unknown>;
   }): Promise<SpoolRecord> {
     const checksum = await sha256File(input.localFilePath);
     const fileStat = await stat(input.localFilePath);
@@ -103,13 +109,14 @@ export class AgentSpool {
       nextRetryAt: null,
       lastError: null,
       state: "pending",
+      metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
     };
 
     this.database()
       .prepare(
         `INSERT OR REPLACE INTO spool_records
-          (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (jobId, captureId, assignmentId, captureSourceId, localFilePath, capturedAt, scheduledFor, sha256, byteSize, attemptCount, nextRetryAt, lastError, state, metadataJson)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.jobId,
@@ -125,6 +132,7 @@ export class AgentSpool {
         record.nextRetryAt,
         record.lastError,
         record.state,
+        record.metadataJson ?? null,
       );
     return record;
   }

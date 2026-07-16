@@ -19,13 +19,16 @@ describe("AgentSpool", () => {
         captureSourceId: "source-1",
         localFilePath: filePath,
         capturedAt: new Date("2026-07-12T12:00:00Z"),
+        metadata: { validationStatus: "accepted", attempts: [{ attempt: 1, status: "accepted" }] },
       });
 
       expect(record.sha256).toHaveLength(64);
+      expect(record.metadataJson).toContain("validationStatus");
       expect(spool.dueUploads()).toHaveLength(1);
 
       const uploading = await spool.moveFileForState(record, "uploading");
       expect(uploading.localFilePath).toContain(path.join("spool", "uploading"));
+      expect(uploading.metadataJson).toContain("accepted");
       spool.markFailed(uploading.jobId, "network down", new Date("2026-07-12T12:00:00Z"));
       expect(spool.dueUploads(new Date("2026-07-12T12:00:01Z"))).toHaveLength(0);
 

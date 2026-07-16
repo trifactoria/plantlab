@@ -1,15 +1,16 @@
 import "../src/lib/suppressExpectedWarnings";
 import { openAsBlob } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { copyFile, mkdir, stat, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import packageJson from "../package.json";
 import { runFfmpeg } from "../src/lib/camera";
 import { readNodeConfig } from "../src/lib/operations/config";
-import { AgentSpool, type SpoolRecord } from "../src/lib/operations/agentSpool";
+import { AgentSpool, sha256File, type SpoolRecord } from "../src/lib/operations/agentSpool";
 import { discoverLocalCameras, listCameraFormats } from "../src/lib/v4l2";
 import { AGENT_PROTOCOL_VERSION } from "../src/lib/protocolVersion";
+import { ImageValidationError, validateImageFile } from "../src/lib/imageValidation";
 
 const POLL_MS = Number(process.env.PLANTLAB_AGENT_POLL_MS ?? 5000);
 const ACK_RETAIN_MS = Number(process.env.PLANTLAB_AGENT_ACK_RETAIN_MS ?? 7 * 24 * 60 * 60 * 1000);
@@ -109,6 +110,7 @@ async function inventoryRefreshRequested(coordinatorUrl: string, token: string) 
 }
 
 async function uploadRecord(coordinatorUrl: string, token: string, record: SpoolRecord) {
+  const captureMetadata = record.metadataJson ? JSON.parse(record.metadataJson) : {};
   const form = new FormData();
   form.set(
     "metadata",
@@ -120,6 +122,7 @@ async function uploadRecord(coordinatorUrl: string, token: string, record: Spool
       expectedSha256: record.sha256,
       expectedByteSize: record.byteSize,
       mimeType: "image/jpeg",
+      ...(captureMetadata && typeof captureMetadata === "object" ? captureMetadata : {}),
     }),
   );
   const blob = await openAsBlob(record.localFilePath, { type: "image/jpeg" });
@@ -154,7 +157,13 @@ async function processUploads(coordinatorUrl: string, token: string, spool: Agen
       spool.markFailed(active.jobId, message);
       await requestJson(`${coordinatorUrl}/api/agents/jobs/${active.jobId}/fail`, token, {
         method: "POST",
-        body: JSON.stringify({ error: message }),
+        body: JSON.stringify({
+          error: message,
+          metadata: {
+            ...(active.metadataJson ? JSON.parse(active.metadataJson) : {}),
+            validationStatus: active.metadataJson ? undefined : "upload-failed",
+          },
+        }),
       }).catch(() => undefined);
       log("warn", "Capture upload failed", { jobId: active.jobId, error: message });
     }
@@ -168,7 +177,16 @@ async function pollAndRunJob(coordinatorUrl: string, token: string, spool: Agent
       captureSourceId: string;
       assignmentId: string;
       camera: { devicePath: string; stableId: string; name?: string | null };
-      settings: { width: number; height: number; inputFormat: string };
+      settings: {
+        width: number;
+        height: number;
+        inputFormat: string;
+        frameRate?: string | null;
+        warmupFrames?: number;
+        warmupSeconds?: number | null;
+        captureAttempts?: number;
+        fallback?: { width: number; height: number; inputFormat?: string | null; frameRate?: string | null; attempts?: number } | null;
+      };
     };
   };
   if (!next.job) return;
@@ -182,7 +200,7 @@ async function pollAndRunJob(coordinatorUrl: string, token: string, spool: Agent
   const outputPath = spool.pendingPath(captureId);
   await mkdir(path.dirname(outputPath), { recursive: true });
   try {
-    await runFfmpeg(
+    const result = await captureWithValidation(
       {
         device: next.job.camera.devicePath,
         width: next.job.settings.width,
@@ -190,7 +208,12 @@ async function pollAndRunJob(coordinatorUrl: string, token: string, spool: Agent
         inputFormat: next.job.settings.inputFormat,
       },
       outputPath,
-      { warmup: true },
+      {
+        captureAttempts: next.job.settings.captureAttempts,
+        fallback: next.job.settings.fallback,
+        spoolRoot: spool.root,
+        captureId,
+      },
     );
     await spool.recordCaptured({
       jobId: next.job.id,
@@ -198,17 +221,171 @@ async function pollAndRunJob(coordinatorUrl: string, token: string, spool: Agent
       assignmentId: next.job.assignmentId,
       captureSourceId: next.job.captureSourceId,
       localFilePath: outputPath,
-      capturedAt: new Date(),
+      capturedAt: result.capturedAt,
+      metadata: result.metadata,
     });
     log("info", "Frame captured to durable spool", { jobId: next.job.id, captureId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const metadata = error instanceof CaptureFailedError ? error.metadata : undefined;
     await requestJson(`${coordinatorUrl}/api/agents/jobs/${next.job.id}/fail`, token, {
       method: "POST",
-      body: JSON.stringify({ error: message }),
+      body: JSON.stringify({ error: message, metadata }),
     }).catch(() => undefined);
     log("error", "Capture job failed", { jobId: next.job.id, error: message });
   }
+}
+
+type CaptureAttemptMetadata = {
+  mode: { width: number; height: number; input_format: string; frame_rate: string | null };
+  attempt: number;
+  fallback: boolean;
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number | null;
+  status: "accepted" | "failed";
+  errorCode: string | null;
+  errorMessage: string | null;
+  byteSize: number | null;
+  sha256: string | null;
+  rejectedArtifactPath: string | null;
+  validationStats?: unknown;
+};
+
+class CaptureFailedError extends Error {
+  readonly metadata: Record<string, unknown>;
+
+  constructor(message: string, attempts: CaptureAttemptMetadata[]) {
+    super(message);
+    this.name = "CaptureFailedError";
+    const last = attempts.at(-1) ?? null;
+    this.metadata = {
+      validationStatus: "rejected",
+      validationErrorCode: last?.errorCode ?? null,
+      attemptCount: attempts.length,
+      fallbackUsed: attempts.some((attempt) => attempt.status === "accepted" && attempt.fallback),
+      attempts,
+    };
+  }
+}
+
+async function preserveRejectedArtifact(spoolRoot: string, captureId: string, attempt: number, outputPath: string) {
+  const file = await stat(outputPath).catch(() => null);
+  if (!file || file.size <= 0) return null;
+  const date = new Date().toISOString().slice(0, 10);
+  const destination = path.join(spoolRoot, "diagnostics", "rejected-captures", date, `${captureId}-attempt-${attempt}.jpg`);
+  await mkdir(path.dirname(destination), { recursive: true });
+  await copyFile(outputPath, destination);
+  return destination;
+}
+
+async function captureWithValidation(
+  primary: { device: string; width: number; height: number; inputFormat: string },
+  outputPath: string,
+  options: {
+    captureAttempts?: number;
+    fallback?: { width: number; height: number; inputFormat?: string | null; frameRate?: string | null; attempts?: number } | null;
+    spoolRoot: string;
+    captureId: string;
+  },
+) {
+  const attempts: CaptureAttemptMetadata[] = [];
+  const sequences = [
+    { mode: primary, count: Math.max(1, options.captureAttempts ?? 2), fallback: false },
+    ...(options.fallback?.width && options.fallback.height
+      ? [
+          {
+            mode: {
+              device: primary.device,
+              width: options.fallback.width,
+              height: options.fallback.height,
+              inputFormat: options.fallback.inputFormat ?? primary.inputFormat,
+            },
+            count: Math.max(1, options.fallback.attempts ?? 1),
+            fallback: true,
+          },
+        ]
+      : []),
+  ];
+  const startedAt = new Date();
+
+  for (const sequence of sequences) {
+    for (let index = 0; index < sequence.count; index += 1) {
+      const attemptStartedAt = new Date();
+      const attempt: CaptureAttemptMetadata = {
+        mode: {
+          width: sequence.mode.width,
+          height: sequence.mode.height,
+          input_format: sequence.mode.inputFormat,
+          frame_rate: null,
+        },
+        attempt: attempts.length + 1,
+        fallback: sequence.fallback,
+        startedAt: attemptStartedAt.toISOString(),
+        completedAt: null,
+        durationMs: null,
+        status: "failed",
+        errorCode: null,
+        errorMessage: null,
+        byteSize: null,
+        sha256: null,
+        rejectedArtifactPath: null,
+      };
+      await unlink(outputPath).catch(() => undefined);
+      try {
+        await runFfmpeg(sequence.mode, outputPath, { warmup: true });
+        const validation = await validateImageFile(outputPath, {
+          expectedWidth: sequence.mode.width,
+          expectedHeight: sequence.mode.height,
+          expectedFormat: "jpeg",
+        });
+        const file = await stat(outputPath);
+        attempt.status = "accepted";
+        attempt.byteSize = file.size;
+        attempt.sha256 = await sha256File(outputPath);
+        attempt.validationStats = validation.stats;
+        attempt.completedAt = new Date().toISOString();
+        attempt.durationMs = Date.now() - attemptStartedAt.getTime();
+        attempts.push(attempt);
+        return {
+          capturedAt: new Date(),
+          metadata: {
+            captureStartedAt: startedAt.toISOString(),
+            frameCapturedAt: attempt.completedAt,
+            captureDurationMs: Date.now() - startedAt.getTime(),
+            effectiveWidth: sequence.mode.width,
+            effectiveHeight: sequence.mode.height,
+            effectiveInputFormat: sequence.mode.inputFormat,
+            effectiveFrameRate: null,
+            attemptCount: attempts.length,
+            fallbackUsed: sequence.fallback,
+            validationStatus: "accepted",
+            validationErrorCode: null,
+            attempts,
+          },
+        };
+      } catch (error) {
+        attempt.errorCode = error instanceof ImageValidationError ? error.code : "camera-capture-failed";
+        attempt.errorMessage = error instanceof Error ? error.message : String(error);
+        const file = await stat(outputPath).catch(() => null);
+        if (file && file.size > 0) {
+          attempt.byteSize = file.size;
+          attempt.sha256 = await sha256File(outputPath);
+          attempt.rejectedArtifactPath = await preserveRejectedArtifact(options.spoolRoot, options.captureId, attempt.attempt, outputPath);
+        }
+        if (error instanceof ImageValidationError) {
+          attempt.validationStats = error.stats;
+        }
+        attempt.completedAt = new Date().toISOString();
+        attempt.durationMs = Date.now() - attemptStartedAt.getTime();
+        attempts.push(attempt);
+      }
+    }
+  }
+
+  await unlink(outputPath).catch(() => undefined);
+  const last = attempts.at(-1);
+  throw new CaptureFailedError(`camera-fallback-exhausted: ${last?.errorMessage ?? "No capture attempts ran."}`, attempts);
 }
 
 async function main() {
